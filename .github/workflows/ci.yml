@@ -115,6 +115,20 @@ jobs:
           docker compose exec -T rbac-bot python scripts/verify_chroma_persistence.py --phase verify
           docker compose exec -T rbac-bot python scripts/verify_chroma_persistence.py --phase cleanup
 
+      - name: Verify SQLite, raw PDF and review persistence across rbac-bot restart
+        run: |
+          docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase write
+          docker compose restart rbac-bot
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' rbac-bot)
+            if [ "$status" = "healthy" ]; then
+              break
+            fi
+            sleep 2
+          done
+          docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase verify
+          docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase cleanup
+
       - name: Dump container logs on failure
         if: failure()
         run: docker compose logs --no-color

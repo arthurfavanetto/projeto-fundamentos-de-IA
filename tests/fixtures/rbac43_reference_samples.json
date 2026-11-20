@@ -1,0 +1,58 @@
+{
+  "document_id": "anac_rbac_43",
+  "regulation_number": "43",
+  "amendment_number": "05",
+  "official_url": "https://www.anac.gov.br/assuntos/legislacao/legislacao-1/rbha-e-rbac/rbac/rbac-43",
+  "source_url": "https://pergamum.anac.gov.br/pergamum/vinculos/RBAC43EMD05.pdf",
+  "verified_at": "2026-11-20T22:55:00Z",
+  "expected_sha256": "5026d2da87fc3f55c61a6b5a20dd1f50d52a1367a8550897f3864074e1a46472",
+  "expected_total_pages": 32,
+  "expected_root_sections_count": 19,
+  "samples": [
+    {
+      "section_number": "43.1",
+      "expected_pdf_pages": [2],
+      "expected_printed_pages": ["2/32"],
+      "expected_verbatim_fragments": [
+        "43.1 Aplicabilidade",
+        "(a) Este regulamento estabelece regras para manutenção, manutenção preventiva, reconstrução e",
+        "(1) aeronave que possua um certificado de aeronavegabilidade brasileiro;",
+        "(2) [reservado]; e",
+        "(3) célula, motor, hélice, acessório, componente e partes de tal aeronave."
+      ]
+    },
+    {
+      "section_number": "43.1-I",
+      "expected_pdf_pages": [2, 3],
+      "expected_printed_pages": ["2/32", "3/32"],
+      "expected_verbatim_fragments": [
+        "43.1-I Definições",
+        "(a) Artigo significa uma aeronave, célula, motor, hélice, acessório, componente ou suas partes.",
+        "Para efeito deste regulamento, artigo tem o mesmo significado de produto aeronáutico.",
+        "(b) [Reservado]. (Redação dada pela Resolução nº 612, de 09.03.2021)"
+      ]
+    },
+    {
+      "section_number": "43.12",
+      "expected_pdf_pages": [11],
+      "expected_printed_pages": ["11/32"],
+      "expected_verbatim_fragments": [
+        "43.12 Registros de manutenção – falsificação, reprodução ou alteração",
+        "(a) Ninguém pode fazer ou induzir que seja feita:",
+        "(1) qualquer anotação fraudulenta ou intencionalmente falsa em qualquer registro ou relatório",
+        "(3) qualquer alteração, com propósito fraudulento, de qualquer registro ou relatório requerido"
+      ]
+    },
+    {
+      "section_number": "43.16",
+      "expected_pdf_pages": [13],
+      "expected_printed_pages": ["13/32"],
+      "expected_verbatim_fragments": [
+        "43.16 Limitações de aeronavegabilidade",
+        "Cada pessoa que estiver executando uma inspeção ou outra manutenção especificada em uma seção",
+        "conforme especificações operativas emitidas segundo os RBAC nº 121 ou 135 ou,",
+        "(Redação dada pela Resolução nº 612, de 09.03.2021)"
+      ]
+    }
+  ]
+}

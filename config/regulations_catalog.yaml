@@ -1,35 +1,48 @@
 # ==============================================================================
-# RBAC AI Assistant — Catálogo Oficial de Regulamentos ANAC
+# RBAC AI Assistant — Manifesto Declarativo de Semente do Catálogo ANAC
 # ==============================================================================
-# Manifesto mestre de regulamentos homologados para ingestão no sistema.
+# Este arquivo atua como manifesto declarativo de seed/referência para cadastro
+# inicial no catálogo SQLite (/app/data/documents/catalog.sqlite3), que é a fonte
+# única de verdade (SSOT) em tempo de execução.
 #
-# PROTOCOLO MANDATÓRIO PRÉ-INGESTÃO (ver docs/operations/03_ingestion_runbook.md):
-# Nunca presumir que uma emenda histórica permanece vigente. Antes de ingerir
-# qualquer PDF, consulte o portal oficial da ANAC e registre:
-#   - Número exato da emenda vigente e resolução aprovadora
-#   - Status jurídico (VIGENTE | REVOGADO | ALTERADO PARCIALMENTE)
-#   - Datas oficiais de publicação e início de vigência (ISO-8601)
-#   - URL oficial exata do PDF na ANAC e timestamp da consulta
-#   - Hash SHA-256 calculado sobre o arquivo PDF oficial baixado
+# GOVERNANÇA ANAC:
+# - Nunca presumir que uma emenda histórica permanece vigente sem verificação.
+# - Consultas públicas NÃO são normas vigentes.
+# - PDFs oficiais não são versionados no Git (armazenados no volume persistente).
 
-schema_version: "1.0"
+schema_version: "2.0"
 
 regulations:
-  # Exemplo estrutural pendente de homologação oficial na ANAC (Etapa 2):
-  - document_id: "rbac_43_pending_verification"
-    regulation_number: "RBAC 43"
+  - document_id: "anac_rbac_43"
+    authority: "ANAC"
+    document_type: "RBAC"
+    regulation_number: "43"
     regulation_name: "Regulamento Brasileiro da Aviação Civil nº 43"
     document_title: "Manutenção, Manutenção Preventiva, Reconstrução e Alteração"
-    amendment_number: "PENDING_ANAC_VERIFICATION"
-    resolution_number: "PENDING_ANAC_VERIFICATION"
-    publication_date: "PENDING"
-    effective_date: "PENDING"
-    vigencia_status: "PENDING_VERIFICATION"  # VIGENTE | REVOGADO | ALTERADO PARCIALMENTE
-    is_current_amendment: false
-    official_url: "PENDING_ANAC_OFFICIAL_URL"
-    consulted_at: "PENDING"
-    pdf_filename: "PENDING.pdf"
-    expected_sha256: "PENDING_SHA256"
+    amendment_number: "05"
+    resolution_number: "Resolução nº 612, de 09/03/2021"
+    publication_date: "2021-03-15"
+    effective_date: "2021-05-26"
+    expiration_date: null
+    document_status: "active"
+    version_status: "current"
+    is_current_amendment: true
+    official_url: "https://www.anac.gov.br/assuntos/legislacao/legislacao-1/rbha-e-rbac/rbac/rbac-43"
+    source_url: "https://pergamum.anac.gov.br/pergamum/vinculos/RBAC43EMD05.pdf"
+    consulted_at: "2026-11-20T22:55:00Z"
+    pdf_filename: "RBAC43EMD05.pdf"
+    expected_sha256: "5026d2da87fc3f55c61a6b5a20dd1f50d52a1367a8550897f3864074e1a46472"
+    subject_categories:
+      - "manutencao"
+      - "manutencao_preventiva"
+      - "reconstrucao"
+      - "alteracao"
+      - "aeronavegabilidade"
+    document_description: >
+      Estabelece requisitos aplicáveis à manutenção, manutenção preventiva,
+      reconstrução e alteração de produtos aeronáuticos civis sob jurisdição da ANAC.
     notes: >
-      Registro placeholder criado na Etapa 0. Preencher exclusivamente após
-      conferência direta no portal oficial de legislação da ANAC antes da Etapa 2.
+      Verificado em 2026-11-20 diretamente no portal oficial da ANAC e no Pergamum ANAC.
+      A Consulta Pública nº 07/2026 (proposta de Emenda nº 06 ao RBAC 43) encontra-se
+      encerrada com sugestões em fase de análise, sem Resolução publicada até a data
+      da consulta — portanto, NÃO constitui norma vigente.

@@ -37,6 +37,10 @@ class Citation:
     official_url: str
     paragraph_number: str = ""
     item_number: str = ""
+    document_id: str = ""
+    version_id: str = ""
+    authority: str = "ANAC"
+    document_type: str = "RBAC"
 
     @property
     def has_unvalidated_pages(self) -> bool:
