@@ -1,0 +1,23 @@
+# ==============================================================================
+# RBAC AI Assistant — Controle de Acesso Operacional (Template Seguro)
+# ==============================================================================
+# Copie este arquivo para `config/access_control.yaml` no ambiente local/VPS e
+# preencha os Telegram User IDs numéricos autorizados.
+#
+# SEGURANÇA:
+# - `config/access_control.yaml` está no `.gitignore` para não expor IDs reais
+#   em repositórios públicos.
+# - Política padrão: DENY-BY-DEFAULT (qualquer ID ausente é bloqueado antes do RAG/LLM).
+# - A verificação ocorre deterministicamente em Python (nunca delegada ao LLM).
+
+policy:
+  deny_by_default: true
+
+roles:
+  # ADMIN: consultas normativas + diagnósticos detalhados (/status) + comandos administrativos
+  admins:
+    - 111111111  # Substituir pelo Telegram User ID numérico do administrador
+
+  # USER: consultas normativas (/start, /help, /status, /rbac, /buscar, /explicar, /documentos, /versao + texto livre)
+  users:
+    - 222222222  # Substituir pelo Telegram User ID numérico do usuário autorizado

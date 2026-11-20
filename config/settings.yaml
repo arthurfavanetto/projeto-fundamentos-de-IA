@@ -1,0 +1,48 @@
+# ==============================================================================
+# RBAC AI Assistant — Configurações Operacionais Não-Sensíveis
+# ==============================================================================
+# Nenhuma credencial, token ou Telegram User ID deve ser inserido neste arquivo.
+
+app:
+  name: "rbac-ai-assistant"
+  domain: "Regulamentação Aeronáutica Brasileira (ANAC)"
+  default_language: "pt-BR"
+
+storage:
+  documents_dir: "/app/data/documents"
+  raw_pdfs_subdir: "raw_pdfs"
+  canonical_store_subdir: "canonical_store"
+  audit_logs_dir: "/app/logs"
+
+extraction:
+  # Extração nativa prioritária; OCR acionado apenas por página abaixo do limiar
+  min_native_chars_per_page: 50
+  ocr_language: "por"
+  # Política para páginas extraídas via OCR até validação humana (confirmar antes da Etapa 2)
+  # Valores possíveis: "warn_banner" | "block_until_reviewed"
+  ocr_unreviewed_policy: "warn_banner"
+
+chunking:
+  # Preserva seções completas dentro da janela alvo; divide por parágrafos quando exceder
+  max_chunk_tokens: 1200
+  overlap_tokens: 0
+  preserve_hierarchy: true
+
+retrieval:
+  semantic_top_k: 5
+  only_current_amendment_by_default: true
+  reconstruct_full_section_from_ssot: true
+
+telegram:
+  mode: "long_polling"
+  max_message_length: 4096
+  polling_timeout_seconds: 30
+
+security:
+  deny_by_default: true
+  rate_limit:
+    requests_per_minute: 15
+    burst_size: 5
+  audit:
+    pseudonymize_user_ids: false
+    redact_secrets: true
