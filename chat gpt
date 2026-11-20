@@ -144,8 +144,126 @@ O processo será:
 6. O Ollama recebe a pergunta e os trechos recuperados.
 7. O modelo formula uma resposta fundamentada no material fornecido.
 8. Python envia a resposta ao Telegram.
+
 Um exemplo de resposta esperada:
+Assistente RBAC
+
+Exemplo ilustrativo
+
+Para responder à sua pergunta, foram identificados os seguintes pontos na documentação:
+
+1. Requisitos aplicáveis
+
+O procedimento de certificação deve observar os requisitos previstos no regulamento aplicável.
+
+2. Documentação
+
+Devem ser atendidas as exigências documentais e técnicas pertinentes ao processo.
+
+Referências consultadas:
+- RBAC 21 — seção aplicável.
+- Emenda e versão consultadas.
+- Página do documento de origem.
+
+A grande vantagem é que a IA não precisa inventar a norma com base no que aprendeu durante o treinamento. Ela recebe os trechos pertinentes antes de elaborar a resposta.
+
+ 6. Um cuidado muito importante: versões das normas
+Existe um detalhe que eu considero essencial para tornar esse projeto realmente especializado.
+
+O repositório precisa controlar as emendas e as datas de vigência.
+
+Por exemplo, o acervo da ANAC lista o RBAC 21 EMD 16 com duas versões: uma aplicável até 7 de abril de 2027 e outra com vigência a partir de 8 de abril de 2027. 
+Agência Nacional de Aviação Civil ANAC
 
 
+Portanto, se vocês simplesmente inserirem as duas versões no banco, a IA poderá recuperar uma regra que ainda não está vigente na data da pergunta.
 
-  
+Minha recomendação é cadastrar estes metadados:
+Campo	               Exemplo
+Regulamento	         RBAC 21
+Emenda	             16
+Data de publicação	 22/10/2026
+Início da vigência   08/04/2027
+Final da vigência  	 Conforme documento
+Seção/item   	       Identificação exata
+Página        	     Página de origem
+Fonte          	     Link oficial ANAC
+
+Também manteria versões anteriores para consultas históricas.
+
+Isso permitirá que o usuário pergunte tanto sobre a norma vigente quanto sobre uma versão anterior em determinada data. 
+
+7. Como eu organizaria o projeto no computador central
+Considerando que vocês já possuem Docker Desktop e Ollama, minha sugestão é começar com esta estrutura:
+
+PROJETO_RBAC/
+│
+├── bot/
+│   ├── main.py
+│   ├── telegram_handler.py
+│   └── config.py
+│
+├── rag/
+│   ├── retriever.py
+│   ├── embeddings.py
+│   ├── generator.py
+│   └── prompts.py
+│
+├── ingestion/
+│   ├── importar_pdfs.py
+│   └── atualizar_base.py
+│
+├── documentos/
+│   ├── originais/
+│   └── processados/
+│
+├── docker-compose.yml
+├── requirements.txt
+└── .env
+
+A divisão de responsabilidades seria:
+Componente	              Onde executar inicialmente
+Ollama	                  Windows, instalado diretamente
+Qdrant	                  Docker Desktop
+Python / Telegram Bot	    Windows, em ambiente virtual
+PDFs originais	          Pasta do projeto
+Processamento RAG        	Python
+
+Essa configuração evita, inicialmente, complicações de comunicação entre containers e o Ollama.
+
+O Qdrant pode ser iniciado pelo Docker com armazenamento persistente, conforme o próprio guia oficial. 
+Qdrant
+
+Depois, quando tudo estiver funcionando, vocês podem colocar também o bot Python em um container.
+
+O computador central precisa permanecer ligado e conectado à internet enquanto o bot estiver atendendo. 
+O Ollama e o banco vetorial podem permanecer locais.
+
+8. O que eu escolheria para o trabalho
+Arquitetura recomendada
+Telegram Bot    Interface
+Python          Integração
+Ollama + Qwen   Geração
+EmbeddingGemma  Embeddings
+Qdrant          Busca vetorial
+Docker Desktop  Infraestrutura
+
+Como você já havia comentado anteriormente que a máquina disponível tinha apenas 4 GB de RAM, vale ter atenção: executar o modelo de linguagem, embeddings, Qdrant e Docker simultaneamente pode ser bastante limitado. Se ainda for a mesma máquina, eu começaria com a infraestrutura mínima e mediria o consumo antes de adicionar serviços. 
+
+9. Como dividiria o desenvolvimento
+Para que o projeto tenha uma entrega técnica bem definida, dividiria o trabalho em três frentes:
+
+Frente 1 — Telegram e integração: criar o bot, configurar o token, desenvolver o backend Python e fazer a comunicação com o Ollama.
+
+Frente 2 — Inteligência artificial e RAG: selecionar o modelo, configurar embeddings, desenvolver a busca vetorial e criar as instruções para responder exclusivamente com base nas normas.
+
+Frente 3 — Repositório documental e infraestrutura: obter as normas oficiais, processar os PDFs, organizar versões, configurar o Qdrant e preparar o Docker.
+
+As três frentes precisam se integrar no computador central.
+
+Minha recomendação: não comecem tentando construir um sistema inteiro de uma vez. Primeiro façam o Telegram conversar com o Ollama. Depois conectem o Qdrant. Por último, implementem o processamento dos RBAC. Assim, vocês conseguem testar cada etapa separadamente e identificar onde está qualquer problema.
+
+Uma etapa complementar muito útil seria monitorar semanalmente o acervo da ANAC para identificar novas emendas e avisar a equipe quando a base documental precisar ser atualizada.
+
+Quer que eu monitore essas publicações toda segunda-feira?
+
