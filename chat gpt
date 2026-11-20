@@ -236,7 +236,34 @@ Qdrant
 
 Depois, quando tudo estiver funcionando, vocês podem colocar também o bot Python em um container.
 
-O computador central precisa permanecer ligado e conectado à internet enquanto o bot estiver atendendo. O Ollama e o banco vetorial podem permanecer locais.
+O computador central precisa permanecer ligado e conectado à internet enquanto o bot estiver atendendo. 
+O Ollama e o banco vetorial podem permanecer locais.
 
+8. O que eu escolheria para o trabalho
+Arquitetura recomendada
+Telegram Bot    Interface
+Python          Integração
+Ollama + Qwen   Geração
+EmbeddingGemma  Embeddings
+Qdrant          Busca vetorial
+Docker Desktop  Infraestrutura
 
+Como você já havia comentado anteriormente que a máquina disponível tinha apenas 4 GB de RAM, vale ter atenção: executar o modelo de linguagem, embeddings, Qdrant e Docker simultaneamente pode ser bastante limitado. Se ainda for a mesma máquina, eu começaria com a infraestrutura mínima e mediria o consumo antes de adicionar serviços. 
+
+9. Como dividiria o desenvolvimento
+Para que o projeto tenha uma entrega técnica bem definida, dividiria o trabalho em três frentes:
+
+Frente 1 — Telegram e integração: criar o bot, configurar o token, desenvolver o backend Python e fazer a comunicação com o Ollama.
+
+Frente 2 — Inteligência artificial e RAG: selecionar o modelo, configurar embeddings, desenvolver a busca vetorial e criar as instruções para responder exclusivamente com base nas normas.
+
+Frente 3 — Repositório documental e infraestrutura: obter as normas oficiais, processar os PDFs, organizar versões, configurar o Qdrant e preparar o Docker.
+
+As três frentes precisam se integrar no computador central.
+
+Minha recomendação: não comecem tentando construir um sistema inteiro de uma vez. Primeiro façam o Telegram conversar com o Ollama. Depois conectem o Qdrant. Por último, implementem o processamento dos RBAC. Assim, vocês conseguem testar cada etapa separadamente e identificar onde está qualquer problema.
+
+Uma etapa complementar muito útil seria monitorar semanalmente o acervo da ANAC para identificar novas emendas e avisar a equipe quando a base documental precisar ser atualizada.
+
+Quer que eu monitore essas publicações toda segunda-feira?
 
