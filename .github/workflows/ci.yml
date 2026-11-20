@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  quality-and-tests:
+    name: Lint, Typecheck & Pytest (Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.13.8"
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint with ruff
+        run: uv run ruff check src tests scripts
+
+      - name: Typecheck with mypy
+        run: uv run mypy src
+
+      - name: Run pytest with coverage
+        run: uv run pytest --cov=rbac_assistant --cov-report=term-missing
+
+  docker-smoke-test:
+    name: Docker Non-Root, Heartbeat & Persistence Smoke Test
+    runs-on: ubuntu-latest
+    needs: [quality-and-tests]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml syntax
+        run: docker compose config --quiet
+
+      - name: Build and start services
+        run: docker compose up -d --build
+
+      - name: Wait for chromadb and rbac-bot to report healthy
+        run: |
+          for service in rbac-chromadb rbac-bot; do
+            echo "Waiting for $service to become healthy..."
+            for i in $(seq 1 30); do
+              status=$(docker inspect --format='{{.State.Health.Status}}' "$service")
+              echo "  [$i/30] $service status=$status"
+              if [ "$status" = "healthy" ]; then
+                break
+              fi
+              if [ "$i" -eq 30 ]; then
+                echo "ERROR: $service did not become healthy in time"
+                docker compose logs
+                exit 1
+              fi
+              sleep 2
+            done
+          done
+
+      - name: Verify non-root UID/GID 10001 and network isolation
+        run: |
+          chroma_uid=$(docker compose exec -T chromadb id -u)
+          chroma_gid=$(docker compose exec -T chromadb id -g)
+          bot_uid=$(docker compose exec -T rbac-bot id -u)
+          bot_gid=$(docker compose exec -T rbac-bot id -g)
+          echo "chromadb uid:gid = ${chroma_uid}:${chroma_gid}"
+          echo "rbac-bot uid:gid = ${bot_uid}:${bot_gid}"
+          test "$chroma_uid" = "10001"
+          test "$chroma_gid" = "10001"
+          test "$bot_uid" = "10001"
+          test "$bot_gid" = "10001"
+
+          data_owner=$(docker compose exec -T chromadb stat -c '%u:%g' /data)
+          echo "chromadb /data owner = ${data_owner}"
+          test "$data_owner" = "10001:10001"
+
+          if docker compose port chromadb 8000 >/dev/null 2>&1; then
+            echo "ERROR: chromadb port 8000 must not be published on the host!"
+            exit 1
+          fi
+          echo "[OK] Port 8000 is not exposed publicly."
+
+      - name: Verify ChromaDB write, read and persistence across container restart
+        run: |
+          docker compose exec -T rbac-bot python -m rbac_assistant.healthcheck
+          docker compose exec -T rbac-bot python scripts/verify_chroma_persistence.py --phase write
+          docker compose restart chromadb
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' rbac-chromadb)
+            if [ "$status" = "healthy" ]; then
+              break
+            fi
+            sleep 2
+          done
+          docker compose exec -T rbac-bot python scripts/verify_chroma_persistence.py --phase verify
+          docker compose exec -T rbac-bot python scripts/verify_chroma_persistence.py --phase cleanup
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Tear down containers and volumes
+        if: always()
+        run: docker compose down -v

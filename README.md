@@ -67,7 +67,7 @@ Arquivos com segredos, Telegram User IDs reais ou PDFs oficiais **nunca são ver
 ## Roadmap de Implementação
 
 - [x] **Etapa 0 — Arquitetura e Documentação:** Estrutura `src-layout`, ADRs, guias operacionais, `.gitignore`, `.dockerignore` e templates de configuração.
-- [ ] **Etapa 1 — Fundação Python e Docker:** `pyproject.toml`, `settings.py`, fundação hexagonal, `Dockerfile` (multi-stage non-root) e `docker-compose.yml` (`rbac-bot` + `chromadb`).
+- [x] **Etapa 1 — Fundação Python e Docker:** `pyproject.toml`, `settings.py`, fundação hexagonal, `Dockerfile` (multi-stage non-root), `docker/chromadb.Dockerfile` (`1.5.9` non-root) e `docker-compose.yml` (`rbac-bot` + `chromadb`).
 - [ ] **Etapa 2 — Ingestão e Estruturação do RBAC 43:** Protocolo ANAC, extração nativa + OCR condicional, parser hierárquico ANAC e `Canonical Store` (SSOT).
 - [ ] **Etapa 3 — Gemini e Motor RAG Híbrido:** Adaptador `google-genai`, ChromaDB com 18 metadados, busca determinística + semântica e `ResponseFormatter` dual.
 - [ ] **Etapa 4 — Interface Telegram e Controle de Acesso:** Bot Long Polling, middleware `ADMIN`/`USER`, comandos (`/start`, `/help`, `/status`, `/rbac`, `/buscar`, `/explicar`, `/documentos`, `/versao`) e `MessageSplitter`.
