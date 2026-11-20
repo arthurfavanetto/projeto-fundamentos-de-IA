@@ -18,9 +18,15 @@ extraction:
   # Extração nativa prioritária; OCR acionado apenas por página abaixo do limiar
   min_native_chars_per_page: 50
   ocr_language: "por"
-  # Política para páginas extraídas via OCR até validação humana (confirmar antes da Etapa 2)
-  # Valores possíveis: "warn_banner" | "block_until_reviewed"
-  ocr_unreviewed_policy: "warn_banner"
+  # Política aprovada: bloqueio individual por página que dependa de OCR até revisão manual
+  ocr_unreviewed_policy: "block_until_reviewed"
+  require_integrity_check_for_native_pages: true
+
+vector_db:
+  provider: "chromadb"
+  pinned_version: "1.5.9"
+  heartbeat_path: "/api/v2/heartbeat"
+  request_timeout_seconds: 5.0
 
 chunking:
   # Preserva seções completas dentro da janela alvo; divide por parágrafos quando exceder

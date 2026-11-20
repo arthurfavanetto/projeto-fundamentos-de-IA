@@ -1,0 +1,79 @@
+services:
+  chromadb:
+    build:
+      context: ./docker
+      dockerfile: chromadb.Dockerfile
+    container_name: rbac-chromadb
+    restart: unless-stopped
+    expose:
+      - "8000"
+    volumes:
+      - chroma_data:/data
+    networks:
+      - rbac_internal_net
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          'exec 3<>/dev/tcp/127.0.0.1/8000 && printf "GET /api/v2/heartbeat HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3 && grep -q "200 OK" <&3',
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1536M
+
+  rbac-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rbac-bot
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      chromadb:
+        condition: service_healthy
+    volumes:
+      - regulatory_documents:/app/data/documents
+      - audit_logs:/app/logs
+    networks:
+      - rbac_internal_net
+      - rbac_egress_net
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
+
+networks:
+  rbac_internal_net:
+    driver: bridge
+    internal: true
+  rbac_egress_net:
+    driver: bridge
+
+volumes:
+  chroma_data:
+  regulatory_documents:
+  audit_logs:

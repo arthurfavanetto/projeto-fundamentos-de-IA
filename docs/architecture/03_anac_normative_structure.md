@@ -29,11 +29,12 @@ O parser estrutural (`rag/ingestion/structure_parser.py`) deve reconhecer e pres
 - Preserva simultaneamente a **página física do PDF** (`pdf_page_number`, 1-based).
 - Preserva tabelas normativas em formato tabular estruturado sem embaralhar colunas.
 
-### 2.2. OCR Condicional por Página (Anti-OCR Indiscriminado)
+### 2.2. OCR Condicional por Página e Política `block_until_reviewed`
 - O OCR (`Tesseract` com idioma `por`) só é acionado para **páginas individuais** cuja camada de texto nativo fique abaixo do limiar configurado (`min_native_chars_per_page`).
-- Páginas nativas recebem `extraction_method="native_pdf"`.
-- Páginas processadas via OCR recebem `extraction_method="ocr_fallback"` e `extraction_validation_status="requires_review"`.
-- Até validação humana contra o PDF oficial, seções contendo trechos de OCR devem seguir a política configurada (`warn_banner` ou `block_until_reviewed`).
+- Cada página carrega metadados explícitos de `extraction_method` (`"native_pdf"` ou `"ocr_fallback"`) e `validation_status` (`"validated"`, `"blocked_unreviewed"`, `"pending_review"` ou `"failed"`).
+- **Política aprovada (`block_until_reviewed`):** toda página que depender de OCR fica **bloqueada individualmente** para transcrição normativa literal até ser revisada manualmente e aprovada.
+- Páginas extraídas diretamente do PDF (`native_pdf`) também passam por verificações de integridade e preservação textual antes de receber o status `"validated"`.
+- Quando uma seção abranger qualquer página não validada, o sistema sinaliza explicitamente que **não pode garantir a transcrição literal completa** daquela seção.
 
 ### 2.3. Normalização Não-Destrutiva
 - Remove apenas quebras de linha artificiais no meio de uma frase decorrentes da largura da coluna do PDF (*unhyphenation* conservadora).

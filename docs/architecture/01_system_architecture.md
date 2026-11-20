@@ -224,10 +224,10 @@ EXPLICAÇÃO:
 - Paginação inteligente (`MessageSplitter`) respeitando o limite de 4.096 caracteres sem resumir ou truncar o texto normativo.
 
 ### Contêineres Docker e Volumes
-- **Container 1 (`rbac-bot`):** `python:3.12-slim-bookworm`, build multi-stage com `uv`, usuário non-root (`appuser`, UID `10001`), zero portas publicadas no host, limites sugeridos `1.0 CPU / 1024M RAM`.
-- **Container 2 (`chromadb`):** `chromadb/chroma:<versão-fixada>`, non-root, isolado exclusivamente na rede interna `rbac_internal_net` (sem `ports:` no host), limites sugeridos `1.0 CPU / 1536M RAM`.
-- **Volumes nomeados:** `regulatory_documents` (`/app/data/documents`), `chroma_data` (`/chroma/chroma`) e `audit_logs` (`/app/logs`).
-- **Resiliência:** `restart: unless-stopped` e healthchecks compatíveis com a versão pinada do ChromaDB.
+- **Container 1 (`rbac-bot`):** `python:3.12-slim-bookworm`, build multi-stage com `uv`, usuário non-root (`appuser`, UID/GID `10001`), zero portas publicadas no host, limites sugeridos `1.0 CPU / 1024M RAM`.
+- **Container 2 (`chromadb`):** `docker/chromadb.Dockerfile` mínimo baseado na imagem oficial `chromadb/chroma:1.5.9` (UID/GID `10001` non-root, preservando `ENTRYPOINT` e `CMD` oficiais), isolado exclusivamente na rede interna `rbac_internal_net` (sem `ports:` no host), limites sugeridos `1.0 CPU / 1536M RAM`.
+- **Volumes nomeados:** `regulatory_documents` (`/app/data/documents`), `chroma_data` (`/data`) e `audit_logs` (`/app/logs`).
+- **Resiliência:** `restart: unless-stopped` e healthcheck no endpoint oficial `GET /api/v2/heartbeat` do ChromaDB 1.5.9.
 
 ---
 
