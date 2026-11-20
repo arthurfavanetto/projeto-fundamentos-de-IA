@@ -88,8 +88,14 @@ jobs:
           echo "chromadb /data owner = ${data_owner}"
           test "$data_owner" = "10001:10001"
 
-          if docker compose port chromadb 8000 >/dev/null 2>&1; then
+          published_ports=$(docker inspect --format='{{json .NetworkSettings.Ports}}' rbac-chromadb)
+          echo "chromadb NetworkSettings.Ports = ${published_ports}"
+          if [ "$published_ports" != '{"8000/tcp":null}' ] && [ "$published_ports" != '{}' ]; then
             echo "ERROR: chromadb port 8000 must not be published on the host!"
+            exit 1
+          fi
+          if curl -sf --max-time 2 http://127.0.0.1:8000/api/v2/heartbeat >/dev/null 2>&1; then
+            echo "ERROR: chromadb responded on host localhost:8000!"
             exit 1
           fi
           echo "[OK] Port 8000 is not exposed publicly."
