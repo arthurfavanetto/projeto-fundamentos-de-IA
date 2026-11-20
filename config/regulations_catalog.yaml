@@ -1,0 +1,35 @@
+# ==============================================================================
+# RBAC AI Assistant — Catálogo Oficial de Regulamentos ANAC
+# ==============================================================================
+# Manifesto mestre de regulamentos homologados para ingestão no sistema.
+#
+# PROTOCOLO MANDATÓRIO PRÉ-INGESTÃO (ver docs/operations/03_ingestion_runbook.md):
+# Nunca presumir que uma emenda histórica permanece vigente. Antes de ingerir
+# qualquer PDF, consulte o portal oficial da ANAC e registre:
+#   - Número exato da emenda vigente e resolução aprovadora
+#   - Status jurídico (VIGENTE | REVOGADO | ALTERADO PARCIALMENTE)
+#   - Datas oficiais de publicação e início de vigência (ISO-8601)
+#   - URL oficial exata do PDF na ANAC e timestamp da consulta
+#   - Hash SHA-256 calculado sobre o arquivo PDF oficial baixado
+
+schema_version: "1.0"
+
+regulations:
+  # Exemplo estrutural pendente de homologação oficial na ANAC (Etapa 2):
+  - document_id: "rbac_43_pending_verification"
+    regulation_number: "RBAC 43"
+    regulation_name: "Regulamento Brasileiro da Aviação Civil nº 43"
+    document_title: "Manutenção, Manutenção Preventiva, Reconstrução e Alteração"
+    amendment_number: "PENDING_ANAC_VERIFICATION"
+    resolution_number: "PENDING_ANAC_VERIFICATION"
+    publication_date: "PENDING"
+    effective_date: "PENDING"
+    vigencia_status: "PENDING_VERIFICATION"  # VIGENTE | REVOGADO | ALTERADO PARCIALMENTE
+    is_current_amendment: false
+    official_url: "PENDING_ANAC_OFFICIAL_URL"
+    consulted_at: "PENDING"
+    pdf_filename: "PENDING.pdf"
+    expected_sha256: "PENDING_SHA256"
+    notes: >
+      Registro placeholder criado na Etapa 0. Preencher exclusivamente após
+      conferência direta no portal oficial de legislação da ANAC antes da Etapa 2.

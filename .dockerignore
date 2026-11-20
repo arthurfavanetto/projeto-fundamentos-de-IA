@@ -1,0 +1,35 @@
+# Controle de versão e CI
+.git/
+.gitignore
+.github/
+
+# Documentação e testes
+docs/
+tests/
+README.md
+
+# Ambientes virtuais e caches Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Segredos e dados locais (injetados via env/volumes em runtime)
+.env
+.env.*
+data/
+logs/
+*.pdf
+*.log
+*.jsonl
+
+# Editores e sistema operacional
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
