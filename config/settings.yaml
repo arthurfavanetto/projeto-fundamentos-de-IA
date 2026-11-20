@@ -10,17 +10,26 @@ app:
 
 storage:
   documents_dir: "/app/data/documents"
+  sqlite_filename: "catalog.sqlite3"
   raw_pdfs_subdir: "raw_pdfs"
+  extracted_subdir: "extracted"
+  reviews_subdir: "reviews"
   canonical_store_subdir: "canonical_store"
   audit_logs_dir: "/app/logs"
+  sqlite_busy_timeout_ms: 5000
 
 extraction:
-  # Extração nativa prioritária; OCR acionado apenas por página abaixo do limiar
+  # Extração nativa prioritária via pdfplumber (MIT); OCR opcional e desacoplado
   min_native_chars_per_page: 50
   ocr_language: "por"
-  # Política aprovada: bloqueio individual por página que dependa de OCR até revisão manual
+  # Política OCR preservada: páginas OCR ficam bloqueadas até revisão manual
   ocr_unreviewed_policy: "block_until_reviewed"
+  # Política híbrida de validação: strict_all_pages | review_on_demand | native_auto_ocr_manual
+  validation_policy: "review_on_demand"
   require_integrity_check_for_native_pages: true
+  max_pdf_size_mb: 50
+  max_pdf_pages: 1000
+  extraction_version: "2.0.0"
 
 vector_db:
   provider: "chromadb"

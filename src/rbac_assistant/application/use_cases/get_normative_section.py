@@ -1,0 +1,121 @@
+"""Caso de uso para reconstrução multi-página de seções normativas com validação híbrida."""
+
+from __future__ import annotations
+
+from rbac_assistant.application.dto.ingestion_dto import SectionLookupResultDTO
+from rbac_assistant.application.services.catalog_service import CatalogService
+from rbac_assistant.application.services.validation_service import ValidationService
+from rbac_assistant.domain.entities.normative_unit import (
+    NormativeSection,
+    NormativeUnitType,
+    StructureStatus,
+)
+from rbac_assistant.domain.entities.regulatory_document import ValidationPolicy
+from rbac_assistant.domain.ports.document_repository_port import DocumentRepositoryPort
+
+
+class GetNormativeSectionUseCase:
+    """Recupera e reconstrói uma seção completa respeitando a política de validação vigente."""
+
+    def __init__(
+        self,
+        *,
+        repository: DocumentRepositoryPort,
+        catalog_service: CatalogService,
+        validation_service: ValidationService,
+    ) -> None:
+        self._repository = repository
+        self._catalog_service = catalog_service
+        self._validation_service = validation_service
+
+    def execute(
+        self,
+        *,
+        document_id: str,
+        section_number: str,
+        version_id: str | None = None,
+        amendment_number: str | None = None,
+        policy: ValidationPolicy | None = None,
+    ) -> SectionLookupResultDTO:
+        document = self._catalog_service.get_document(document_id)
+        version = self._catalog_service.resolve_version(
+            document_id=document_id,
+            version_id=version_id,
+            amendment_number=amendment_number,
+        )
+
+        units = self._repository.get_units_by_section(
+            version_id=version.version_id,
+            section_number=section_number,
+        )
+        if not units:
+            return SectionLookupResultDTO(
+                found=False,
+                message=(
+                    f"Seção '{section_number}' não localizada em {document.document_type.value} "
+                    f"{document.regulation_number} (Emenda {version.amendment_number})."
+                ),
+            )
+
+        # Seleciona a unidade raiz da seção (SECTION ou APPENDIX), se presente
+        root_units = [
+            u
+            for u in units
+            if u.parent_unit_id is None
+            and u.unit_type in (NormativeUnitType.SECTION, NormativeUnitType.APPENDIX)
+        ]
+        primary = root_units[0] if root_units else units[0]
+
+        page_numbers = sorted({p for u in units for p in u.page_numbers})
+        pages = self._repository.get_pages(version.version_id, page_numbers=page_numbers)
+        tables = tuple(self._repository.list_tables(version.version_id, page_numbers=page_numbers))
+        references = tuple(primary.references)
+
+        structure_status = (
+            StructureStatus.PARSED
+            if all(u.structure_status == StructureStatus.PARSED for u in (root_units or [primary]))
+            else StructureStatus.PENDING_VALIDATION
+        )
+
+        assessment = self._validation_service.evaluate_section(
+            section_number=primary.section_number,
+            pages=pages,
+            structure_status=structure_status,
+            policy=policy,
+        )
+
+        printed_pages = tuple(
+            p.printed_page_number or f"PDF {p.pdf_page_number}" for p in pages
+        )
+        section = NormativeSection(
+            document_id=document.document_id,
+            version_id=version.version_id,
+            authority=document.authority,
+            document_type=document.document_type.value,
+            regulation_number=document.regulation_number,
+            amendment_number=version.amendment_number,
+            version_status=version.version_status.value,
+            section_number=primary.section_number,
+            title=primary.title,
+            original_text=primary.original_text,
+            normalized_text=primary.normalized_text,
+            start_page=min(page_numbers),
+            end_page=max(page_numbers),
+            pdf_pages=tuple(page_numbers),
+            printed_pages=printed_pages,
+            validation_status=assessment.aggregate_status.value,
+            structure_status=structure_status,
+            literal_transcription_allowed=assessment.literal_transcription_allowed,
+            pending_pdf_pages=assessment.pending_pdf_pages,
+            ocr_blocked_pdf_pages=assessment.ocr_blocked_pdf_pages,
+            warning_message=assessment.warning_message,
+            tables=tables,
+            references=references,
+        )
+
+        return SectionLookupResultDTO(
+            found=True,
+            section=section,
+            auxiliary_unreviewed_available=assessment.auxiliary_unreviewed_allowed,
+            message=assessment.warning_message or "Transcrição literal aprovada.",
+        )

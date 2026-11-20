@@ -14,10 +14,11 @@ class ExtractionMethod(StrEnum):
 
     NATIVE_PDF = "native_pdf"
     OCR_FALLBACK = "ocr_fallback"
+    OCR_REQUIRED_UNAVAILABLE = "ocr_required_unavailable"
 
 
 class ValidationStatus(StrEnum):
-    """Estado de validação textual individual de cada página ou dispositivo."""
+    """Estado de validação textual individual (compatível com Etapa 1)."""
 
     VALIDATED = "validated"
     BLOCKED_UNREVIEWED = "blocked_unreviewed"
@@ -26,30 +27,32 @@ class ValidationStatus(StrEnum):
 
 
 class NormativeUnitType(StrEnum):
-    """Níveis estruturais da hierarquia normativa oficial da ANAC."""
+    """Níveis estruturais da hierarquia normativa oficial da ANAC e documentos regulatórios."""
 
     PREAMBLE = "preamble"
+    CHAPTER = "chapter"
     SUBPART = "subpart"
     SECTION = "section"
+    SUBSECTION = "subsection"
     PARAGRAPH = "paragraph"
     INCISO = "inciso"
     ALINEA = "alinea"
     SUBITEM = "subitem"
     APPENDIX = "appendix"
+    TABLE = "table"
+    NOTE = "note"
+
+
+class StructureStatus(StrEnum):
+    """Confiança estrutural na delimitação automática de uma unidade normativa."""
+
+    PARSED = "parsed"
+    PENDING_VALIDATION = "pending_validation"
 
 
 @dataclass(frozen=True, slots=True)
 class PageExtractionMetadata:
-    """Metadados individuais por página garantindo a política `block_until_reviewed`.
-
-    Regras de invariante:
-    - Toda página (nativa ou OCR) deve carregar método de extração e estado de validação.
-    - Uma página que dependa de OCR (`OCR_FALLBACK`) só pode atingir `VALIDATED` após
-      revisão manual explícita (`reviewed_by` e `reviewed_at`) e aprovação nas verificações
-      de integridade textual (`integrity_checks_passed=True`).
-    - Uma página nativa (`NATIVE_PDF`) também exige `integrity_checks_passed=True` para
-      ser considerada `VALIDATED`.
-    """
+    """Metadados individuais por página garantindo a política `block_until_reviewed`."""
 
     pdf_page_number: int
     printed_page_number: str
@@ -112,8 +115,31 @@ class PageExtractionMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class NormativeTable:
+    """Tabela normativa extraída preservando linhas, colunas e página de origem."""
+
+    table_id: str
+    version_id: str
+    pdf_page_number: int
+    rows: tuple[tuple[str, ...], ...]
+    unit_id: str | None = None
+    caption: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class NormativeReference:
+    """Referência cruzada identificada no texto normativo (ex.: RBAC 145, seção 43.9)."""
+
+    reference_id: str
+    unit_id: str
+    target_regulation: str
+    target_section: str = ""
+    raw_citation: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class NormativeUnit:
-    """Unidade normativa estruturada de um RBAC (Seção, Parágrafo, Inciso, Apêndice etc.)."""
+    """Unidade normativa estruturada de um regulamento (Seção, Parágrafo, Inciso, Apêndice)."""
 
     document_id: str
     regulation_number: str
@@ -124,9 +150,19 @@ class NormativeUnit:
     exact_text: str
     pages: tuple[PageExtractionMetadata, ...]
     subpart: str = ""
+    subsection_number: str = ""
     paragraph_number: str = ""
     item_number: str = ""
     content_hash: str = ""
+    unit_id: str = ""
+    version_id: str = ""
+    parent_unit_id: str | None = None
+    normalized_text: str = ""
+    start_page: int = 1
+    end_page: int = 1
+    order_index: int = 0
+    structure_status: StructureStatus = StructureStatus.PARSED
+    validation_status: str = "pending_review"
 
     def __post_init__(self) -> None:
         if not self.section_number.strip():
@@ -142,11 +178,20 @@ class NormativeUnit:
     @property
     def can_guarantee_literal_transcription(self) -> bool:
         """Retorna True somente se todas as páginas abrangidas estiverem validadas."""
-        return len(self.unvalidated_pages) == 0
+        return (
+            self.structure_status == StructureStatus.PARSED
+            and len(self.unvalidated_pages) == 0
+        )
 
     @property
     def literal_transcription_warning(self) -> str | None:
         """Gera aviso explícito quando a seção abranger páginas não validadas ou bloqueadas."""
+        if self.structure_status != StructureStatus.PARSED:
+            return (
+                f"AVISO DE ESTRUTURA: A delimitação automática da seção {self.section_number} "
+                "está marcada como pendente de validação. O sistema não garante a transcrição "
+                "literal completa desta seção."
+            )
         unvalidated = self.unvalidated_pages
         if not unvalidated:
             return None
@@ -169,3 +214,32 @@ class NormativeUnit:
             blocked_pages = tuple(p.pdf_page_number for p in unvalidated)
             raise UnvalidatedPageBlockedError(self.section_number, blocked_pages)
         return self.exact_text
+
+
+@dataclass(frozen=True, slots=True)
+class NormativeSection:
+    """Seção normativa reconstruída em ordem (incluindo seções que atravessam páginas)."""
+
+    document_id: str
+    version_id: str
+    authority: str
+    document_type: str
+    regulation_number: str
+    amendment_number: str
+    version_status: str
+    section_number: str
+    title: str
+    original_text: str
+    normalized_text: str
+    start_page: int
+    end_page: int
+    pdf_pages: tuple[int, ...]
+    printed_pages: tuple[str, ...]
+    validation_status: str
+    structure_status: StructureStatus
+    literal_transcription_allowed: bool
+    pending_pdf_pages: tuple[int, ...] = ()
+    ocr_blocked_pdf_pages: tuple[int, ...] = ()
+    warning_message: str | None = None
+    tables: tuple[NormativeTable, ...] = ()
+    references: tuple[NormativeReference, ...] = ()

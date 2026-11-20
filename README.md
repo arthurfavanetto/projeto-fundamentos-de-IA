@@ -68,7 +68,7 @@ Arquivos com segredos, Telegram User IDs reais ou PDFs oficiais **nunca são ver
 
 - [x] **Etapa 0 — Arquitetura e Documentação:** Estrutura `src-layout`, ADRs, guias operacionais, `.gitignore`, `.dockerignore` e templates de configuração.
 - [x] **Etapa 1 — Fundação Python e Docker:** `pyproject.toml`, `settings.py`, fundação hexagonal, `Dockerfile` (multi-stage non-root), `docker/chromadb.Dockerfile` (`1.5.9` non-root) e `docker-compose.yml` (`rbac-bot` + `chromadb`).
-- [ ] **Etapa 2 — Ingestão e Estruturação do RBAC 43:** Protocolo ANAC, extração nativa + OCR condicional, parser hierárquico ANAC e `Canonical Store` (SSOT).
+- [x] **Etapa 2 — Motor de Ingestão Documental Regulatória (Multidocumento + RBAC 43):** Catálogo SQLite (WAL/ACID), `pdfplumber` (MIT), OCR opcional desacoplado, parser estrutural ANAC + fallback genérico, validação híbrida (`review_on_demand`) e CLIs de ingestão/revisão.
 - [ ] **Etapa 3 — Gemini e Motor RAG Híbrido:** Adaptador `google-genai`, ChromaDB com 18 metadados, busca determinística + semântica e `ResponseFormatter` dual.
 - [ ] **Etapa 4 — Interface Telegram e Controle de Acesso:** Bot Long Polling, middleware `ADMIN`/`USER`, comandos (`/start`, `/help`, `/status`, `/rbac`, `/buscar`, `/explicar`, `/documentos`, `/versao`) e `MessageSplitter`.
 - [ ] **Etapa 5 — Qualidade, Evals e Operação Contínua:** Suíte completa `pytest`, dataset áureo de fidelidade normativa e backup de volumes.

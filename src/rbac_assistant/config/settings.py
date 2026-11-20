@@ -14,20 +14,52 @@ class StorageConfig(BaseModel):
     """Caminhos de volumes persistentes dentro do contêiner ou ambiente local."""
 
     documents_dir: Path = Path("/app/data/documents")
+    sqlite_filename: str = "catalog.sqlite3"
     raw_pdfs_subdir: str = "raw_pdfs"
+    extracted_subdir: str = "extracted"
+    reviews_subdir: str = "reviews"
     canonical_store_subdir: str = "canonical_store"
     audit_logs_dir: Path = Path("/app/logs")
+    sqlite_busy_timeout_ms: int = Field(default=5000, ge=100)
+
+    @property
+    def sqlite_path(self) -> Path:
+        """Caminho completo do banco SQLite do catálogo e unidades normativas."""
+        return self.documents_dir / self.sqlite_filename
+
+    @property
+    def raw_pdfs_dir(self) -> Path:
+        """Diretório persistente para preservação dos PDFs originais."""
+        return self.documents_dir / self.raw_pdfs_subdir
+
+    @property
+    def extracted_dir(self) -> Path:
+        """Diretório persistente para artefatos extraídos auxiliares."""
+        return self.documents_dir / self.extracted_subdir
+
+    @property
+    def reviews_dir(self) -> Path:
+        """Diretório persistente para trilhas exportadas de revisão humana."""
+        return self.documents_dir / self.reviews_subdir
 
 
 class ExtractionConfig(BaseModel):
-    """Parâmetros de extração PDF e política individual por página para OCR."""
+    """Parâmetros de extração PDF, limites de segurança e política de validação híbrida."""
 
     min_native_chars_per_page: int = Field(default=50, ge=1)
     ocr_language: str = "por"
     ocr_unreviewed_policy: Literal["block_until_reviewed", "warn_banner"] = (
         "block_until_reviewed"
     )
+    validation_policy: Literal[
+        "strict_all_pages",
+        "review_on_demand",
+        "native_auto_ocr_manual",
+    ] = "review_on_demand"
     require_integrity_check_for_native_pages: bool = True
+    max_pdf_size_mb: int = Field(default=50, ge=1, le=500)
+    max_pdf_pages: int = Field(default=1000, ge=1, le=10000)
+    extraction_version: str = "2.0.0"
 
 
 class VectorDBConfig(BaseModel):
@@ -113,7 +145,7 @@ class AppSettings(BaseSettings):
     gemini_generation_model: str = Field(default="gemini-2.5-flash", min_length=1)
     gemini_embedding_model: str = Field(default="text-embedding-004", min_length=1)
 
-    # Credenciais opcionais na Etapa 1; obrigatórias nos fluxos das Etapas 3 e 4
+    # Credenciais opcionais nas Etapas 1 e 2; obrigatórias nas Etapas 3 e 4
     gemini_api_key: SecretStr | None = None
     telegram_bot_token: SecretStr | None = None
 

@@ -29,14 +29,14 @@ WORKDIR /app
 
 RUN groupadd --gid 10001 appuser \
     && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin appuser \
-    && mkdir -p /app/data/documents /app/logs /app/config /app/scripts \
+    && mkdir -p /app/data/documents/raw_pdfs /app/data/documents/extracted /app/data/documents/reviews /app/logs /app/config /app/scripts \
     && chown -R 10001:10001 /app
 
 COPY --from=builder --chown=10001:10001 /app/.venv /app/.venv
 COPY --chown=10001:10001 src ./src
 COPY --chown=10001:10001 config/settings.yaml ./config/settings.yaml
 COPY --chown=10001:10001 config/regulations_catalog.yaml ./config/regulations_catalog.yaml
-COPY --chown=10001:10001 scripts/verify_chroma_persistence.py ./scripts/verify_chroma_persistence.py
+COPY --chown=10001:10001 scripts ./scripts
 
 USER 10001:10001
 
