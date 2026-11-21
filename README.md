@@ -114,8 +114,8 @@ GEMINI_EMBEDDING_DIMENSIONS=768
 GEMINI_ALLOW_PAID_MODELS=false
 ```
 
-2. **Threshold vetorial inicial:** o parâmetro `retrieval.max_vector_distance: 0.85` (distância de cosseno no ChromaDB) é **provisório** (calibrado apenas no dataset sintético de 36 consultas) e exige recalibração após a ingestão real do PDF oficial do RBAC 43.
-3. Para ingestão, validação, indexação, diagnóstico (`--debug`) e consulta passo a passo, consulte o **[Runbook Operacional](docs/operations/03_ingestion_runbook.md)**.
+2. **Threshold vetorial inicial:** o parâmetro `retrieval.max_vector_distance: 0.85` (distância de cosseno no ChromaDB) é **provisório** (avaliado apenas no dataset sintético de 40 consultas com embedder determinístico local) e exige recalibração após a ingestão real do PDF oficial do RBAC 43 com `gemini-embedding-2` real.
+3. Para ingestão, validação, indexação, diagnóstico (`--debug`), benchmark sintético (`--embedding-backend compare`) e consulta passo a passo, consulte o **[Runbook Operacional](docs/operations/03_ingestion_runbook.md)**.
 
 ---
 
@@ -141,7 +141,7 @@ GEMINI_ALLOW_PAID_MODELS=false
 │   ├── validate_extraction.py     # Revisão humana explícita por página/intervalo/seção
 │   ├── index_document.py          # Indexação (FTS5 + ChromaDB), diagnóstico e rebuild
 │   ├── query_assistant.py         # Consulta CLI ao motor RAG híbrido (incl. --debug e --no-llm)
-│   ├── evaluate_rag.py            # Benchmark quantitativo sintético controlado (36 consultas)
+│   ├── evaluate_rag.py            # Benchmark controlado (40 consultas, --per-query e --embedding-backend)
 │   ├── verify_chroma_persistence.py
 │   └── verify_sqlite_persistence.py
 ├── src/rbac_assistant/
@@ -149,7 +149,7 @@ GEMINI_ALLOW_PAID_MODELS=false
 │   ├── domain/                    # Entidades puras e Ports (zero dependências externas)
 │   ├── application/               # DTOs, Serviços (Catalog, Ingestion, Indexing, Chat) e Use Cases
 │   ├── security/                  # PromptGuard e secret_redactor
-│   ├── rag/                       # Chunker, SectionResolver, HybridRetriever, CitationValidator, Eval
+│   ├── rag/                       # Chunker, SectionResolver, HybridRetriever, Reranker, CitationValidator, Eval
 │   ├── infrastructure/            # SQLite+FTS5, ChromaDB 1.5.9, Google GenAI e pdfplumber
 │   └── interfaces/telegram/       # (Etapa 4) Interface Telegram Long Polling
 ├── tests/                         # Testes unitários, integração e evals sintéticos controlados

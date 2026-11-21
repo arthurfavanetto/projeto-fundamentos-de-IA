@@ -142,9 +142,13 @@ docker compose exec rbac-bot python scripts/query_assistant.py \
   ```bash
   docker compose exec rbac-bot python scripts/index_document.py --rebuild-collection --confirm
   ```
-- **Executar benchmark quantitativo sintético controlado (36 consultas, 0 chamadas externas):**
+- **Executar benchmark quantitativo sintético controlado (40 consultas, 0 chamadas externas):**
   ```bash
-  uv run python scripts/evaluate_rag.py
+  uv run python scripts/evaluate_rag.py --per-query
+  ```
+- **Benchmark manual opcional com `gemini-embedding-2` real (Free Tier Standard, fora do CI, somente corpus sintético — consome cota gratuita da `GEMINI_API_KEY` local):**
+  ```bash
+  uv run python scripts/evaluate_rag.py --embedding-backend compare
   ```
 - **Executar suíte automatizada de qualidade (usa apenas fixtures sintéticas e mocks, sem custo de API):**
   ```bash

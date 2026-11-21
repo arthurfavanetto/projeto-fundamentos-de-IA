@@ -2,9 +2,15 @@
 
 IMPORTANTE:
 - Todos os textos regulatórios abaixo são FICTÍCIOS/SINTÉTICOS criados exclusivamente para
-  testar busca estrutural, lexical (FTS5), vetorial (ChromaDB), fusão RRF, filtros de
-  regulamento/emenda, ambiguidade de versão, bloqueio de OCR/reprovação e validação de citações.
-- Nenhuma chamada externa à API Gemini é realizada e nenhum PDF oficial real da ANAC é lido.
+  testar busca estrutural, lexical (FTS5), vetorial (ChromaDB), fusão RRF, reranking
+  determinístico, filtros de regulamento/emenda, ambiguidade de versão, bloqueio de
+  OCR/reprovação e validação de citações.
+- `DeterministicEvalSemanticEmbedder` é um embedder MECÂNICO/SINTÉTICO para testes
+  reproduzíveis no CI; seus números NÃO representam a qualidade real do `gemini-embedding-2`.
+- Para benchmark manual com `gemini-embedding-2` real (Free Tier Standard, fora do CI),
+  `build_synthetic_eval_environment` aceita um `embedding_port` opcional mantendo exatamente
+  o mesmo corpus sintético, consultas, filtros e evidências esperadas.
+- Nenhum PDF oficial real da ANAC é lido ou ingerido.
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ import json
 import math
 import re
 import unicodedata
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
@@ -28,6 +34,7 @@ from rbac_assistant.domain.entities.normative_unit import (
     NormativeUnitType,
     StructureStatus,
 )
+from rbac_assistant.domain.entities.rag import RetrievalSource
 from rbac_assistant.domain.entities.regulatory_document import (
     DocumentStatus,
     DocumentType,
@@ -41,12 +48,13 @@ from rbac_assistant.domain.entities.regulatory_page import (
     QualityMetrics,
     RegulatoryPage,
 )
+from rbac_assistant.domain.ports.rag_ports import EmbeddingPort
 from rbac_assistant.domain.ports.validation_port import ParsedUnitRecord
 from rbac_assistant.infrastructure.storage.sqlite_document_repository import (
     SqliteDocumentRepository,
 )
 from rbac_assistant.infrastructure.vector_db.chroma_vector_store import ChromaVectorStore
-from rbac_assistant.rag.evaluation.rag_evaluator import EvaluationCase
+from rbac_assistant.rag.evaluation.rag_evaluator import EvaluationCase, ExpectedTarget
 from rbac_assistant.rag.ingestion.structural_chunker import StructuralNormativeChunker
 from rbac_assistant.rag.retrieval.hybrid_retriever import HybridNormativeRetriever
 from tests.unit.test_rag_components import _InMemoryChromaClient
@@ -64,10 +72,14 @@ def _normalize(text: str) -> str:
 
 
 class DeterministicEvalSemanticEmbedder:
-    """Embedder vetorial determinístico (256d normalizado) com projeção semântica controlada.
+    """Embedder vetorial determinístico (768d normalizado) apenas para testes mecânicos no CI.
 
-    Mapeia sinônimos e paráfrases aeronáuticas para vetores próximos no espaço cosseno,
-    mantendo consultas fora de domínio distantes (> 0.85) para calibração real do limiar.
+    AVISO METODOLÓGICO:
+    - Utiliza hashing determinístico com sinal + pequeno dicionário de sinônimos sintéticos.
+    - NÃO é um modelo neural de linguagem e NÃO representa o desempenho real do
+      `gemini-embedding-2`.
+    - Espelha o contrato de entrada do `GeminiEmbeddingAdapter`, combinando `title` e `text`
+      em memória durante `embed_documents` (sem alterar o texto persistido no SQLite).
     """
 
     _CONCEPT_MAP: ClassVar[dict[str, tuple[str, float]]] = {
@@ -225,12 +237,10 @@ class DeterministicEvalSemanticEmbedder:
         ]
         vec = [0.0] * self._dimensions
         for tok in tokens:
-            # Adiciona dimensão lexical com sinal determinístico (evita colisão positiva espúria)
             tok_digest = hashlib.sha256(f"tok:{tok}".encode()).digest()
             tok_idx = int.from_bytes(tok_digest[:2], "big") % self._dimensions
             tok_sign = 1.0 if (tok_digest[2] & 1) == 0 else -1.0
             vec[tok_idx] += tok_sign
-            # Adiciona dimensão semântica quando mapeada (peso aumentado para paráfrases)
             mapped = self._CONCEPT_MAP.get(tok)
             if mapped is not None:
                 concept_name, weight = mapped
@@ -248,32 +258,56 @@ class DeterministicEvalSemanticEmbedder:
         *,
         titles: Sequence[str | None] | None = None,
     ) -> list[tuple[float, ...]]:
-        _ = titles
-        return [self._encode(t) for t in texts]
+        # Espelha o contrato do GeminiEmbeddingAdapter combinando título + corpo em memória
+        if titles is not None:
+            combined = [
+                f"{title}\n{body}" if title else body
+                for body, title in zip(texts, titles, strict=True)
+            ]
+        else:
+            combined = list(texts)
+        return [self._encode(item) for item in combined]
 
     def embed_query(self, text: str) -> tuple[float, ...]:
         return self._encode(text)
 
 
 def load_eval_dataset(path: Path = EVAL_DATASET_PATH) -> tuple[EvaluationCase, ...]:
-    """Carrega os casos controlados de avaliação do arquivo JSON."""
+    """Carrega os casos controlados de avaliação com granularidade normativa completa."""
     raw = json.loads(path.read_text(encoding="utf-8"))
     cases: list[EvaluationCase] = []
     for item in raw["cases"]:
+        targets = tuple(
+            ExpectedTarget(
+                regulation_number=str(t["regulation_number"]),
+                amendment_number=str(t["amendment_number"]),
+                section_number=str(t["section_number"]),
+                subsection_number=str(t.get("subsection_number", "")),
+                paragraph_number=str(t.get("paragraph_number", "")),
+                alinea=str(t.get("alinea", "")),
+                item_number=str(t.get("item_number", "")),
+                subitem_number=str(t.get("subitem_number", "")),
+                normative_unit_id=str(t.get("normative_unit_id", "")),
+                expected_pdf_pages=tuple(int(p) for p in t.get("expected_pdf_pages", ())),
+                expected_text_snippets=tuple(str(s) for s in t.get("expected_text_snippets", ())),
+            )
+            for t in item.get("expected_targets", ())
+        )
         cases.append(
             EvaluationCase(
                 case_id=str(item["case_id"]),
                 category=str(item["category"]),
+                structural_subset=str(item.get("structural_subset", "natural_language_no_ref")),
                 query=str(item["query"]),
-                expected_keys=tuple(item.get("expected_keys", ())),
+                expected_targets=targets,
                 expected_behavior=str(item["expected_behavior"]),
                 is_exact_structural=bool(item.get("is_exact_structural", False)),
-                has_explicit_reg_or_version=bool(item.get("has_explicit_reg_or_version", False)),
+                expected_regulation=item.get("expected_regulation"),
+                expected_amendment=item.get("expected_amendment"),
                 regulation_filter=item.get("regulation_filter"),
                 amendment_filter=item.get("amendment_filter"),
                 document_type_filter=item.get("document_type_filter"),
                 only_current_version=bool(item.get("only_current_version", True)),
-                expected_pdf_pages=tuple(int(p) for p in item.get("expected_pdf_pages", ())),
             )
         )
     return tuple(cases)
@@ -326,14 +360,17 @@ def _make_unit(
     text: str,
     page_numbers: tuple[int, ...],
     order_index: int,
+    parent_unit_id: str | None = None,
+    unit_id_override: str | None = None,
     paragraph_number: str = "",
     item_number: str = "",
     unit_type: NormativeUnitType = NormativeUnitType.SECTION,
 ) -> ParsedUnitRecord:
+    uid = unit_id_override or f"{version_id}_u_{order_index}_{section_number.replace(' ', '_')}"
     return ParsedUnitRecord(
-        unit_id=f"{version_id}_u_{order_index}_{section_number.replace(' ', '_')}",
+        unit_id=uid,
         version_id=version_id,
-        parent_unit_id=None,
+        parent_unit_id=parent_unit_id,
         unit_type=unit_type,
         section_number=section_number,
         subsection_number="",
@@ -354,11 +391,14 @@ def _make_unit(
 
 def build_synthetic_eval_environment(
     tmp_path: Path,
+    *,
+    embedding_port: EmbeddingPort | None = None,
+    collection_name: str = "eval_synthetic_ge2_768_v1",
 ) -> tuple[
     SqliteDocumentRepository,
     ChromaVectorStore,
-    DeterministicEvalSemanticEmbedder,
-    Callable[[str, float], HybridNormativeRetriever],
+    EmbeddingPort,
+    Callable[..., HybridNormativeRetriever],
 ]:
     """Constrói base SQLite + ChromaDB em memória com 4 documentos sintéticos controlados."""
     repo = SqliteDocumentRepository(tmp_path / "eval_catalog.sqlite3")
@@ -366,7 +406,7 @@ def build_synthetic_eval_environment(
     catalog = CatalogService(repo)
     validation = ValidationService(policy=ValidationPolicy.REVIEW_ON_DEMAND)
     vector_store = ChromaVectorStore(client=_InMemoryChromaClient())
-    embedder = DeterministicEvalSemanticEmbedder(dimensions=768)
+    embedder: EmbeddingPort = embedding_port or DeterministicEvalSemanticEmbedder(dimensions=768)
     now = datetime.now(UTC)
 
     def _save_bundle(
@@ -525,6 +565,8 @@ def build_synthetic_eval_environment(
             status=PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
         ),
     ]
+    u43_3_id = "eval_rbac_43_v05_u_2_43.3"
+    u43_9_id = "eval_rbac_43_v05_u_4_43.9"
     units_43_05 = [
         _make_unit(
             version_id=v43_05.version_id,
@@ -557,6 +599,24 @@ def build_synthetic_eval_environment(
             ),
             page_numbers=(2, 3),
             order_index=2,
+            unit_id_override=u43_3_id,
+        ),
+        # Unidades filhas hierárquicas (parágrafo/item/subitem) espelhando AnacRbacStructureStrategy
+        _make_unit(
+            version_id=v43_05.version_id,
+            parent_unit_id=u43_3_id,
+            unit_id_override="eval_rbac_43_v05_u_2_43.3_a_1",
+            unit_type=NormativeUnitType.ALINEA,
+            section_number="43.3",
+            paragraph_number="(a)",
+            item_number="(1)",
+            title="Pessoas autorizadas — 43.3(a)(1)",
+            text=(
+                "(a)(1) O mecânico de manutenção aeronáutica habilitado pode executar manutenção "
+                "conforme suas habilitações na licença ANAC."
+            ),
+            page_numbers=(2,),
+            order_index=21,
         ),
         _make_unit(
             version_id=v43_05.version_id,
@@ -578,6 +638,37 @@ def build_synthetic_eval_environment(
             text=p43_4,
             page_numbers=(4,),
             order_index=4,
+            unit_id_override=u43_9_id,
+        ),
+        _make_unit(
+            version_id=v43_05.version_id,
+            parent_unit_id=u43_9_id,
+            unit_id_override="eval_rbac_43_v05_u_4_43.9_a",
+            unit_type=NormativeUnitType.PARAGRAPH,
+            section_number="43.9",
+            paragraph_number="(a)",
+            title="Registros de manutenção — 43.9(a)",
+            text=(
+                "(a) Cada pessoa que executa manutenção deve registrar na caderneta de manutenção:"
+            ),
+            page_numbers=(4,),
+            order_index=41,
+        ),
+        _make_unit(
+            version_id=v43_05.version_id,
+            parent_unit_id=u43_9_id,
+            unit_id_override="eval_rbac_43_v05_u_4_43.9_a_1_i",
+            unit_type=NormativeUnitType.SUBITEM,
+            section_number="43.9",
+            paragraph_number="(a)",
+            item_number="(1)",
+            title="Registros de manutenção — 43.9(a)(1)(i)",
+            text=(
+                "(a)(1)(i) Data de conclusão do serviço, nome completo, assinatura e número da "
+                "licença ANAC do responsável técnico."
+            ),
+            page_numbers=(4,),
+            order_index=42,
         ),
         _make_unit(
             version_id=v43_05.version_id,
@@ -897,14 +988,13 @@ def build_synthetic_eval_environment(
         ],
     )
 
-    # Indexa todas as versões no SQLite FTS5 + ChromaDB em memória
     indexing = IndexingService(
         repository=repo,
         catalog_service=catalog,
         chunker=StructuralNormativeChunker(),
         vector_store=vector_store,
         embedding_port=embedder,
-        default_collection_name="eval_synthetic_ge2_768_v1",
+        default_collection_name=collection_name,
     )
     for doc_id, ver_id in (
         ("eval_rbac_43", "eval_rbac_43_v05"),
@@ -916,15 +1006,34 @@ def build_synthetic_eval_environment(
     ):
         indexing.index_document(document_id=doc_id, version_id=ver_id)
 
-    def _retriever_factory(mode: str, max_vector_distance: float) -> HybridNormativeRetriever:
+    def _retriever_factory(
+        mode: str,
+        max_vector_distance: float = 0.85,
+        *,
+        lexical_top_k: int = 5,
+        semantic_top_k: int = 5,
+        rrf_k: int = 60,
+        source_weights: Mapping[RetrievalSource, float] | None = None,
+        enable_reranker: bool | None = None,
+        enable_adaptive_cutoff: bool | None = None,
+        adaptive_cutoff_ratio: float = 0.55,
+    ) -> HybridNormativeRetriever:
         if mode == "structural_only":
             flags = (True, False, False)
+            default_rerank = False
+            default_cutoff = False
         elif mode == "lexical_fts5_only":
             flags = (False, True, False)
+            default_rerank = False
+            default_cutoff = False
         elif mode == "vector_only":
             flags = (False, False, True)
+            default_rerank = False
+            default_cutoff = False
         elif mode == "hybrid_rrf":
             flags = (True, True, True)
+            default_rerank = True
+            default_cutoff = True
         else:
             raise ValueError(f"Modo de avaliação desconhecido: {mode}")
 
@@ -932,16 +1041,22 @@ def build_synthetic_eval_environment(
             repository=repo,
             vector_store=vector_store,
             embedding_port=embedder,
-            collection_name="eval_synthetic_ge2_768_v1",
+            collection_name=collection_name,
             validation_service=validation,
-            lexical_top_k=5,
-            semantic_top_k=5,
+            lexical_top_k=lexical_top_k,
+            semantic_top_k=semantic_top_k,
             final_top_k=5,
-            rrf_k=60,
+            rrf_k=rrf_k,
             max_vector_distance=max_vector_distance,
             enable_structural=flags[0],
             enable_lexical=flags[1],
             enable_vector=flags[2],
+            source_weights=source_weights,
+            enable_reranker=default_rerank if enable_reranker is None else enable_reranker,
+            enable_adaptive_cutoff=(
+                default_cutoff if enable_adaptive_cutoff is None else enable_adaptive_cutoff
+            ),
+            adaptive_cutoff_ratio=adaptive_cutoff_ratio,
         )
 
     return repo, vector_store, embedder, _retriever_factory
