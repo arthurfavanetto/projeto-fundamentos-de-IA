@@ -1,7 +1,10 @@
 """Testes unitários do adaptador oficial Google Gemini (`google-genai==3.6.1`).
 
 Cobre:
-- Gemini 4 Neon (`gemini-4-neon`) como modelo de geração padrão (sem fallback silencioso).
+- Gemini 4 Hydrogen (`gemini-4-hydrogen`) como modelo de geração padrão no Free Tier Standard;
+- Trava de segurança Free Tier rejeitando modelos pagos (`gemini-4-neon`, `gemini-4-carbon`,
+  `gemini-4-argon`) salvo habilitação explícita (`GEMINI_ALLOW_PAID_MODELS=true`);
+- Ausência de fallback silencioso e de ferramentas pagas (Google Search grounding/Maps/Batch);
 - Gemini Embedding 2 (`gemini-embedding-2`, 768d MRL):
   - ausência de `task_type`;
   - formato assimétrico oficial (`task: search result | query: ...` e `title: ... | text: ...`);
@@ -97,7 +100,7 @@ class _FakeGenAISDKClient:
 
 
 @pytest.mark.unit
-def test_default_models_and_versioned_collection_configuration(
+def test_default_free_tier_models_and_versioned_collection_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for var in (
@@ -105,19 +108,50 @@ def test_default_models_and_versioned_collection_configuration(
         "GEMINI_CHAT_MODEL",
         "GEMINI_EMBEDDING_MODEL",
         "GEMINI_EMBEDDING_DIMENSIONS",
+        "GEMINI_ALLOW_PAID_MODELS",
     ):
         monkeypatch.delenv(var, raising=False)
 
     settings = load_settings()
-    assert settings.gemini_generation_model == "gemini-4-neon"
+    assert settings.gemini_generation_model == "gemini-4-hydrogen"
     assert settings.gemini_embedding_model == "gemini-embedding-2"
     assert settings.effective_embedding_dimensions == 768
+    assert settings.gemini_allow_paid_models is False
     assert settings.vector_db.collection_name == "regulatory_chunks_ge2_768_v1"
     assert settings.gemini.embedding_instruction_version == "ge2_asymmetric_v1"
     assert settings.gemini.embedding_max_input_tokens == 8192
-    assert DEFAULT_GENERATION_MODEL == "gemini-4-neon"
+    assert DEFAULT_GENERATION_MODEL == "gemini-4-hydrogen"
     assert DEFAULT_EMBEDDING_MODEL == "gemini-embedding-2"
     assert DEFAULT_EMBEDDING_DIMENSIONS == 768
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("paid_model", ["gemini-4-neon", "gemini-4-carbon", "gemini-4-argon"])
+def test_free_tier_guard_blocks_paid_models_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    paid_model: str,
+) -> None:
+    monkeypatch.setenv("GEMINI_GENERATION_MODEL", paid_model)
+    monkeypatch.delenv("GEMINI_ALLOW_PAID_MODELS", raising=False)
+
+    with pytest.raises(ValueError, match="guarda Free Tier"):
+        AppSettings(_env_file=None)  # type: ignore[call-arg]
+
+
+@pytest.mark.unit
+def test_free_tier_guard_allows_documented_free_alternatives_and_explicit_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GEMINI_ALLOW_PAID_MODELS", raising=False)
+    monkeypatch.setenv("GEMINI_GENERATION_MODEL", "gemini-3.8-flash")
+    alt_settings = AppSettings(_env_file=None)  # type: ignore[call-arg]
+    assert alt_settings.gemini_generation_model == "gemini-3.8-flash"
+
+    # Override explícito do usuário permite configurar outro modelo se desejar
+    monkeypatch.setenv("GEMINI_GENERATION_MODEL", "gemini-4-neon")
+    monkeypatch.setenv("GEMINI_ALLOW_PAID_MODELS", "true")
+    override_settings = AppSettings(_env_file=None)  # type: ignore[call-arg]
+    assert override_settings.gemini_generation_model == "gemini-4-neon"
 
 
 @pytest.mark.unit
@@ -127,10 +161,10 @@ def test_gemini_client_requires_api_key_without_injected_client() -> None:
 
 
 @pytest.mark.unit
-def test_gemini_4_neon_generation_and_ge2_asymmetric_embeddings() -> None:
+def test_gemini_4_hydrogen_generation_and_ge2_asymmetric_embeddings() -> None:
     fake_sdk = _FakeGenAISDKClient()
     adapter = GeminiClientAdapter(
-        generation_model="gemini-4-neon",
+        generation_model="gemini-4-hydrogen",
         embedding_model="gemini-embedding-2",
         embedding_dimensions=768,
         embedding_batch_size=2,
@@ -140,15 +174,16 @@ def test_gemini_4_neon_generation_and_ge2_asymmetric_embeddings() -> None:
     )
     emb_adapter = GeminiEmbeddingAdapter(adapter)
 
-    # 1. Geração com gemini-4-neon
+    # 1. Geração com gemini-4-hydrogen sem ferramentas pagas (tools=None)
     text = adapter.generate_text(
         system_instruction="Sistema normativo ANAC",
         user_prompt="Explique a seção 43.3",
     )
     assert text == "Explicação técnica fundamentada na seção."
-    assert fake_sdk.models.generate_calls[0]["model"] == "gemini-4-neon"
+    assert fake_sdk.models.generate_calls[0]["model"] == "gemini-4-hydrogen"
     gen_cfg = fake_sdk.models.generate_calls[0]["config"]
     assert gen_cfg.system_instruction == "Sistema normativo ANAC"
+    assert getattr(gen_cfg, "tools", None) is None
 
     # 2. Embeddings de documentos com gemini-embedding-2 (768d, sem task_type, Content separado)
     raw_texts = ["trecho original 1", "trecho original 2", "trecho original 3"]
@@ -157,11 +192,9 @@ def test_gemini_4_neon_generation_and_ge2_asymmetric_embeddings() -> None:
 
     assert len(doc_vecs) == 3
     assert all(len(v) == 768 for v in doc_vecs)
-    # Ordem 1:1 preservada em cada lote (lote 1: [0.01, 0.02], lote 2: [0.01])
     assert doc_vecs[0][0] == pytest.approx(0.01)
     assert doc_vecs[1][0] == pytest.approx(0.02)
     assert doc_vecs[2][0] == pytest.approx(0.01)
-    # Textos originais não foram mutados
     assert raw_texts == ["trecho original 1", "trecho original 2", "trecho original 3"]
 
     assert len(fake_sdk.models.embed_calls) == 2
@@ -210,7 +243,6 @@ def test_ge2_rejects_aggregated_single_vector_empty_text_and_token_overflow() ->
         sdk_client=fake_sdk,
     )
 
-    # Simula API retornando apenas 1 vetor agregado para 2 chunks => deve falhar explicitamente
     fake_sdk.models.embed_side_effects = [
         _FakeEmbedResponse(embeddings=[_FakeEmbeddingObj(values=[0.1] * 768)])
     ]
@@ -235,10 +267,10 @@ def test_ge2_rejects_aggregated_single_vector_empty_text_and_token_overflow() ->
 def test_gemini_model_unavailable_has_no_silent_fallback() -> None:
     fake_sdk = _FakeGenAISDKClient()
     fake_sdk.models.generate_side_effects = [
-        genai_errors.APIError(404, {"error": {"message": "Model gemini-4-neon not found"}})
+        genai_errors.APIError(404, {"error": {"message": "Model gemini-4-hydrogen not found"}})
     ]
     adapter = GeminiClientAdapter(
-        generation_model="gemini-4-neon",
+        generation_model="gemini-4-hydrogen",
         max_retries=2,
         retry_min_wait_seconds=0.0,
         retry_max_wait_seconds=0.0,
@@ -248,9 +280,8 @@ def test_gemini_model_unavailable_has_no_silent_fallback() -> None:
     with pytest.raises(LLMServiceError, match="Nenhum fallback silencioso foi aplicado"):
         adapter.generate_text(system_instruction="sys", user_prompt="usr")
 
-    # 404 não é transitório e não dispara retry nem troca silenciosa de modelo
     assert len(fake_sdk.models.generate_calls) == 1
-    assert fake_sdk.models.generate_calls[0]["model"] == "gemini-4-neon"
+    assert fake_sdk.models.generate_calls[0]["model"] == "gemini-4-hydrogen"
 
 
 @pytest.mark.unit
@@ -334,6 +365,7 @@ def test_settings_canonical_env_var_and_legacy_chat_model_deprecation_warning(
     monkeypatch.setenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
     monkeypatch.setenv("GEMINI_EMBEDDING_DIMENSIONS", "1536")
     monkeypatch.delenv("GEMINI_CHAT_MODEL", raising=False)
+    monkeypatch.delenv("GEMINI_ALLOW_PAID_MODELS", raising=False)
 
     settings = AppSettings(_env_file=None)  # type: ignore[call-arg]
     assert settings.gemini_generation_model == "gemini-4-hydrogen"
@@ -342,7 +374,7 @@ def test_settings_canonical_env_var_and_legacy_chat_model_deprecation_warning(
 
     # Alias legado GEMINI_CHAT_MODEL ainda aceito temporariamente, mas emite DeprecationWarning
     monkeypatch.delenv("GEMINI_GENERATION_MODEL", raising=False)
-    monkeypatch.setenv("GEMINI_CHAT_MODEL", "gemini-4-carbon")
+    monkeypatch.setenv("GEMINI_CHAT_MODEL", "gemini-3.8-flash")
     with pytest.warns(DeprecationWarning, match="GEMINI_GENERATION_MODEL"):
         legacy_settings = AppSettings(_env_file=None)  # type: ignore[call-arg]
-    assert legacy_settings.gemini_generation_model == "gemini-4-carbon"
+    assert legacy_settings.gemini_generation_model == "gemini-3.8-flash"

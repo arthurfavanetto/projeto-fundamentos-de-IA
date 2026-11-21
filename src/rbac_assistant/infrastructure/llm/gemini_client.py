@@ -1,9 +1,10 @@
-"""Adaptador oficial para a Google Gemini API usando o SDK `google-genai==3.6.1`.
+"""Adaptador oficial para a Google Gemini Developer API usando `google-genai==3.6.1`.
 
 Recursos implementados:
-- Geração de explicações fundamentadas (`LLMPort`), padrão `gemini-4-neon` (sem fallback
-  silencioso entre modelos; falhas de modelo indisponível são reportadas explicitamente).
-- Embeddings multimodais/textuais (`EmbeddingPort`), padrão `gemini-embedding-2` (768d MRL):
+- Geração de explicações fundamentadas (`LLMPort`), padrão Free Tier Standard
+  `gemini-4-hydrogen` (sem fallback silencioso entre modelos e sem ferramentas pagas como
+  Google Search grounding, Google Maps ou Batch API).
+- Embeddings textuais (`EmbeddingPort`), padrão Free Tier Standard `gemini-embedding-2` (768d MRL):
   - Sem parâmetro `task_type` (não suportado pelo `gemini-embedding-2`).
   - Convenção oficial de recuperação assimétrica incorporada apenas à representação de embedding
     (nunca altera `original_text` nem `normalized_text` no SQLite):
@@ -47,7 +48,7 @@ from rbac_assistant.security.secret_redactor import redact_text
 logger = structlog.get_logger(__name__)
 
 _TRANSIENT_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
-DEFAULT_GENERATION_MODEL = "gemini-4-neon"
+DEFAULT_GENERATION_MODEL = "gemini-4-hydrogen"
 DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2"
 DEFAULT_EMBEDDING_DIMENSIONS = 768
 DEFAULT_EMBEDDING_INSTRUCTION_VERSION = "ge2_asymmetric_v1"

@@ -46,12 +46,19 @@ gemini:
   retry_max_wait_seconds: 8.0
   temperature: 0.1
   max_output_tokens: 2048
-  # Gemini Embedding 2 (MRL 128-3072; recomendadas: 768, 1536, 3072; limite 8.192 tokens)
+  # Gemini Embedding 2 (Free Tier Standard textual; MRL 128-3072; recomendado: 768; limite 8.192 tokens)
   embedding_dimensions: 768
   embedding_instruction_version: "ge2_asymmetric_v1"
   embedding_max_input_tokens: 8192
   embedding_batch_size: 32
   prompts_dir: "config/prompts"
+  # Lista de modelos permitidos por padrão no Free Tier (sem fallback automático para modelos pagos)
+  allowed_free_tier_generation_models:
+    - "gemini-4-hydrogen"
+    - "gemini-3.8-flash"
+    - "gemini-3.5-flash-lite"
+  allowed_free_tier_embedding_models:
+    - "gemini-embedding-2"
 
 chunking:
   # Preserva seções completas dentro da janela alvo (folga ampla abaixo dos 8.192 tokens do GE2)

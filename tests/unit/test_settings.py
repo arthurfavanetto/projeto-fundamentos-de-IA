@@ -28,6 +28,9 @@ def test_load_settings_from_repository_yaml(
     assert settings.extraction.ocr_unreviewed_policy == "block_until_reviewed"
     assert settings.extraction.require_integrity_check_for_native_pages is True
     assert settings.security.deny_by_default is True
+    assert settings.gemini_generation_model == "gemini-4-hydrogen"
+    assert settings.gemini_embedding_model == "gemini-embedding-2"
+    assert settings.gemini_allow_paid_models is False
 
 
 @pytest.mark.unit
@@ -37,15 +40,16 @@ def test_env_overrides_models_and_chroma_endpoint(
 ) -> None:
     monkeypatch.setenv("CHROMA_HOST", "internal-chroma")
     monkeypatch.setenv("CHROMA_PORT", "8100")
-    monkeypatch.setenv("GEMINI_GENERATION_MODEL", "gemini-2.5-pro")
-    monkeypatch.setenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+    monkeypatch.setenv("GEMINI_GENERATION_MODEL", "gemini-3.8-flash")
+    monkeypatch.setenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
     settings = load_settings(yaml_path=repo_root / "config" / "settings.yaml")
 
     assert settings.chroma_base_url == "http://internal-chroma:8100"
-    assert settings.gemini_generation_model == "gemini-2.5-pro"
-    assert settings.gemini_embedding_model == "gemini-embedding-001"
+    assert settings.gemini_generation_model == "gemini-3.8-flash"
+    assert settings.gemini_embedding_model == "gemini-embedding-2"
+    assert settings.gemini_allow_paid_models is False
     assert settings.log_level == "DEBUG"
 
 

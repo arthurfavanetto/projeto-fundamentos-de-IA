@@ -95,6 +95,12 @@ class GeminiConfig(BaseModel):
     embedding_max_input_tokens: int = Field(default=8192, ge=256, le=32768)
     embedding_batch_size: int = Field(default=32, ge=1, le=256)
     prompts_dir: Path = Path("config/prompts")
+    allowed_free_tier_generation_models: tuple[str, ...] = (
+        "gemini-4-hydrogen",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+    )
+    allowed_free_tier_embedding_models: tuple[str, ...] = ("gemini-embedding-2",)
 
 
 class ChunkingConfig(BaseModel):
@@ -167,15 +173,16 @@ class AppSettings(BaseSettings):
     chroma_host: str = Field(default="chromadb", min_length=1)
     chroma_port: int = Field(default=8000, ge=1, le=65535)
 
-    # Identificadores configuráveis dos modelos Gemini (Etapa 3)
+    # Identificadores configuráveis dos modelos Gemini — Free Tier Standard por padrão
     # Canônica: GEMINI_GENERATION_MODEL (GEMINI_CHAT_MODEL mantida apenas como alias legado)
     gemini_generation_model: str = Field(
-        default="gemini-4-neon",
+        default="gemini-4-hydrogen",
         min_length=1,
         validation_alias=AliasChoices("GEMINI_GENERATION_MODEL", "GEMINI_CHAT_MODEL"),
     )
     gemini_embedding_model: str = Field(default="gemini-embedding-2", min_length=1)
     gemini_embedding_dimensions: int | None = Field(default=None, ge=128, le=3072)
+    gemini_allow_paid_models: bool = False
 
     # Credenciais opcionais nas Etapas 1 e 2; obrigatórias para chamadas reais Gemini/Telegram
     gemini_api_key: SecretStr | None = None
@@ -195,7 +202,7 @@ class AppSettings(BaseSettings):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
 
     @model_validator(mode="after")
-    def _warn_deprecated_chat_model_env(self) -> AppSettings:
+    def _validate_gemini_models_and_aliases(self) -> AppSettings:
         if os.environ.get("GEMINI_CHAT_MODEL") and not os.environ.get("GEMINI_GENERATION_MODEL"):
             warnings.warn(
                 "A variável GEMINI_CHAT_MODEL está obsoleta; utilize a variável canônica "
@@ -203,6 +210,36 @@ class AppSettings(BaseSettings):
                 DeprecationWarning,
                 stacklevel=2,
             )
+
+        if not self.gemini_allow_paid_models:
+            gen_norm = self.gemini_generation_model.strip().lower().removeprefix("models/")
+            allowed_gen = {
+                m.strip().lower().removeprefix("models/")
+                for m in self.gemini.allowed_free_tier_generation_models
+            }
+            if gen_norm not in allowed_gen:
+                raise ValueError(
+                    f"Modelo de geração '{self.gemini_generation_model}' bloqueado pela guarda "
+                    f"Free Tier (permitidos por padrão: "
+                    f"{sorted(self.gemini.allowed_free_tier_generation_models)}). "
+                    "Não há fallback automático para modelos pagos. Para autorizar explicitamente "
+                    "outro modelo, defina GEMINI_ALLOW_PAID_MODELS=true (lembrando que o código "
+                    "não controla o faturamento da sua conta Google Cloud)."
+                )
+
+            emb_norm = self.gemini_embedding_model.strip().lower().removeprefix("models/")
+            allowed_emb = {
+                m.strip().lower().removeprefix("models/")
+                for m in self.gemini.allowed_free_tier_embedding_models
+            }
+            if emb_norm not in allowed_emb:
+                raise ValueError(
+                    f"Modelo de embeddings '{self.gemini_embedding_model}' bloqueado pela guarda "
+                    f"Free Tier (permitidos por padrão: "
+                    f"{sorted(self.gemini.allowed_free_tier_embedding_models)}). "
+                    "Para autorizar explicitamente outro modelo, defina "
+                    "GEMINI_ALLOW_PAID_MODELS=true."
+                )
         return self
 
     @property
