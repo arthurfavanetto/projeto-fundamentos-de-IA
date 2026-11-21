@@ -85,16 +85,17 @@ Este documento consolida as Decisões Arquiteturais (*Architecture Decision Reco
 
 ---
 
-## ADR-08 — SDK Oficial `google-genai`, Gemini 4 Neon e Gemini Embedding 2 (768d)
+## ADR-08 — SDK Oficial `google-genai`, Gemini 4 Hydrogen (Free Tier Standard) e Gemini Embedding 2 (768d)
 
-- **Status:** Aprovada
-- **Contexto:** Em novembro/2026, a família Gemini 4 (`gemini-4-neon`, `gemini-4-hydrogen`, `gemini-4-carbon`) e o modelo multimodal estável `gemini-embedding-2` (8.192 tokens, MRL 128–3072) representam o padrão atual da Gemini API via SDK oficial `google-genai==3.6.1`. Além disso, `gemini-embedding-2` possui espaço vetorial incompatível com `gemini-embedding-001`, não utiliza o parâmetro `task_type`, exige instruções assimétricas no texto e agrega múltiplos inputs se não encapsulados em objetos `Content` individuais.
+- **Status:** Aprovada (revisão técnica final da Etapa 3)
+- **Contexto:** É obrigatória a separação entre (1) o ambiente de desenvolvimento no Antigravity (assinatura paga Google AI Pro, nunca via API key) e (2) o runtime da aplicação Python via **Gemini Developer API Free Tier Standard** (`google-genai==3.6.1`). Na tabela oficial da Gemini API, `gemini-4-hydrogen` (alternativa gratuita: `gemini-3.8-flash`) e `gemini-embedding-2` (modalidade texto, 8.192 tokens, MRL 128–3072) operam no Free Tier Standard sem exigir Google Cloud Billing, ao passo que `gemini-4-neon`, `gemini-4-carbon` e `gemini-4-argon` são exclusivos do tier pago. Além disso, `gemini-embedding-2` possui espaço vetorial incompatível com `gemini-embedding-001`, não utiliza `task_type`, exige instruções assimétricas no texto e agrega múltiplos inputs se não encapsulados em objetos `types.Content` individuais.
 - **Decisão:**
-  - Definir `GEMINI_GENERATION_MODEL=gemini-4-neon` como variável canônica e padrão de geração (tier pago: US\$ 3 / US\$ 15 por 1M tokens), mantendo `gemini-4-hydrogen` e `gemini-4-carbon` como alternativas configuráveis pelo usuário, **sem fallback silencioso** em caso de indisponibilidade.
-  - Adotar `GEMINI_EMBEDDING_MODEL=gemini-embedding-2` com `GEMINI_EMBEDDING_DIMENSIONS=768` (dimensão MRL recomendada e auto-normalizada pelo modelo, compatível com métrica cosseno do ChromaDB).
-  - Aplicar a convenção oficial assimétrica apenas na representação efêmera de embedding (`task: search result | query: {consulta}` e `title: {título|none} | text: {conteúdo}`), encapsulando cada chunk em um objeto `types.Content` próprio para garantir 1 vetor independente por chunk.
-  - Versionar a coleção de produção como **`regulatory_chunks_ge2_768_v1`**, registrando modelo, dimensão, versão da estratégia (`ge2_asymmetric_v1` — migração `v003_index_strategy_metadata.sql`) e data de criação para bloquear qualquer mistura de espaços vetoriais incompatíveis (`EmbeddingCompatibilityError`).
+  - Definir `GEMINI_GENERATION_MODEL=gemini-4-hydrogen` como padrão de geração (Free Tier Standard), mantendo `gemini-3.8-flash` como alternativa gratuita configurável, **sem fallback silencioso** entre modelos, sem Batch API e sem ferramentas pagas (Google Search/Maps grounding).
+  - Implementar allowlist de modelos gratuitos em `AppSettings` (`GEMINI_ALLOW_PAID_MODELS=false` por padrão), rejeitando modelos pagos no carregamento de configuração a menos que explicitamente autorizados, documentando claramente que o código não substitui a manutenção da conta sem faturamento no Google Cloud e alertando sobre a política de uso de dados do Free Tier (apenas normas públicas da ANAC).
+  - Adotar `GEMINI_EMBEDDING_MODEL=gemini-embedding-2` com `GEMINI_EMBEDDING_DIMENSIONS=768` (dimensão MRL recomendada e auto-normalizada, compatível com distância de cosseno no ChromaDB), com convenção oficial assimétrica aplicada apenas em memória (`task: search result | query: {consulta}` e `title: {título|none} | text: {conteúdo}`) e 1 objeto `types.Content` por chunk.
+  - Versionar a coleção de produção como **`regulatory_chunks_ge2_768_v1`**, registrando modelo, dimensão, versão da estratégia (`ge2_asymmetric_v1` — migração `v003_index_strategy_metadata.sql`) e data de criação para bloquear qualquer mistura de espaços vetoriais (`EmbeddingCompatibilityError`).
+  - Bloquear integralmente o envio de páginas não aprovadas (`native_quality_checked`, OCR pendente ou reprovadas) ao modelo generativo e validar determinísticamente no servidor todas as citações `[EV-N]` e seções geradas via `CitationValidator`.
 - **Consequências:**
-  - Elimina risco de agregação silenciosa ou mistura de vetores entre `gemini-embedding-001` e `gemini-embedding-2`.
-  - Permite migração futura para 1536d ou outro modelo mediante nova coleção versionada ou rebuild controlado a partir do SQLite.
+  - Elimina risco de cobrança acidental por seleção de modelos pagos, agregação silenciosa de embeddings ou mistura de vetores incompatíveis.
+  - Garante rastreabilidade e precisão de citações (`[EV-N]`), preserva o texto literal exclusivamente no SQLite e permite migração futura controlada via rebuild vetorial.
 

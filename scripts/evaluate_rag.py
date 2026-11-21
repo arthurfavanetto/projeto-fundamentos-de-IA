@@ -123,13 +123,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    import structlog
-
-    structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))
+    import contextlib
 
     cases = load_eval_dataset()
     evaluator = RagEvaluator()
-    with tempfile.TemporaryDirectory(prefix="rbac_rag_eval_") as tmp_dir:
+    with (
+        contextlib.redirect_stdout(sys.stderr),
+        tempfile.TemporaryDirectory(prefix="rbac_rag_eval_") as tmp_dir,
+    ):
         _, _, _, factory = build_synthetic_eval_environment(Path(tmp_dir))
         report = evaluator.run_full_benchmark(
             dataset_name="rbac_synthetic_controlled_eval_v1",

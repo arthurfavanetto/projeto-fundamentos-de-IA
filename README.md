@@ -65,7 +65,7 @@ A coleção de produção versionada para o `gemini-embedding-2` (768 dimensões
 A API oficial do **Google Gemini** (`google-genai==3.6.1`) cumpre dois papéis estritamente delimitados:
 
 - **Embeddings (`gemini-embedding-2`, 768d):** vetorização de chunks e consultas utilizando a convenção oficial assimétrica (`title: {título} | text: {conteúdo}` para documentos e `task: search result | query: {consulta}` para buscas, sem `task_type` e com objetos `Content` individuais por chunk para impedir agregação).
-- **Explicações (`gemini-4-neon`, configurável):** elaboração de explicações técnicas fundamentadas exclusivamente nas evidências recuperadas do SQLite e protegidas pelo `PromptGuard`.
+- **Explicações (`gemini-4-hydrogen`, Free Tier Standard, configurável):** elaboração de explicações técnicas fundamentadas exclusivamente nas evidências **aprovadas** recuperadas do SQLite, protegidas pelo `PromptGuard` e auditadas server-side pelo `CitationValidator` (`[EV-N]`). Páginas não aprovadas (`native_quality_checked`, OCR pendente ou reprovadas) **não são enviadas ao Gemini**.
 
 O Gemini **não é fonte normativa primária** e **não pode criar, corrigir, completar ou substituir redações normativas**.
 
@@ -84,28 +84,38 @@ Caso o índice lexical ou o índice vetorial precise ser recriado (ex.: mudança
 
 ---
 
-## 3. Modelos Gemini, Custos e Configuração Inicial
+## 3. Modelos Gemini (Desenvolvimento vs. Runtime Free Tier), Privacidade e Configuração Inicial
 
 Arquivos com credenciais, Telegram User IDs ou PDFs oficiais **nunca são versionados no Git** (`.gitignore`).
+
+### 3.1. Separação obrigatória entre ambiente de desenvolvimento e runtime da aplicação
+
+- **Desenvolvimento (Antigravity):** utiliza a assinatura pessoal **Google AI Pro** diretamente no seletor de modelos do Antigravity — nunca via chave de API do projeto.
+- **Execução da aplicação (bot Python):** utiliza a **Gemini Developer API** via chave `GEMINI_API_KEY` configurada em **Free Tier Standard** (sem necessidade de ativar Google Cloud Billing):
+  - **Geração padrão:** `GEMINI_GENERATION_MODEL=gemini-4-hydrogen` (Free Tier Standard; alternativa gratuita: `gemini-3.8-flash`).
+  - **Embeddings padrão:** `GEMINI_EMBEDDING_MODEL=gemini-embedding-2` com `GEMINI_EMBEDDING_DIMENSIONS=768` (Free Tier Standard, modalidade somente texto).
+  - **Proteção contra custo acidental:** `GEMINI_ALLOW_PAID_MODELS=false` bloqueia por padrão modelos exclusivos do tier pago (ex.: `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-argon`), sem fallback silencioso para modelos pagos, sem Batch API e sem Google Search/Maps grounding.
+  - **Aviso importante sobre cobrança:** a validação no código reduz o risco de uso acidental de modelos pagos, mas **não substitui** a configuração da conta Google; para garantia total de custo zero, mantenha o projeto da `GEMINI_API_KEY` no AI Studio **sem Google Cloud Billing vinculado**.
+
+### 3.2. Limites e privacidade no Gemini API Free Tier
+
+- O **Free Tier** possui limites de taxa (RPM/TPM/RPD); o cliente aplica retry com backoff exponencial em HTTP 429 e degradação graciosa preservando o texto normativo do SQLite.
+- Conforme os termos do **Gemini API Free Tier**, prompts e respostas podem ser usados pelo Google para aprimoramento de produtos. Portanto, no Free Tier envie **exclusivamente documentos regulatórios públicos oficiais da ANAC** — nunca dados pessoais, corporativos sigilosos ou credenciais.
+
+### 3.3. Configuração do `.env` local
 
 1. Copie `.env.example` para `.env` localmente e configure:
 
 ```env
 GEMINI_API_KEY=
-GEMINI_GENERATION_MODEL=gemini-4-neon
+GEMINI_GENERATION_MODEL=gemini-4-hydrogen
 GEMINI_EMBEDDING_MODEL=gemini-embedding-2
 GEMINI_EMBEDDING_DIMENSIONS=768
+GEMINI_ALLOW_PAID_MODELS=false
 ```
 
-2. **Atenção sobre disponibilidade e cobrança do Gemini 4 Neon:**
-   - `gemini-4-neon` (estável, janela de contexto de 1M tokens) está disponível **apenas no tier pago** da Gemini API (preço de referência oficial: **US\$ 3 / 1M tokens de entrada** e **US\$ 15 / 1M tokens de saída**).
-   - Assinaturas pessoais do Gemini ou do Antigravity **não** incluem automaticamente faturamento da Gemini API por chave.
-   - **Alternativas configuráveis via `GEMINI_GENERATION_MODEL` (sem fallback silencioso):**
-     - `gemini-4-hydrogen`: alternativa mais econômica (com tier gratuito) recomendada para desenvolvimento e testes controlados.
-     - `gemini-4-carbon`: maior profundidade de raciocínio para análises mais complexas, com custo significativamente maior.
-   - Caso o modelo configurado esteja indisponível na conta, o sistema reporta o erro explicitamente sem trocar de modelo silenciosamente.
-3. **Threshold vetorial inicial:** o parâmetro `retrieval.max_vector_distance: 0.85` (distância de cosseno no ChromaDB) é um valor **inicial/provisório** até calibração com benchmark real após a ingestão do PDF oficial do RBAC 43.
-4. Para ingestão, validação, indexação e consulta passo a passo, consulte o **[Runbook Operacional](docs/operations/03_ingestion_runbook.md)**.
+2. **Threshold vetorial inicial:** o parâmetro `retrieval.max_vector_distance: 0.85` (distância de cosseno no ChromaDB) é **provisório** (calibrado apenas no dataset sintético de 36 consultas) e exige recalibração após a ingestão real do PDF oficial do RBAC 43.
+3. Para ingestão, validação, indexação, diagnóstico (`--debug`) e consulta passo a passo, consulte o **[Runbook Operacional](docs/operations/03_ingestion_runbook.md)**.
 
 ---
 
@@ -130,18 +140,19 @@ GEMINI_EMBEDDING_DIMENSIONS=768
 │   ├── inspect_document.py        # Inspeção de catálogo, versões, páginas e seções
 │   ├── validate_extraction.py     # Revisão humana explícita por página/intervalo/seção
 │   ├── index_document.py          # Indexação (FTS5 + ChromaDB), diagnóstico e rebuild
-│   ├── query_assistant.py         # Consulta CLI ao motor RAG híbrido (sem Telegram)
+│   ├── query_assistant.py         # Consulta CLI ao motor RAG híbrido (incl. --debug e --no-llm)
+│   ├── evaluate_rag.py            # Benchmark quantitativo sintético controlado (36 consultas)
 │   ├── verify_chroma_persistence.py
 │   └── verify_sqlite_persistence.py
 ├── src/rbac_assistant/
-│   ├── config/                    # Pydantic Settings e logging estruturado
+│   ├── config/                    # Pydantic Settings (com allowlist Free Tier) e structlog
 │   ├── domain/                    # Entidades puras e Ports (zero dependências externas)
 │   ├── application/               # DTOs, Serviços (Catalog, Ingestion, Indexing, Chat) e Use Cases
 │   ├── security/                  # PromptGuard e secret_redactor
-│   ├── rag/                       # StructuralChunker, SectionResolver, HybridRetriever e Formatter
+│   ├── rag/                       # Chunker, SectionResolver, HybridRetriever, CitationValidator, Eval
 │   ├── infrastructure/            # SQLite+FTS5, ChromaDB 1.5.9, Google GenAI e pdfplumber
 │   └── interfaces/telegram/       # (Etapa 4) Interface Telegram Long Polling
-├── tests/                         # Testes unitários, integração e evals (fixtures sintéticas)
+├── tests/                         # Testes unitários, integração e evals sintéticos controlados
 ├── Dockerfile                     # Imagem multi-stage Python 3.12 + uv non-root (UID 10001)
 ├── docker-compose.yml             # Stack rbac-bot + chromadb + redes e volumes persistentes
 └── pyproject.toml
@@ -168,6 +179,6 @@ GEMINI_EMBEDDING_DIMENSIONS=768
 | **Etapa 0** | Arquitetura, documentação base, templates e arquivamento de legado | Concluída e integrada (`main`) |
 | **Etapa 1** | Fundação Python 3.12 (`uv`), arquitetura hexagonal, Docker non-root e ChromaDB 1.5.9 | Concluída e integrada (`main`) |
 | **Etapa 2** | Motor multidocumento de ingestão documental (SQLite WAL/ACID, `pdfplumber`, validação híbrida `review_on_demand`) | Concluída e integrada (`main`) |
-| **Etapa 3** | Integração Gemini (`gemini-4-neon` + `gemini-embedding-2` 768d), SQLite FTS5, ChromaDB versionado e Motor RAG Híbrido (RRF) | **Implementada na branch `feat/etapa-3-gemini-hybrid-rag` (PR #7) — aguardando revisão e merge** |
+| **Etapa 3** | Integração Gemini Free Tier (`gemini-4-hydrogen` + `gemini-embedding-2` 768d), SQLite FTS5, ChromaDB versionado, Motor RAG Híbrido (RRF), `CitationValidator`, `--debug` e avaliação controlada | **Implementada na branch `feat/etapa-3-gemini-hybrid-rag` (PR #7) — aguardando revisão e merge** |
 | **Etapa 4** | Interface Telegram (Long Polling), controle de acesso (`ADMIN`/`USER`), comandos e `MessageSplitter` | Futura |
-| **Etapa 5** | Evals avançados de fidelidade com dataset real, benchmarks de thresholds e automação de backup | Futura |
+| **Etapa 5** | Evals avançados de fidelidade com dataset real (RBAC 43 ingerido), recalibração de thresholds e automação de backup | Futura |

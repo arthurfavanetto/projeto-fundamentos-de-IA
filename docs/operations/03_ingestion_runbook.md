@@ -15,22 +15,26 @@ git checkout main
 git pull origin main
 ```
 
-### Passo 2 — Configurar o `.env` local
+### Passo 2 — Configurar o `.env` local (Gemini API Free Tier Standard)
 
-Copie `.env.example` para `.env` na raiz do repositório e preencha sua chave e modelos (nunca versione o `.env`):
+Copie `.env.example` para `.env` na raiz do repositório e preencha sua chave da Gemini Developer API gerada no Google AI Studio **sem Google Cloud Billing vinculado** (nunca versione o `.env`):
 
 ```env
-GEMINI_API_KEY=<sua-chave-gemini-api>
-GEMINI_GENERATION_MODEL=gemini-4-neon
+GEMINI_API_KEY=<sua-chave-gemini-api-free-tier>
+GEMINI_GENERATION_MODEL=gemini-4-hydrogen
 GEMINI_EMBEDDING_MODEL=gemini-embedding-2
 GEMINI_EMBEDDING_DIMENSIONS=768
+GEMINI_ALLOW_PAID_MODELS=false
 CHROMA_HOST=chromadb
 CHROMA_PORT=8000
 ENVIRONMENT=local
 LOG_LEVEL=INFO
 ```
 
-> **Atenção:** `gemini-4-neon` exige tier pago na Gemini API (US\$ 3 / US\$ 15 por 1M tokens). Para testes em conta sem faturamento pago, altere manualmente `GEMINI_GENERATION_MODEL=gemini-4-hydrogen`.
+> **Proteção de custos e privacidade (Free Tier):**
+> - `GEMINI_ALLOW_PAID_MODELS=false` impede o uso acidental de modelos exclusivos do tier pago (ex.: `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-argon`). Alternativa gratuita configurável: `gemini-3.8-flash`.
+> - A validação no código não substitui a configuração de conta no Google Cloud; mantenha o projeto da API Key sem faturamento vinculado para garantia de custo zero.
+> - No Free Tier, processe **apenas documentos regulatórios públicos oficiais da ANAC** (nunca dados pessoais ou confidenciais).
 
 ### Passo 3 — Inicializar a stack Docker
 
@@ -119,10 +123,11 @@ docker compose exec rbac-bot python scripts/query_assistant.py \
   --question "RBAC 43.3" \
   --no-llm
 
-# Consulta restrita apenas a seções com todas as páginas aprovadas para transcrição literal:
+# Consulta com diagnóstico completo do pipeline RAG (FTS5, ChromaDB, RRF, revisão e citações):
 docker compose exec rbac-bot python scripts/query_assistant.py \
   --question "Quais os registros obrigatórios de manutenção no RBAC 43.9?" \
-  --only-approved
+  --only-approved \
+  --debug
 ```
 
 ---
@@ -136,6 +141,10 @@ docker compose exec rbac-bot python scripts/query_assistant.py \
 - **Reconstruir a coleção vetorial a partir do SQLite** (após alterar modelo de embeddings, dimensionalidade ou estratégia de instrução — preserva PDFs, SQLite e aprovações humanas):
   ```bash
   docker compose exec rbac-bot python scripts/index_document.py --rebuild-collection --confirm
+  ```
+- **Executar benchmark quantitativo sintético controlado (36 consultas, 0 chamadas externas):**
+  ```bash
+  uv run python scripts/evaluate_rag.py
   ```
 - **Executar suíte automatizada de qualidade (usa apenas fixtures sintéticas e mocks, sem custo de API):**
   ```bash
