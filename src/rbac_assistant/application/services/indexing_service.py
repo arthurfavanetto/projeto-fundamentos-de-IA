@@ -12,6 +12,7 @@ Garantias:
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -37,6 +38,7 @@ from rbac_assistant.domain.ports.vector_store_port import (
     VectorRecord,
     VectorStorePort,
 )
+from rbac_assistant.rag.retrieval.section_resolver import normalize_amendment_number
 
 logger = structlog.get_logger(__name__)
 
@@ -148,11 +150,13 @@ class IndexingService:
                 f"(versão '{version.version_id}')."
             )
 
-        # Gera 1 embedding independente por chunk usando título estrutural separado
-        # (nunca altera `original_text` nem `normalized_text` persistidos no SQLite)
+        # Gera 1 embedding independente por chunk usando título estrutural separado e corpo limpo
+        # (evita duplicação do cabeçalho normativo dentro de `title: ... | text: ...` e
+        # nunca altera `original_text` nem `normalized_text` persistidos no SQLite)
         chunk_titles = [self._build_embedding_title(c) for c in raw_chunks]
+        chunk_embed_texts = [self._build_embedding_text(c) for c in raw_chunks]
         vectors = self._embedding_port.embed_documents(
-            [c.search_text for c in raw_chunks],
+            chunk_embed_texts,
             titles=chunk_titles,
         )
         if len(vectors) != len(raw_chunks):
@@ -419,6 +423,12 @@ class IndexingService:
         joined = " — ".join(part for part in parts if part)
         return joined or None
 
+    @staticmethod
+    def _build_embedding_text(chunk: NormativeChunk) -> str:
+        """Retorna corpo limpo para embedding sem duplicar o cabeçalho enviado em `title:`."""
+        cleaned = re.sub(r"[ \t]+", " ", chunk.original_text).strip()
+        return cleaned or chunk.search_text
+
     def _build_vector_metadata(self, chunk: NormativeChunk) -> dict[str, MetadataValue]:
         return {
             "chunk_id": chunk.chunk_id,
@@ -429,8 +439,10 @@ class IndexingService:
             "document_type": chunk.document_type,
             "regulation_number": chunk.regulation_number,
             "amendment_number": chunk.amendment_number,
+            "amendment_number_key": normalize_amendment_number(chunk.amendment_number),
             "version_status": chunk.version_status,
             "section_number": chunk.section_number,
+            "section_number_key": chunk.section_number.strip().lower(),
             "subsection_number": chunk.subsection_number,
             "paragraph_number": chunk.paragraph_number,
             "item_number": chunk.item_number,

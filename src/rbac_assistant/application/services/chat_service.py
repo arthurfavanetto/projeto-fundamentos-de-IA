@@ -231,6 +231,7 @@ class NormativeChatService:
             discarded: list[str] = [
                 *citation_check.invalid_evidence_ids,
                 *citation_check.unverified_section_citations,
+                *citation_check.unverified_page_citations,
             ]
             if citation_check.had_modifications:
                 extra_observations.append(

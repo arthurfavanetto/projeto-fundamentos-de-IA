@@ -3,11 +3,13 @@
 Responsabilidades:
 1. Resolver referências estruturais explícitas (ex.: `RBAC 43.3`, `43.9(a)(1)(i)`, `Art. 1º`).
 2. Executar busca lexical SQLite FTS5 (BM25, tolerante a acentos, sem alterar `original_text`).
-3. Executar busca semântica vetorial no ChromaDB com filtros de metadados e limiar de distância.
-4. Fundir e deduplicar candidatos via Reciprocal Rank Fusion (RRF) rastreável.
-5. Hidratar evidências diretamente do SQLite (SSOT), detectar ambiguidade de versão e validar
-   ao vivo o estado de revisão de todas as páginas abrangidas, bloqueando páginas OCR pendentes
-   ou reprovadas.
+3. Executar busca semântica vetorial no ChromaDB com filtros de metadados normalizados
+   (incluindo `amendment_number_key` para `5` == `05` == `005`) e limiar de distância.
+4. Fundir e deduplicar candidatos via Reciprocal Rank Fusion (RRF) rastreável e reranking
+   determinístico opcional (sem LLM pago).
+5. Hidratar evidências diretamente do SQLite (SSOT), detectar ambiguidade de versão, selecionar
+   contexto pertinente (poda adaptativa opcional preservando reconstrução integral) e validar
+   ao vivo o estado de revisão de todas as páginas abrangidas.
 """
 
 from __future__ import annotations
@@ -49,16 +51,18 @@ from rbac_assistant.domain.exceptions import (
 from rbac_assistant.domain.ports.document_repository_port import DocumentRepositoryPort
 from rbac_assistant.domain.ports.rag_ports import EmbeddingPort
 from rbac_assistant.domain.ports.vector_store_port import MetadataValue, VectorStorePort
+from rbac_assistant.rag.retrieval.reranker import DeterministicNormativeReranker, RerankInput
 from rbac_assistant.rag.retrieval.section_resolver import (
     amendments_match,
     extract_amendment_hint,
     extract_regulation_hint,
+    normalize_amendment_number,
     resolve_structural_references,
 )
 
 logger = structlog.get_logger(__name__)
 
-_SOURCE_WEIGHTS: Mapping[RetrievalSource, float] = {
+_DEFAULT_SOURCE_WEIGHTS: Mapping[RetrievalSource, float] = {
     RetrievalSource.EXACT_STRUCTURAL: 2.0,
     RetrievalSource.LEXICAL_FTS5: 1.0,
     RetrievalSource.SEMANTIC_VECTOR: 1.0,
@@ -73,11 +77,19 @@ class _RrfAccumulator:
     structural_rank: int | None = None
     lexical_rank: int | None = None
     vector_rank: int | None = None
+    bm25_score: float | None = None
+    vector_distance: float | None = None
+    rerank_score: float | None = None
 
-    def add(self, candidate: RetrievalCandidate, rrf_k: int) -> None:
+    def add(
+        self,
+        candidate: RetrievalCandidate,
+        rrf_k: int,
+        weights: Mapping[RetrievalSource, float] = _DEFAULT_SOURCE_WEIGHTS,
+    ) -> None:
         if self.sources is None:
             self.sources = []
-        weight = _SOURCE_WEIGHTS[candidate.source]
+        weight = weights.get(candidate.source, _DEFAULT_SOURCE_WEIGHTS[candidate.source])
         self.score += weight / float(rrf_k + candidate.rank)
         if candidate.source not in self.sources:
             self.sources.append(candidate.source)
@@ -87,6 +99,8 @@ class _RrfAccumulator:
         elif candidate.source == RetrievalSource.LEXICAL_FTS5:
             if self.lexical_rank is None or candidate.rank < self.lexical_rank:
                 self.lexical_rank = candidate.rank
+            if self.bm25_score is None or candidate.raw_score > self.bm25_score:
+                self.bm25_score = candidate.raw_score
         elif candidate.source == RetrievalSource.SEMANTIC_VECTOR and (
             self.vector_rank is None or candidate.rank < self.vector_rank
         ):
@@ -97,15 +111,17 @@ def fuse_candidates_rrf(
     candidates: Sequence[RetrievalCandidate],
     *,
     rrf_k: int = 60,
+    source_weights: Mapping[RetrievalSource, float] | None = None,
 ) -> list[_RrfAccumulator]:
     """Combina candidatos de múltiplas fontes usando Reciprocal Rank Fusion (RRF)."""
+    weights = source_weights or _DEFAULT_SOURCE_WEIGHTS
     by_chunk: dict[str, _RrfAccumulator] = {}
     for cand in candidates:
         acc = by_chunk.get(cand.chunk_id)
         if acc is None:
             acc = _RrfAccumulator(chunk_id=cand.chunk_id)
             by_chunk[cand.chunk_id] = acc
-        acc.add(cand, rrf_k)
+        acc.add(cand, rrf_k, weights)
 
     return sorted(
         by_chunk.values(),
@@ -134,6 +150,10 @@ class HybridNormativeRetriever:
         enable_structural: bool = True,
         enable_lexical: bool = True,
         enable_vector: bool = True,
+        source_weights: Mapping[RetrievalSource, float] | None = None,
+        enable_reranker: bool = True,
+        enable_adaptive_cutoff: bool = True,
+        adaptive_cutoff_ratio: float = 0.55,
     ) -> None:
         self._repository = repository
         self._vector_store = vector_store
@@ -152,6 +172,11 @@ class HybridNormativeRetriever:
         self._enable_structural = enable_structural
         self._enable_lexical = enable_lexical
         self._enable_vector = enable_vector
+        self._source_weights = dict(source_weights or _DEFAULT_SOURCE_WEIGHTS)
+        self._enable_reranker = enable_reranker
+        self._enable_adaptive_cutoff = enable_adaptive_cutoff
+        self._adaptive_cutoff_ratio = adaptive_cutoff_ratio
+        self._reranker = DeterministicNormativeReranker()
 
     def retrieve(
         self,
@@ -169,6 +194,8 @@ class HybridNormativeRetriever:
                 diagnostics=RetrievalDiagnostics(
                     query=query,
                     max_vector_distance=self._max_vector_distance,
+                    reranker_enabled=self._enable_reranker,
+                    adaptive_cutoff_enabled=self._enable_adaptive_cutoff,
                 ),
             )
 
@@ -184,6 +211,8 @@ class HybridNormativeRetriever:
                 diagnostics=RetrievalDiagnostics(
                     query=clean_query,
                     max_vector_distance=self._max_vector_distance,
+                    reranker_enabled=self._enable_reranker,
+                    adaptive_cutoff_enabled=self._enable_adaptive_cutoff,
                 ),
             )
 
@@ -196,6 +225,8 @@ class HybridNormativeRetriever:
         structural_hit_ids: list[str] = []
         lexical_diagnostics: list[LexicalHitDiagnostic] = []
         vector_diagnostics: list[VectorHitDiagnostic] = []
+        vector_distance_by_chunk: dict[str, float] = {}
+        chroma_where_used: dict[str, MetadataValue] | None = None
 
         # 1. Busca estrutural determinística exata (ex.: RBAC 43.3, 43.9(a)(1)(i))
         structural_hits = 0
@@ -208,6 +239,7 @@ class HybridNormativeRetriever:
                     regulation_number=ref.regulation_number,
                     paragraph_number=ref.paragraph_number,
                     item_number=ref.item_number,
+                    subitem_number=ref.subitem_number,
                     filters=effective_filters,
                     limit=limit_final,
                 )
@@ -244,7 +276,7 @@ class HybridNormativeRetriever:
                     )
                 )
 
-        # 3. Busca semântica vetorial no ChromaDB
+        # 3. Busca semântica vetorial no ChromaDB (com filtro normalizado amendment_number_key)
         vector_hits_count = 0
         vector_available = True
         if self._enable_vector and self._embedding_port is not None:
@@ -256,12 +288,12 @@ class HybridNormativeRetriever:
                     instruction_strategy_version=self._embedding_port.instruction_strategy_version,
                 )
                 query_vector = self._embedding_port.embed_query(clean_query)
-                where_filter = self._build_chroma_where(effective_filters)
+                chroma_where_used = self._build_chroma_where(effective_filters)
                 vector_hits = self._vector_store.query_similar(
                     collection_name=self._collection_name,
                     query_embedding=query_vector,
                     top_k=max(self._semantic_top_k, limit_final),
-                    where=where_filter,
+                    where=chroma_where_used,
                 )
                 accepted_rank = 0
                 for raw_rank, hit in enumerate(vector_hits, start=1):
@@ -269,6 +301,7 @@ class HybridNormativeRetriever:
                     if hit.distance <= self._max_vector_distance:
                         accepted_rank += 1
                         vector_hits_count += 1
+                        vector_distance_by_chunk[hit.record_id] = hit.distance
                         vector_diagnostics.append(
                             VectorHitDiagnostic(
                                 chunk_id=hit.record_id,
@@ -317,6 +350,10 @@ class HybridNormativeRetriever:
                     "estrutural e lexical (SQLite FTS5)."
                 )
 
+        serialized_chroma_where = tuple(
+            (str(k), str(v)) for k, v in (chroma_where_used or {}).items()
+        )
+
         if not candidates:
             ambiguity_warnings = self._detect_missing_current_version_ambiguity(
                 effective_filters=effective_filters,
@@ -326,6 +363,7 @@ class HybridNormativeRetriever:
             diagnostics = RetrievalDiagnostics(
                 query=clean_query,
                 effective_filters=self._serialize_filters(effective_filters),
+                chroma_where_filter=serialized_chroma_where,
                 resolved_references=resolved_refs,
                 structural_hit_ids=tuple(structural_hit_ids),
                 lexical_hits=tuple(lexical_diagnostics),
@@ -334,6 +372,8 @@ class HybridNormativeRetriever:
                 evidence_decisions=(),
                 max_vector_distance=self._max_vector_distance,
                 version_ambiguity_detected=bool(ambiguity_warnings),
+                reranker_enabled=self._enable_reranker,
+                adaptive_cutoff_enabled=self._enable_adaptive_cutoff,
             )
             return HybridRetrievalResult(
                 query=clean_query,
@@ -347,7 +387,14 @@ class HybridNormativeRetriever:
             )
 
         # 4. Fusão e deduplicação por RRF
-        fused = fuse_candidates_rrf(candidates, rrf_k=self._rrf_k)
+        fused = fuse_candidates_rrf(
+            candidates,
+            rrf_k=self._rrf_k,
+            source_weights=self._source_weights,
+        )
+        for acc in fused:
+            acc.vector_distance = vector_distance_by_chunk.get(acc.chunk_id)
+
         # Quando há correspondência estrutural exata (ex.: "RBAC 43.3"), restringe os resultados
         # às unidades estruturalmente correspondentes para evitar ruído de seções vizinhas
         # (preservando os ranks lexicais/vetoriais fundidos via RRF nessas unidades).
@@ -355,6 +402,40 @@ class HybridNormativeRetriever:
             structural_only = [acc for acc in fused if acc.structural_rank is not None]
             if structural_only:
                 fused = structural_only
+
+        chunk_ids = [item.chunk_id for item in fused]
+        chunks_by_id = {c.chunk_id: c for c in self._repository.get_chunks_by_ids(chunk_ids)}
+
+        # 4.1. Reranking determinístico leve opcional (sem LLM externo; nunca sobrepõe filtros)
+        if self._enable_reranker and len(fused) > 1:
+            rerank_inputs = [
+                RerankInput(
+                    chunk_id=acc.chunk_id,
+                    chunk=chunks_by_id[acc.chunk_id],
+                    rrf_score=acc.score,
+                    structural_rank=acc.structural_rank,
+                    lexical_rank=acc.lexical_rank,
+                    vector_rank=acc.vector_rank,
+                    bm25_score=acc.bm25_score,
+                    vector_distance=acc.vector_distance,
+                )
+                for acc in fused
+                if acc.chunk_id in chunks_by_id
+            ]
+            rerank_scores = self._reranker.score_candidates(
+                query=clean_query,
+                resolved_refs=resolved_refs,
+                candidates=rerank_inputs,
+            )
+            for acc in fused:
+                acc.rerank_score = rerank_scores.get(acc.chunk_id)
+            fused.sort(
+                key=lambda item: (
+                    -(item.rerank_score if item.rerank_score is not None else item.score),
+                    -item.score,
+                    item.chunk_id,
+                )
+            )
 
         rrf_diagnostics = tuple(
             RrfCandidateDiagnostic(
@@ -364,12 +445,10 @@ class HybridNormativeRetriever:
                 lexical_rank=acc.lexical_rank,
                 vector_rank=acc.vector_rank,
                 sources=tuple(acc.sources or ()),
+                rerank_score=acc.rerank_score,
             )
             for acc in fused
         )
-
-        chunk_ids = [item.chunk_id for item in fused]
-        chunks_by_id = {c.chunk_id: c for c in self._repository.get_chunks_by_ids(chunk_ids)}
 
         usable_evidences: list[FusedEvidence] = []
         blocked_evidences: list[FusedEvidence] = []
@@ -480,13 +559,56 @@ class HybridNormativeRetriever:
             if len(usable_evidences) >= limit_final:
                 break
 
-        # Prioriza evidências validadas sobre preliminares mantendo ordem RRF em cada grupo
+        # Prioriza evidências validadas sobre preliminares mantendo ordem de ranking em cada grupo
         usable_evidences.sort(
             key=lambda ev: (
                 0 if ev.trust_level == EvidenceTrustLevel.VALIDATED_LITERAL else 1,
+                -(ev.rerank_score if ev.rerank_score is not None else ev.rrf_score),
                 -ev.rrf_score,
             )
         )
+
+        # 4.2. Seleção adaptativa de contexto pertinente (evita enviar cauda ruidosa ao Gemini,
+        # mantendo todas as evidências comparáveis e reconstrução integral multi-página)
+        if self._enable_adaptive_cutoff and structural_hits == 0 and len(usable_evidences) > 1:
+            top_ev = usable_evidences[0]
+            top_metric = (
+                top_ev.rerank_score if top_ev.rerank_score is not None else top_ev.rrf_score
+            )
+            min_metric = top_metric * self._adaptive_cutoff_ratio
+            kept: list[FusedEvidence] = [top_ev]
+            pruned_ids: set[str] = set()
+            for ev in usable_evidences[1:]:
+                cand_metric = ev.rerank_score if ev.rerank_score is not None else ev.rrf_score
+                if cand_metric >= min_metric:
+                    kept.append(ev)
+                else:
+                    pruned_ids.add(ev.chunk_id)
+
+            if pruned_ids:
+                usable_evidences = kept
+                evidence_decisions = [
+                    (
+                        EvidenceDecisionDiagnostic(
+                            chunk_id=d.chunk_id,
+                            document_id=d.document_id,
+                            version_id=d.version_id,
+                            regulation_number=d.regulation_number,
+                            amendment_number=d.amendment_number,
+                            section_number=d.section_number,
+                            pdf_pages=d.pdf_pages,
+                            trust_level=d.trust_level,
+                            included=False,
+                            reason=(
+                                f"excluded:adaptive_context_cutoff"
+                                f"(ratio<{self._adaptive_cutoff_ratio:.2f})"
+                            ),
+                        )
+                        if d.chunk_id in pruned_ids and d.included
+                        else d
+                    )
+                    for d in evidence_decisions
+                ]
 
         # 5. Detecção explícita de ambiguidade de versão (nunca assume maior emenda como vigente)
         ambiguity_warnings = self._detect_result_version_ambiguity(
@@ -505,6 +627,7 @@ class HybridNormativeRetriever:
         diagnostics = RetrievalDiagnostics(
             query=clean_query,
             effective_filters=self._serialize_filters(effective_filters),
+            chroma_where_filter=serialized_chroma_where,
             resolved_references=resolved_refs,
             structural_hit_ids=tuple(structural_hit_ids),
             lexical_hits=tuple(lexical_diagnostics),
@@ -513,6 +636,8 @@ class HybridNormativeRetriever:
             evidence_decisions=tuple(evidence_decisions),
             max_vector_distance=self._max_vector_distance,
             version_ambiguity_detected=bool(ambiguity_warnings),
+            reranker_enabled=self._enable_reranker,
+            adaptive_cutoff_enabled=self._enable_adaptive_cutoff,
         )
 
         return HybridRetrievalResult(
@@ -597,10 +722,9 @@ class HybridNormativeRetriever:
         if filters.version_id:
             where["version_id"] = filters.version_id
         if filters.amendment_number:
-            # Emendas numéricas (ex.: "5" vs "05") são filtradas com normalização pós-hidratação
-            # para evitar falso negativo por zero à esquerda no metadado exato do ChromaDB.
-            if not filters.amendment_number.strip().isdigit():
-                where["amendment_number"] = filters.amendment_number.strip()
+            # Aplica filtragem normalizada diretamente no ChromaDB ("5" == "05" == "005")
+            # evitando desperdício de janela top_k com emendas concorrentes.
+            where["amendment_number_key"] = normalize_amendment_number(filters.amendment_number)
         elif filters.version_status is not None:
             where["version_status"] = filters.version_status.value
         elif filters.only_current_version and not filters.version_id:
@@ -620,6 +744,9 @@ class HybridNormativeRetriever:
             items.append(("regulation_number", filters.regulation_number))
         if filters.amendment_number:
             items.append(("amendment_number", filters.amendment_number))
+            items.append(
+                ("amendment_number_key", normalize_amendment_number(filters.amendment_number))
+            )
         if filters.version_id:
             items.append(("version_id", filters.version_id))
         if filters.version_status is not None:
@@ -659,7 +786,6 @@ class HybridNormativeRetriever:
                 )
                 continue
 
-            # Mesmo com 1 versão retornada, verifica no SQLite se há >1 versão marcada current
             db_versions = self._repository.list_versions(doc_id)
             current_versions = [
                 v for v in db_versions if v.version_status == VersionStatus.CURRENT
@@ -730,7 +856,6 @@ class HybridNormativeRetriever:
         if document is None or version is None:
             return None
 
-        # Reconstrói texto integral da seção a partir do SSOT SQLite quando configurado
         units = self._repository.get_units_by_section(
             version_id=version.version_id,
             section_number=chunk.section_number,
@@ -818,6 +943,7 @@ class HybridNormativeRetriever:
             lexical_rank=acc.lexical_rank,
             vector_rank=acc.vector_rank,
             structural_rank=acc.structural_rank,
+            rerank_score=acc.rerank_score,
             warning_message=assessment.warning_message,
         )
 

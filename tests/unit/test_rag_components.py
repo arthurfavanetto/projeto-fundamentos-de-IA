@@ -91,18 +91,24 @@ def test_citation_validator_discards_hallucinated_ev_ids_and_ungrounded_sections
     validator = CitationValidator()
 
     clean_res = validator.validate(
-        explanation="Segundo a seção 43.3 [EV-1], com remissão à seção 43.7, exige-se habilitação.",
+        explanation=(
+            "Segundo a seção 43.3 [EV-1] (PDF p. 2, página 10/25), com remissão à seção 43.7, "
+            "exige-se habilitação."
+        ),
         evidence_map={"EV-1": ev1},
     )
     assert clean_res.had_modifications is False
     assert clean_res.valid_evidence_ids == ("EV-1",)
     assert clean_res.invalid_evidence_ids == ()
     assert clean_res.unverified_section_citations == ()
+    assert clean_res.unverified_page_citations == ()
+    assert len(clean_res.valid_page_citations) == 2
     assert clean_res.citation_precision == 1.0
 
     hallucinated_res = validator.validate(
         explanation=(
-            "A seção 43.3 [EV-1] determina a regra, e o RBAC 43.99 [EV-99] complementa o tema."
+            "A seção 43.3 [EV-1] determina a regra na página 99, e o RBAC 43.99 [EV-99] "
+            "(PDF p. 42) complementa o tema."
         ),
         evidence_map={"EV-1": ev1},
     )
@@ -110,9 +116,99 @@ def test_citation_validator_discards_hallucinated_ev_ids_and_ungrounded_sections
     assert hallucinated_res.valid_evidence_ids == ("EV-1",)
     assert hallucinated_res.invalid_evidence_ids == ("EV-99",)
     assert any("43.99" in s for s in hallucinated_res.unverified_section_citations)
+    assert len(hallucinated_res.unverified_page_citations) == 2
     assert "[EV-99]" not in hallucinated_res.sanitized_explanation
     assert "43.99" not in hallucinated_res.sanitized_explanation
+    assert "página 99" not in hallucinated_res.sanitized_explanation
+    assert "PDF p. 42" not in hallucinated_res.sanitized_explanation
     assert hallucinated_res.citation_precision < 1.0
+
+
+@pytest.mark.unit
+def test_deterministic_reranker_breaks_rrf_ties_using_similarity_bm25_and_title() -> None:
+    from rbac_assistant.domain.entities.rag import NormativeChunk
+    from rbac_assistant.rag.retrieval.reranker import DeterministicNormativeReranker, RerankInput
+
+    def _chunk(cid: str, sec: str, title: str) -> NormativeChunk:
+        return NormativeChunk(
+            chunk_id=cid,
+            document_id="d1",
+            version_id="v1",
+            unit_id=f"u_{cid}",
+            authority="ANAC",
+            document_type="RBAC",
+            regulation_number="145",
+            amendment_number="06",
+            version_status="current",
+            section_number=sec,
+            subsection_number="",
+            paragraph_number="",
+            item_number="",
+            title=title,
+            subpart="",
+            start_page=1,
+            end_page=1,
+            pdf_pages=(1,),
+            printed_pages=("1/5",),
+            chunk_index=0,
+            original_text=title,
+            search_text=title,
+            source_hash="a" * 64,
+            content_hash="b" * 64,
+            validation_status="approved_for_literal_transcription",
+        )
+
+    reranker = DeterministicNormativeReranker()
+    scores = reranker.score_candidates(
+        query="arquivamento e guarda documental na oficina",
+        resolved_refs=(),
+        candidates=[
+            RerankInput(
+                chunk_id="weak_tie",
+                chunk=_chunk("weak_tie", "145.3", "Definições"),
+                rrf_score=0.0325,
+                structural_rank=None,
+                lexical_rank=1,
+                vector_rank=2,
+                bm25_score=2.5,
+                vector_distance=0.84,
+            ),
+            RerankInput(
+                chunk_id="strong_match",
+                chunk=_chunk("strong_match", "145.219", "Registros e guarda documental"),
+                rrf_score=0.0323,
+                structural_rank=None,
+                lexical_rank=3,
+                vector_rank=1,
+                bm25_score=2.4,
+                vector_distance=0.19,
+            ),
+        ],
+    )
+    assert scores["strong_match"] > scores["weak_tie"]
+
+
+@pytest.mark.unit
+def test_fts5_term_extraction_preserves_article_and_appendix_and_drops_filtered_tokens() -> None:
+    from rbac_assistant.domain.entities.rag import SearchFilter
+    from rbac_assistant.infrastructure.storage.sqlite_document_repository import (
+        SqliteDocumentRepository,
+    )
+
+    terms_art = SqliteDocumentRepository._extract_fts5_terms(
+        "Qual o conteúdo do Art. 1º da Resolução 700?",
+        filters=SearchFilter(regulation_number="700"),
+    )
+    assert '("Art 1º" OR "Art 1")' in terms_art
+    assert '"700"' not in terms_art
+
+    terms_app = SqliteDocumentRepository._extract_fts5_terms(
+        "O que estabelece o Apêndice A do RBAC 43?",
+        filters=SearchFilter(regulation_number="43"),
+    )
+    assert '"Apêndice A"' in terms_app
+    assert '"43"' not in terms_app
+    assert '"RBAC"' not in terms_app
 
 
 @pytest.mark.unit

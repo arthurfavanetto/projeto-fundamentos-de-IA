@@ -168,10 +168,11 @@ class DocumentRepositoryPort(Protocol):
         regulation_number: str | None = None,
         paragraph_number: str | None = None,
         item_number: str | None = None,
+        subitem_number: str | None = None,
         filters: SearchFilter | None = None,
         limit: int = 10,
     ) -> list[NormativeChunk]:
-        """Busca exata determinística por referência estrutural (ex.: RBAC 43.3)."""
+        """Busca exata determinística por referência estrutural (ex.: RBAC 43.3, 43.9(a)(1)(i))."""
 
     def search_chunks_fts(
         self,

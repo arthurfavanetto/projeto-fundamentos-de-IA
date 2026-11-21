@@ -100,9 +100,74 @@ _PT_STOPWORDS: frozenset[str] = frozenset(
         "sua",
         "mais",
         "muito",
+        "pode",
+        "podem",
+        "deve",
+        "devem",
+        "devo",
+        "preciso",
+        "saber",
+        "depois",
+        "antes",
+        "após",
+        "apos",
+        "cada",
+        "todo",
+        "toda",
+        "todos",
+        "todas",
+        "outro",
+        "outra",
+        "também",
+        "tambem",
+        "ainda",
+        "apenas",
+        "somente",
+        "entre",
+        "até",
+        "ate",
+        "ser",
+        "estar",
+        "ter",
+        "foi",
+        "seja",
+        "tem",
+        "têm",
+        "novo",
+        "nova",
+    }
+)
+# Termos estruturais/boilerplate presentes em cabeçalhos de quase todos os chunks;
+# omitidos da busca lexical FTS5 apenas quando existem termos específicos na consulta.
+_FTS_GENERIC_HEADER_TERMS: frozenset[str] = frozenset(
+    {
+        "rbac",
+        "anac",
+        "seção",
+        "secao",
+        "emenda",
+        "emd",
+        "resolução",
+        "resolucao",
+        "portaria",
+        "parágrafo",
+        "paragrafo",
+        "alínea",
+        "alinea",
+        "inciso",
+        "item",
+        "art",
+        "artigo",
+        "consulte",
+        "prevê",
+        "preve",
+        "dispõe",
+        "dispoe",
     }
 )
 _FTS_TOKEN_RE = re.compile(r"[0-9A-Za-zÀ-ÖØ-öø-ÿ]+(?:[.\-/][0-9A-Za-zÀ-ÖØ-öø-ÿ]+)*")
+_FTS_ARTICLE_PHRASE_RE = re.compile(r"\b(?:Art\.?|Artigo)\s*(\d+)[º°]?", re.IGNORECASE)
+_FTS_APPENDIX_PHRASE_RE = re.compile(r"\b(Ap[êe]ndice\s+[A-Z0-9]+)\b", re.IGNORECASE)
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -1328,23 +1393,75 @@ class SqliteDocumentRepository:
         return clauses, params
 
     @staticmethod
-    def _build_fts5_match_query(query: str) -> str:
-        raw_tokens = _FTS_TOKEN_RE.findall(query)
-        filtered = [
+    def _extract_fts5_terms(
+        query: str,
+        *,
+        filters: SearchFilter | None = None,
+    ) -> list[str]:
+        """Extrai termos/frases FTS5 preservando expressões estruturais e removendo ruído."""
+        grouped_exprs: list[str] = []
+        phrases: list[str] = []
+        residual = query
+
+        # 1. Preserva frases estruturais ("Art. 1º"/"Art. 1" e "Apêndice A") sem perder 1-char
+        for match in _FTS_ARTICLE_PHRASE_RE.finditer(query):
+            num = match.group(1)
+            grouped_exprs.append(f'("Art {num}º" OR "Art {num}")')
+        residual = _FTS_ARTICLE_PHRASE_RE.sub(" ", residual)
+
+        for match in _FTS_APPENDIX_PHRASE_RE.finditer(residual):
+            phrases.append(re.sub(r"\s+", " ", match.group(1)).strip())
+        residual = _FTS_APPENDIX_PHRASE_RE.sub(" ", residual)
+
+        # 2. Tokens já cobertos por filtros SQL explícitos (regulamento / emenda)
+        already_filtered_nums: set[str] = set()
+        if filters is not None:
+            if filters.regulation_number:
+                reg = filters.regulation_number.strip().lower()
+                already_filtered_nums.add(reg)
+            if filters.amendment_number:
+                amd = filters.amendment_number.strip().lower()
+                already_filtered_nums.add(amd)
+                if amd.isdigit():
+                    already_filtered_nums.add(str(int(amd)))
+                    already_filtered_nums.add(f"{int(amd):02d}")
+
+        raw_tokens = _FTS_TOKEN_RE.findall(residual)
+        meaningful = [
             tok for tok in raw_tokens if len(tok) > 1 and tok.lower() not in _PT_STOPWORDS
         ]
-        tokens = filtered or raw_tokens
-        if not tokens:
-            return ""
-        deduped: list[str] = []
+        specific = [
+            tok
+            for tok in meaningful
+            if tok.lower() not in _FTS_GENERIC_HEADER_TERMS
+            and tok.lower() not in already_filtered_nums
+        ]
+
+        selected_plain: list[str] = (
+            [*phrases, *specific]
+            if (grouped_exprs or phrases or specific)
+            else (meaningful or raw_tokens)
+        )
+
+        deduped: list[str] = list(dict.fromkeys(grouped_exprs))
         seen: set[str] = set()
-        for tok in tokens:
-            key = tok.lower()
-            if key not in seen:
+        for term in selected_plain:
+            key = term.lower()
+            if key and key not in seen:
                 seen.add(key)
-                escaped = tok.replace('"', '""')
+                escaped = term.replace('"', '""')
                 deduped.append(f'"{escaped}"')
-        return " OR ".join(deduped)
+        return deduped
+
+    @classmethod
+    def _build_fts5_match_query(
+        cls,
+        query: str,
+        *,
+        filters: SearchFilter | None = None,
+    ) -> str:
+        terms = cls._extract_fts5_terms(query, filters=filters)
+        return " OR ".join(terms) if terms else ""
 
     def save_chunks(
         self,
@@ -1481,6 +1598,7 @@ class SqliteDocumentRepository:
         regulation_number: str | None = None,
         paragraph_number: str | None = None,
         item_number: str | None = None,
+        subitem_number: str | None = None,
         filters: SearchFilter | None = None,
         limit: int = 10,
     ) -> list[NormativeChunk]:
@@ -1513,9 +1631,53 @@ class SqliteDocumentRepository:
                     nc.chunk_index ASC
                 LIMIT ?;
                 """,
-                [*params, (paragraph_number or "").strip(), limit],
+                [*params, (paragraph_number or "").strip(), max(limit, 10)],
             ).fetchall()
-        return [self._row_to_chunk(row) for row in rows]
+
+        chunks = [self._row_to_chunk(row) for row in rows]
+        if (paragraph_number or item_number or subitem_number) and len(chunks) > 1:
+            composite_marker = "".join(
+                part.lower() for part in (paragraph_number, item_number, subitem_number) if part
+            )
+            chunks.sort(
+                key=lambda c: (
+                    0 if (composite_marker and composite_marker in c.original_text.lower()) else 1,
+                    c.chunk_index,
+                )
+            )
+        return chunks[:limit]
+
+    def _run_fts5_query(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        match_expr: str,
+        filter_clauses: Sequence[str],
+        filter_params: Sequence[Any],
+        limit: int,
+    ) -> list[tuple[str, float]]:
+        clauses = ["normative_chunks_fts MATCH ?", *filter_clauses]
+        params: list[Any] = [match_expr, *filter_params, limit]
+        where_sql = " AND ".join(clauses)
+        rows = conn.execute(
+            f"""
+            SELECT
+                nc.chunk_id,
+                bm25(
+                    normative_chunks_fts,
+                    0.0, 0.0, 0.0, 3.0, 1.0, 6.0, 3.0, 2.0, 2.0, 4.0, 1.0
+                ) AS rank_score
+            FROM normative_chunks_fts
+            JOIN normative_chunks nc ON nc.chunk_id = normative_chunks_fts.chunk_id
+            WHERE {where_sql}
+            ORDER BY rank_score ASC, nc.chunk_id ASC
+            LIMIT ?;
+            """,
+            params,
+        ).fetchall()
+        # No SQLite FTS5, bm25() retorna valores negativos mais baixos para melhores resultados;
+        # convertemos para escore positivo decrescente para maior clareza.
+        return [(str(r["chunk_id"]), float(-r["rank_score"])) for r in rows]
 
     def search_chunks_fts(
         self,
@@ -1524,35 +1686,58 @@ class SqliteDocumentRepository:
         filters: SearchFilter | None = None,
         limit: int = 10,
     ) -> list[tuple[str, float]]:
-        match_expr = self._build_fts5_match_query(query)
-        if not match_expr:
+        terms = self._extract_fts5_terms(query, filters=filters)
+        if not terms:
             return []
 
-        clauses, params = self._build_chunk_filter_clauses(filters, alias="nc")
-        clauses.insert(0, "normative_chunks_fts MATCH ?")
-        params.insert(0, match_expr)
-        where_sql = " AND ".join(clauses)
-
+        filter_clauses, filter_params = self._build_chunk_filter_clauses(filters, alias="nc")
         with self._connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT
-                    nc.chunk_id,
-                    bm25(
-                        normative_chunks_fts,
-                        0.0, 0.0, 0.0, 3.0, 1.0, 6.0, 3.0, 2.0, 2.0, 4.0, 1.0
-                    ) AS rank_score
-                FROM normative_chunks_fts
-                JOIN normative_chunks nc ON nc.chunk_id = normative_chunks_fts.chunk_id
-                WHERE {where_sql}
-                ORDER BY rank_score ASC, nc.chunk_id ASC
-                LIMIT ?;
-                """,
-                [*params, limit],
-            ).fetchall()
-        # No SQLite FTS5, bm25() retorna valores negativos mais baixos para melhores resultados;
-        # convertemos para escore positivo decrescente para maior clareza.
-        return [(str(r["chunk_id"]), float(-r["rank_score"])) for r in rows]
+            strict_hits: list[tuple[str, float]] = []
+            # Estágio 1 (alta precisão): quando há 2..5 termos específicos, tenta conjunção AND
+            if 2 <= len(terms) <= 5:
+                strict_hits = self._run_fts5_query(
+                    conn,
+                    match_expr=" AND ".join(terms),
+                    filter_clauses=filter_clauses,
+                    filter_params=filter_params,
+                    limit=limit,
+                )
+
+            broad_hits = self._run_fts5_query(
+                conn,
+                match_expr=" OR ".join(terms),
+                filter_clauses=filter_clauses,
+                filter_params=filter_params,
+                limit=limit,
+            )
+
+        # No SQLite FTS5, termos presentes em >= 50% do corpus recebem IDF limitado a 1e-6
+        # (gerando escore ~1e-6 sem poder discriminativo). Filtramos abaixo de 1e-3 sempre que
+        # existirem candidatos com BM25 discriminativo real.
+        min_informative_bm25 = 1e-3
+        positive_strict = [(cid, sc) for cid, sc in strict_hits if sc > min_informative_bm25]
+        positive_broad = [(cid, sc) for cid, sc in broad_hits if sc > min_informative_bm25]
+
+        if positive_strict:
+            merged: list[tuple[str, float]] = list(positive_strict)
+            seen = {cid for cid, _ in merged}
+            top_strict = merged[0][1]
+            # Complementa com candidatos OR apenas se tiverem relevância lexical comparável
+            for cid, sc in positive_broad:
+                if cid in seen:
+                    continue
+                if sc >= 0.35 * top_strict:
+                    merged.append((cid, sc))
+                    seen.add(cid)
+                if len(merged) >= limit:
+                    break
+            return merged[:limit]
+
+        if positive_broad:
+            return positive_broad[:limit]
+
+        # Fallback para bancos minúsculos onde o único termo buscado ocorre em 100% dos chunks
+        return (strict_hits or broad_hits)[:limit]
 
     def rebuild_fts_index(self, *, version_id: str | None = None) -> int:
         """Reconstrói atomicamente o índice derivado FTS5 a partir dos chunks do SQLite."""

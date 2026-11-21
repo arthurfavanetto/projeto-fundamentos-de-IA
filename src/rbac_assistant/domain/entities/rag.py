@@ -141,6 +141,7 @@ class RrfCandidateDiagnostic:
     lexical_rank: int | None
     vector_rank: int | None
     sources: tuple[RetrievalSource, ...]
+    rerank_score: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +166,7 @@ class RetrievalDiagnostics:
 
     query: str
     effective_filters: tuple[tuple[str, str], ...] = ()
+    chroma_where_filter: tuple[tuple[str, str], ...] = ()
     resolved_references: tuple[ResolvedStructuralRef, ...] = ()
     structural_hit_ids: tuple[str, ...] = ()
     lexical_hits: tuple[LexicalHitDiagnostic, ...] = ()
@@ -173,6 +175,8 @@ class RetrievalDiagnostics:
     evidence_decisions: tuple[EvidenceDecisionDiagnostic, ...] = ()
     max_vector_distance: float = 0.85
     version_ambiguity_detected: bool = False
+    reranker_enabled: bool = False
+    adaptive_cutoff_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +186,10 @@ class CitationValidationResult:
     sanitized_explanation: str
     valid_evidence_ids: tuple[str, ...] = ()
     invalid_evidence_ids: tuple[str, ...] = ()
+    valid_section_citations: tuple[str, ...] = ()
     unverified_section_citations: tuple[str, ...] = ()
+    valid_page_citations: tuple[str, ...] = ()
+    unverified_page_citations: tuple[str, ...] = ()
     citation_precision: float = 1.0
     had_modifications: bool = False
 
@@ -221,6 +228,7 @@ class FusedEvidence:
     lexical_rank: int | None = None
     vector_rank: int | None = None
     structural_rank: int | None = None
+    rerank_score: float | None = None
     warning_message: str | None = None
 
 

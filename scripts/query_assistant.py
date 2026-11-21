@@ -43,6 +43,7 @@ def _serialize_diagnostics(diag: RetrievalDiagnostics | None) -> dict[str, Any] 
     return {
         "query": redact_text(diag.query),
         "effective_filters": dict(diag.effective_filters),
+        "chroma_where_filter": dict(diag.chroma_where_filter),
         "resolved_references": [
             {
                 "raw_match": r.raw_match,
@@ -75,6 +76,9 @@ def _serialize_diagnostics(diag: RetrievalDiagnostics | None) -> dict[str, Any] 
             {
                 "chunk_id": r.chunk_id,
                 "rrf_score": round(r.rrf_score, 6),
+                "rerank_score": (
+                    round(r.rerank_score, 6) if r.rerank_score is not None else None
+                ),
                 "structural_rank": r.structural_rank,
                 "lexical_rank": r.lexical_rank,
                 "vector_rank": r.vector_rank,
@@ -99,6 +103,8 @@ def _serialize_diagnostics(diag: RetrievalDiagnostics | None) -> dict[str, Any] 
         ],
         "max_vector_distance": diag.max_vector_distance,
         "version_ambiguity_detected": diag.version_ambiguity_detected,
+        "reranker_enabled": diag.reranker_enabled,
+        "adaptive_cutoff_enabled": diag.adaptive_cutoff_enabled,
     }
 
 
@@ -112,7 +118,15 @@ def format_debug_report(answer: StructuredNormativeAnswer) -> str:
         return "\n".join(lines)
 
     filters_str = ", ".join(f"{k}={v}" for k, v in diag.effective_filters) or "(nenhum)"
+    chroma_where_str = (
+        ", ".join(f"{k}={v}" for k, v in diag.chroma_where_filter) or "(nenhum)"
+    )
     lines.append(f"Filtros efetivos: {filters_str}")
+    lines.append(f"Filtro ChromaDB (where): {chroma_where_str}")
+    lines.append(
+        f"Reranker determinístico: {'ATIVO' if diag.reranker_enabled else 'INATIVO'} | "
+        f"Poda adaptativa de contexto: {'ATIVA' if diag.adaptive_cutoff_enabled else 'INATIVA'}"
+    )
     lines.append(
         f"Ambiguidade de versão detectada: {'SIM' if diag.version_ambiguity_detected else 'NÃO'}"
     )
@@ -151,8 +165,11 @@ def format_debug_report(answer: StructuredNormativeAnswer) -> str:
     lines.append(f"Fusão RRF ({len(diag.rrf_candidates)}):")
     for rcand in diag.rrf_candidates:
         src_list = ",".join(s.value for s in rcand.sources)
+        rerank_str = (
+            f" rerank={rcand.rerank_score:.4f}" if rcand.rerank_score is not None else ""
+        )
         lines.append(
-            f"  chunk={rcand.chunk_id} rrf={rcand.rrf_score:.6f} "
+            f"  chunk={rcand.chunk_id} rrf={rcand.rrf_score:.6f}{rerank_str} "
             f"ranks(est={rcand.structural_rank}, fts={rcand.lexical_rank}, "
             f"vec={rcand.vector_rank}) fontes=[{src_list}]"
         )

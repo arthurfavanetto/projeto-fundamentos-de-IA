@@ -1000,3 +1000,90 @@ def test_citation_validator_end_to_end_version_ambiguity_and_debug_cli(
     assert len(payload["diagnostics"]["rrf_candidates"]) >= 1
     assert len(payload["diagnostics"]["evidence_decisions"]) >= 1
 
+
+@pytest.mark.integration
+def test_chroma_amendment_number_key_prevents_top_k_eviction_across_competing_amendments(
+    tmp_path: Path,
+) -> None:
+    """Reproduz e valida a correção do filtro de emendas numéricas diretamente no ChromaDB.
+
+    Com 6 emendas concorrentes (01..06) e top_k=5, sem `amendment_number_key` no `where`
+    do ChromaDB, emendas concorrentes ocupariam a janela top_k e expulsariam a Emenda 05.
+    """
+    repo, catalog, ingestion, validate_uc, vector_store, validation = _build_env(tmp_path)
+    embedder = _DeterministicSemanticEmbedder(model_name="gemini-embedding-2", dimensions=256)
+    indexing = IndexingService(
+        repository=repo,
+        catalog_service=catalog,
+        chunker=StructuralNormativeChunker(),
+        vector_store=vector_store,
+        embedding_port=embedder,
+        default_collection_name="test_six_amendments",
+    )
+
+    amendments = ("01", "02", "03", "04", "05", "06")
+    for amd in amendments:
+        ver_status = VersionStatus.CURRENT if amd == "06" else VersionStatus.HISTORICAL
+        ver_id = _ingest_synthetic_rbac(
+            ingestion,
+            tmp_path,
+            document_id="synth_rbac_66",
+            regulation_number="66",
+            amendment_number=amd,
+            version_status=ver_status,
+            section_text_override=(
+                f"(a) Regra concorrente de manutenção técnica exclusiva da Emenda {amd}."
+            ),
+        )
+        validate_uc.execute(
+            PageReviewRequestDTO(
+                document_id="synth_rbac_66",
+                version_id=ver_id,
+                reviewer="revisor_emendas",
+                decision=ReviewDecision.APPROVE,
+                confirmed=True,
+                page_numbers=(2, 3),
+            )
+        )
+        indexing.index_document(document_id="synth_rbac_66", version_id=ver_id)
+
+    # Confirma preservação do valor original (`05`) e chave normalizada (`5`) no ChromaDB
+    ids_05 = vector_store.list_record_ids(
+        collection_name="test_six_amendments",
+        where={"amendment_number_key": "5"},
+    )
+    records_05 = vector_store.get_records(
+        collection_name="test_six_amendments",
+        record_ids=ids_05,
+    )
+    assert len(records_05) >= 1
+    assert all(r.metadata["amendment_number"] == "05" for r in records_05)
+    assert all(r.metadata["amendment_number_key"] == "5" for r in records_05)
+
+    # Modo vector_only com top_k=5 sob 6 emendas concorrentes: "5", "05" e "005" devem
+    # filtrar diretamente no ChromaDB sem desperdiçar nenhum slot com outras emendas!
+    vector_only = HybridNormativeRetriever(
+        repository=repo,
+        vector_store=vector_store,
+        embedding_port=embedder,
+        collection_name="test_six_amendments",
+        validation_service=validation,
+        semantic_top_k=5,
+        final_top_k=5,
+        enable_structural=False,
+        enable_lexical=False,
+        enable_vector=True,
+    )
+    for variant in ("5", "05", "005"):
+        res = vector_only.retrieve(
+            query=f"manutenção técnica exclusiva RBAC 66 Emenda {variant}",
+            top_k=5,
+        )
+        assert len(res.evidences) >= 1
+        assert all(ev.amendment_number == "05" for ev in res.evidences)
+        assert res.diagnostics is not None
+        where_dict = dict(res.diagnostics.chroma_where_filter)
+        assert where_dict.get("amendment_number_key") == "5"
+        assert all("_emd_05_" in vh.chunk_id for vh in res.diagnostics.vector_hits)
+
+
