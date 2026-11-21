@@ -321,7 +321,10 @@ def test_indexing_idempotency_fts5_accents_vector_rrf_and_literal_fidelity(
     assert prelim_answer.normative_text is None
     assert prelim_answer.preliminary_excerpt is not None
     assert any("review_on_demand" in obs for obs in prelim_answer.observations)
-    assert "preliminary_unreviewed" in llm.calls[-1]["user_prompt"]
+    # Governança estrita: páginas não aprovadas NÃO podem ser enviadas ao Gemini!
+    assert llm.calls == []
+    assert prelim_answer.evidences_sent_to_llm == ()
+    assert prelim_answer.used_fallback_without_llm is True
 
     # 5. Aprovação parcial de seção multi-página (seção 43.3 atravessa páginas 2 e 3):
     # aprovar apenas página 2 mantém bloqueio de transcrição literal!
@@ -837,3 +840,163 @@ def test_sqlite_migrations_fts5_rebuild_and_embedding_prefix_isolation(tmp_path:
     assert col_meta is not None
     assert col_meta.instruction_strategy_version == "ge2_asymmetric_v1"
     assert col_meta.created_at is not None
+
+
+@pytest.mark.integration
+def test_citation_validator_end_to_end_version_ambiguity_and_debug_cli(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, catalog, ingestion, validate_uc, vector_store, validation = _build_env(tmp_path)
+
+    # 1. Documento com duas versões históricas e NENHUMA marcada como current => ambiguidade!
+    v1 = _ingest_synthetic_rbac(
+        ingestion,
+        tmp_path,
+        document_id="synth_rbac_77",
+        regulation_number="77",
+        amendment_number="01",
+        version_status=VersionStatus.HISTORICAL,
+        section_text_override="(a) Regra histórica 77 emenda 01.",
+    )
+    v2 = _ingest_synthetic_rbac(
+        ingestion,
+        tmp_path,
+        document_id="synth_rbac_77",
+        regulation_number="77",
+        amendment_number="02",
+        version_status=VersionStatus.HISTORICAL,
+        section_text_override="(a) Regra histórica 77 emenda 02.",
+    )
+    for ver_id in (v1, v2):
+        validate_uc.execute(
+            PageReviewRequestDTO(
+                document_id="synth_rbac_77",
+                version_id=ver_id,
+                reviewer="revisor",
+                decision=ReviewDecision.APPROVE,
+                confirmed=True,
+                page_numbers=(2, 3),
+            )
+        )
+
+    embedder = _DeterministicSemanticEmbedder()
+    indexing = IndexingService(
+        repository=repo,
+        catalog_service=catalog,
+        chunker=StructuralNormativeChunker(),
+        vector_store=vector_store,
+        embedding_port=embedder,
+        default_collection_name="test_ambig_debug",
+    )
+    indexing.index_document(document_id="synth_rbac_77", version_id=v1)
+    indexing.index_document(document_id="synth_rbac_77", version_id=v2)
+
+    retriever = HybridNormativeRetriever(
+        repository=repo,
+        vector_store=vector_store,
+        embedding_port=embedder,
+        collection_name="test_ambig_debug",
+        validation_service=validation,
+    )
+
+    # Sem emenda explícita e sem versão current: NÃO assume que a Emenda 02 é vigente!
+    ambig_no_current = retriever.retrieve(query="RBAC 77.3")
+    assert ambig_no_current.evidences == ()
+    assert any("AMBIGUIDADE DE VERSÃO" in w for w in ambig_no_current.warnings)
+    assert ambig_no_current.diagnostics is not None
+    assert ambig_no_current.diagnostics.version_ambiguity_detected is True
+
+    # Com only_current_version=False sem emenda: detecta múltiplas versões nos resultados
+    ambig_multi = retriever.retrieve(
+        query="RBAC 77.3",
+        filters=SearchFilter(only_current_version=False),
+    )
+    assert len(ambig_multi.evidences) >= 2
+    assert any("AMBIGUIDADE DE VERSÃO" in w for w in ambig_multi.warnings)
+
+    # Com emenda explícita sem zero à esquerda ('Emenda 2' == '02') resolve corretamente!
+    explicit_amd = retriever.retrieve(query="RBAC 77.3 Emenda 2")
+    assert len(explicit_amd.evidences) == 1
+    assert explicit_amd.evidences[0].amendment_number == "02"
+    assert not any("AMBIGUIDADE DE VERSÃO" in w for w in explicit_amd.warnings)
+
+    # 2. CitationValidator descarta citações inventadas pelo LLM na resposta final
+    class _HallucinatingLLM(_RecordingFakeLLM):
+        def generate_text(
+            self,
+            *,
+            system_instruction: str,
+            user_prompt: str,
+            temperature: float | None = None,
+            max_output_tokens: int | None = None,
+        ) -> str:
+            super().generate_text(
+                system_instruction=system_instruction,
+                user_prompt=user_prompt,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+            )
+            return (
+                "Conforme a seção 77.3 [EV-1], aplica-se a regra. "
+                "O dispositivo inventado RBAC 77.99 [EV-99] também exigiria licença extra."
+            )
+
+    hallucinating_llm = _HallucinatingLLM()
+    chat = NormativeChatService(retriever=retriever, llm=hallucinating_llm)
+    ans = chat.ask(question="RBAC 77.3 Emenda 02")
+    assert ans.is_literal_validated is True
+    assert ans.used_evidence_ids == ("EV-1",)
+    assert len(ans.evidences_sent_to_llm) == 1
+    assert ans.evidences_sent_to_llm[0].startswith("EV-1:")
+    assert "EV-99" in ans.discarded_citations
+    assert any("77.99" in item for item in ans.discarded_citations)
+    assert "77.99" not in ans.explanation
+    assert "[EV-99]" not in ans.explanation
+    assert any("VALIDAÇÃO DE CITAÇÕES" in obs for obs in ans.observations)
+
+    # 3. CLI query_assistant.py --debug (texto e JSON) sem vazar segredos
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    docs_dir = tmp_path / "documents"
+    capsys.readouterr()
+
+    rc_text = query_cli.main(
+        [
+            "--question",
+            "RBAC 77.3 Emenda 02",
+            "--no-llm",
+            "--debug",
+            "--documents-dir",
+            str(docs_dir),
+            "--collection",
+            "test_ambig_debug",
+        ]
+    )
+    assert rc_text == 0
+    out_text = capsys.readouterr().out
+    assert "=== DIAGNÓSTICO DO PIPELINE RAG (--debug) ===" in out_text
+    assert "Hits estruturais exatos" in out_text
+    assert "Fusão RRF" in out_text
+    assert "Decisões de hidratação/revisão" in out_text
+
+    rc_json = query_cli.main(
+        [
+            "--question",
+            "RBAC 77.3 Emenda 02",
+            "--no-llm",
+            "--debug",
+            "--json",
+            "--documents-dir",
+            str(docs_dir),
+            "--collection",
+            "test_ambig_debug",
+        ]
+    )
+    assert rc_json == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "diagnostics" in payload
+    assert payload["diagnostics"]["resolved_references"][0]["section_number"] == "77.3"
+    assert len(payload["diagnostics"]["rrf_candidates"]) >= 1
+    assert len(payload["diagnostics"]["evidence_decisions"]) >= 1
+

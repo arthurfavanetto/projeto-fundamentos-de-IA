@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from rbac_assistant.domain.entities.rag import (
     EvidenceTrustLevel,
     FusedEvidence,
+    RetrievalDiagnostics,
     StructuredNormativeAnswer,
 )
 
@@ -98,6 +99,10 @@ class NormativeResponseFormatter:
         extra_observations: Sequence[str] = (),
         generation_model: str | None = None,
         used_fallback_without_llm: bool = False,
+        evidences_sent_to_llm: Sequence[str] = (),
+        used_evidence_ids: Sequence[str] = (),
+        discarded_citations: Sequence[str] = (),
+        diagnostics: RetrievalDiagnostics | None = None,
     ) -> StructuredNormativeAnswer:
         """Monta resposta final garantindo que `normative_text` só venha do SSOT aprovado."""
         validated = [
@@ -206,4 +211,8 @@ class NormativeResponseFormatter:
             generation_model=generation_model,
             used_fallback_without_llm=used_fallback_without_llm,
             formatted_text=formatted_text,
+            evidences_sent_to_llm=tuple(evidences_sent_to_llm),
+            used_evidence_ids=tuple(used_evidence_ids),
+            discarded_citations=tuple(discarded_citations),
+            diagnostics=diagnostics,
         )

@@ -89,13 +89,14 @@ class SearchFilter:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedStructuralRef:
-    """Referência estrutural explícita detectada na pergunta (ex.: RBAC 43.3, 43.9(a), Art. 1º)."""
+    """Referência estrutural explícita detectada na pergunta (ex.: RBAC 43.3, 43.9(a)(1)(i))."""
 
     raw_match: str
     regulation_number: str | None = None
     section_number: str | None = None
     paragraph_number: str | None = None
     item_number: str | None = None
+    subitem_number: str | None = None
     amendment_number: str | None = None
 
 
@@ -107,6 +108,83 @@ class RetrievalCandidate:
     source: RetrievalSource
     rank: int
     raw_score: float
+
+
+@dataclass(frozen=True, slots=True)
+class LexicalHitDiagnostic:
+    """Diagnóstico de candidato recuperado via SQLite FTS5 (BM25)."""
+
+    chunk_id: str
+    rank: int
+    bm25_score: float
+
+
+@dataclass(frozen=True, slots=True)
+class VectorHitDiagnostic:
+    """Diagnóstico de candidato recuperado via ChromaDB (distância cosseno e limiar)."""
+
+    chunk_id: str
+    rank: int
+    distance: float
+    cosine_similarity: float
+    accepted: bool
+    rejection_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RrfCandidateDiagnostic:
+    """Diagnóstico de pontuação RRF consolidada por chunk."""
+
+    chunk_id: str
+    rrf_score: float
+    structural_rank: int | None
+    lexical_rank: int | None
+    vector_rank: int | None
+    sources: tuple[RetrievalSource, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceDecisionDiagnostic:
+    """Diagnóstico de inclusão/exclusão de cada evidência hidratada do SQLite."""
+
+    chunk_id: str
+    document_id: str
+    version_id: str
+    regulation_number: str
+    amendment_number: str
+    section_number: str
+    pdf_pages: tuple[int, ...]
+    trust_level: str
+    included: bool
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalDiagnostics:
+    """Rastro completo e determinístico da execução de busca híbrida para modo --debug."""
+
+    query: str
+    effective_filters: tuple[tuple[str, str], ...] = ()
+    resolved_references: tuple[ResolvedStructuralRef, ...] = ()
+    structural_hit_ids: tuple[str, ...] = ()
+    lexical_hits: tuple[LexicalHitDiagnostic, ...] = ()
+    vector_hits: tuple[VectorHitDiagnostic, ...] = ()
+    rrf_candidates: tuple[RrfCandidateDiagnostic, ...] = ()
+    evidence_decisions: tuple[EvidenceDecisionDiagnostic, ...] = ()
+    max_vector_distance: float = 0.85
+    version_ambiguity_detected: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CitationValidationResult:
+    """Resultado da validação server-side das citações produzidas pelo modelo generativo."""
+
+    sanitized_explanation: str
+    valid_evidence_ids: tuple[str, ...] = ()
+    invalid_evidence_ids: tuple[str, ...] = ()
+    unverified_section_citations: tuple[str, ...] = ()
+    citation_precision: float = 1.0
+    had_modifications: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +238,7 @@ class HybridRetrievalResult:
     index_empty: bool = False
     vector_search_available: bool = True
     warnings: tuple[str, ...] = ()
+    diagnostics: RetrievalDiagnostics | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +260,10 @@ class StructuredNormativeAnswer:
     generation_model: str | None = None
     used_fallback_without_llm: bool = False
     formatted_text: str = ""
+    evidences_sent_to_llm: tuple[str, ...] = ()
+    used_evidence_ids: tuple[str, ...] = ()
+    discarded_citations: tuple[str, ...] = ()
+    diagnostics: RetrievalDiagnostics | None = None
 
     def __post_init__(self) -> None:
         if self.normative_text is not None and not self.is_literal_validated:

@@ -6,24 +6,47 @@ from typing import Any
 
 import pytest
 
-from rbac_assistant.domain.entities.rag import RetrievalCandidate, RetrievalSource
+from rbac_assistant.domain.entities.rag import (
+    EvidenceTrustLevel,
+    FusedEvidence,
+    RetrievalCandidate,
+    RetrievalSource,
+)
 from rbac_assistant.domain.exceptions import EmbeddingCompatibilityError, StorageConnectionError
 from rbac_assistant.domain.ports.vector_store_port import VectorRecord
 from rbac_assistant.infrastructure.vector_db.chroma_vector_store import ChromaVectorStore
+from rbac_assistant.rag.generation.citation_validator import CitationValidator
 from rbac_assistant.rag.retrieval.hybrid_retriever import fuse_candidates_rrf
-from rbac_assistant.rag.retrieval.section_resolver import resolve_structural_references
+from rbac_assistant.rag.retrieval.section_resolver import (
+    amendments_match,
+    extract_regulation_hint,
+    resolve_structural_references,
+)
 from rbac_assistant.security.prompt_guard import PromptGuard
 
 
 @pytest.mark.unit
-def test_section_resolver_extracts_rbac_sections_paragraphs_appendices_and_articles() -> None:
-    refs1 = resolve_structural_references("O que diz o RBAC 43.3(a)(1) da Emenda 05?")
+def test_section_resolver_extracts_rbac_sections_paragraphs_subitems_appendices_and_articles() -> (
+    None
+):
+    refs1 = resolve_structural_references("O que diz o RBAC 43.3(a)(1)(i) da Emenda 05?")
     assert len(refs1) >= 1
     assert refs1[0].regulation_number == "43"
     assert refs1[0].section_number == "43.3"
     assert refs1[0].paragraph_number == "(a)"
     assert refs1[0].item_number == "(1)"
+    assert refs1[0].subitem_number == "(i)"
     assert refs1[0].amendment_number == "05"
+
+    assert amendments_match("05", "5") is True
+    assert amendments_match("00", "0") is True
+    assert amendments_match("05", "04") is False
+
+    assert extract_regulation_hint("No RBAC 145, quem aprova o retorno ao serviço?") == (
+        "RBAC",
+        "145",
+    )
+    assert extract_regulation_hint("Compare RBAC 43 e RBAC 145.") == (None, None)
 
     refs2 = resolve_structural_references("Consulte o Apêndice A do RBAC 43.")
     assert any(
@@ -35,6 +58,61 @@ def test_section_resolver_extracts_rbac_sections_paragraphs_appendices_and_artic
 
     refs3 = resolve_structural_references("Qual o conteúdo do Art. 1º da Resolução 700?")
     assert any(r.section_number == "Art. 1º" and r.regulation_number == "700" for r in refs3)
+
+
+@pytest.mark.unit
+def test_citation_validator_discards_hallucinated_ev_ids_and_ungrounded_sections() -> None:
+    ev1 = FusedEvidence(
+        chunk_id="chunk_43_3",
+        unit_id="u1",
+        document_id="doc_43",
+        version_id="v_05",
+        authority="ANAC",
+        document_type="RBAC",
+        regulation_number="43",
+        document_title="RBAC 43 Sintético",
+        amendment_number="05",
+        version_status="current",
+        official_url="https://example.test/43",
+        section_number="43.3",
+        subsection_number="",
+        paragraph_number="(a)",
+        item_number="",
+        title="Pessoas autorizadas",
+        original_text="Conforme a seção 43.7, apenas pessoas habilitadas podem atuar.",
+        pdf_pages=(2,),
+        printed_pages=("10/25",),
+        page_statuses=(),
+        trust_level=EvidenceTrustLevel.VALIDATED_LITERAL,
+        literal_transcription_allowed=True,
+        rrf_score=0.05,
+        matched_sources=(RetrievalSource.EXACT_STRUCTURAL,),
+    )
+    validator = CitationValidator()
+
+    clean_res = validator.validate(
+        explanation="Segundo a seção 43.3 [EV-1], com remissão à seção 43.7, exige-se habilitação.",
+        evidence_map={"EV-1": ev1},
+    )
+    assert clean_res.had_modifications is False
+    assert clean_res.valid_evidence_ids == ("EV-1",)
+    assert clean_res.invalid_evidence_ids == ()
+    assert clean_res.unverified_section_citations == ()
+    assert clean_res.citation_precision == 1.0
+
+    hallucinated_res = validator.validate(
+        explanation=(
+            "A seção 43.3 [EV-1] determina a regra, e o RBAC 43.99 [EV-99] complementa o tema."
+        ),
+        evidence_map={"EV-1": ev1},
+    )
+    assert hallucinated_res.had_modifications is True
+    assert hallucinated_res.valid_evidence_ids == ("EV-1",)
+    assert hallucinated_res.invalid_evidence_ids == ("EV-99",)
+    assert any("43.99" in s for s in hallucinated_res.unverified_section_citations)
+    assert "[EV-99]" not in hallucinated_res.sanitized_explanation
+    assert "43.99" not in hallucinated_res.sanitized_explanation
+    assert hallucinated_res.citation_precision < 1.0
 
 
 @pytest.mark.unit

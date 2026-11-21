@@ -82,6 +82,24 @@ _PT_STOPWORDS: frozenset[str] = frozenset(
         "uma",
         "uns",
         "umas",
+        "onde",
+        "quando",
+        "diz",
+        "fala",
+        "esta",
+        "está",
+        "sao",
+        "são",
+        "isso",
+        "esse",
+        "essa",
+        "este",
+        "neste",
+        "nesta",
+        "seu",
+        "sua",
+        "mais",
+        "muito",
     }
 )
 _FTS_TOKEN_RE = re.compile(r"[0-9A-Za-zÀ-ÖØ-öø-ÿ]+(?:[.\-/][0-9A-Za-zÀ-ÖØ-öø-ÿ]+)*")
@@ -1277,8 +1295,19 @@ class SqliteDocumentRepository:
             clauses.append(f"{alias}.version_id = ?")
             params.append(filters.version_id)
         if filters.amendment_number:
-            clauses.append(f"LOWER({alias}.amendment_number) = LOWER(?)")
-            params.append(filters.amendment_number.strip())
+            amd_clean = filters.amendment_number.strip()
+            if amd_clean.isdigit():
+                amd_norm = str(int(amd_clean))
+                clauses.append(
+                    f"(LOWER({alias}.amendment_number) = LOWER(?) "
+                    f"OR (LENGTH(LTRIM({alias}.amendment_number, '0')) > 0 "
+                    f"AND LTRIM({alias}.amendment_number, '0') = ?) "
+                    f"OR (LTRIM({alias}.amendment_number, '0') = '' AND ? = '0'))"
+                )
+                params.extend([amd_clean, amd_norm, amd_norm])
+            else:
+                clauses.append(f"LOWER({alias}.amendment_number) = LOWER(?)")
+                params.append(amd_clean)
         elif filters.version_status is not None:
             clauses.append(f"{alias}.version_status = ?")
             params.append(filters.version_status.value)
@@ -1286,7 +1315,15 @@ class SqliteDocumentRepository:
             clauses.append(f"{alias}.version_status = ?")
             params.append(VersionStatus.CURRENT.value)
         if filters.only_approved_literal:
-            clauses.append(f"{alias}.validation_status = ?")
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM normative_unit_pages nup "
+                f"WHERE nup.unit_id = {alias}.unit_id) "
+                f"AND NOT EXISTS ("
+                f"SELECT 1 FROM normative_unit_pages nup "
+                f"JOIN regulatory_pages rp ON rp.page_id = nup.page_id "
+                f"WHERE nup.unit_id = {alias}.unit_id "
+                f"AND rp.validation_status != ?)"
+            )
             params.append(PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION.value)
         return clauses, params
 
