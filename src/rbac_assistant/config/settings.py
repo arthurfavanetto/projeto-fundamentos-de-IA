@@ -18,7 +18,6 @@ class StorageConfig(BaseModel):
     raw_pdfs_subdir: str = "raw_pdfs"
     extracted_subdir: str = "extracted"
     reviews_subdir: str = "reviews"
-    canonical_store_subdir: str = "canonical_store"
     audit_logs_dir: Path = Path("/app/logs")
     sqlite_busy_timeout_ms: int = Field(default=5000, ge=100)
 

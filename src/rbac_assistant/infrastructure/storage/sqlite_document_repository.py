@@ -230,6 +230,16 @@ class SqliteDocumentRepository:
                         (version_name, datetime.now(UTC).isoformat()),
                     )
 
+    def list_applied_migrations(self) -> list[str]:
+        """Lista as versões de migração aplicadas em ordem crescente."""
+        with self._connect() as conn:
+            if not self._table_exists(conn, "schema_migrations"):
+                return []
+            rows = conn.execute(
+                "SELECT version FROM schema_migrations ORDER BY version ASC;"
+            ).fetchall()
+        return [str(row["version"]) for row in rows]
+
     @staticmethod
     def _split_sql_statements(script: str) -> list[str]:
         statements: list[str] = []
@@ -1507,21 +1517,81 @@ class SqliteDocumentRepository:
         # convertemos para escore positivo decrescente para maior clareza.
         return [(str(r["chunk_id"]), float(-r["rank_score"])) for r in rows]
 
+    def rebuild_fts_index(self, *, version_id: str | None = None) -> int:
+        """Reconstrói atomicamente o índice derivado FTS5 a partir dos chunks do SQLite."""
+        with self._connect() as conn, self._transaction(conn):
+            if version_id:
+                conn.execute(
+                    "DELETE FROM normative_chunks_fts WHERE version_id = ?;",
+                    (version_id,),
+                )
+                rows = conn.execute(
+                    """
+                    SELECT
+                        chunk_id, document_id, version_id, regulation_number, amendment_number,
+                        section_number, subsection_number, paragraph_number, item_number,
+                        title, search_text
+                    FROM normative_chunks
+                    WHERE version_id = ?
+                    ORDER BY chunk_id ASC;
+                    """,
+                    (version_id,),
+                ).fetchall()
+            else:
+                conn.execute("DELETE FROM normative_chunks_fts;")
+                rows = conn.execute(
+                    """
+                    SELECT
+                        chunk_id, document_id, version_id, regulation_number, amendment_number,
+                        section_number, subsection_number, paragraph_number, item_number,
+                        title, search_text
+                    FROM normative_chunks
+                    ORDER BY chunk_id ASC;
+                    """
+                ).fetchall()
+
+            for r in rows:
+                conn.execute(
+                    """
+                    INSERT INTO normative_chunks_fts (
+                        chunk_id, document_id, version_id, regulation_number, amendment_number,
+                        section_number, subsection_number, paragraph_number, item_number, title,
+                        search_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        str(r["chunk_id"]),
+                        str(r["document_id"]),
+                        str(r["version_id"]),
+                        str(r["regulation_number"]),
+                        str(r["amendment_number"]),
+                        str(r["section_number"]),
+                        str(r["subsection_number"]),
+                        str(r["paragraph_number"]),
+                        str(r["item_number"]),
+                        str(r["title"]),
+                        str(r["search_text"]),
+                    ),
+                )
+        return len(rows)
+
     def upsert_index_registry(self, entry: IndexRegistryEntry) -> None:
         with self._connect() as conn, self._transaction(conn):
             conn.execute(
                 """
                 INSERT INTO vector_index_registry (
                     collection_name, version_id, document_id, source_hash,
-                    embedding_model, embedding_dimension, chunk_count, indexed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    embedding_model, embedding_dimension, chunk_count, indexed_at,
+                    instruction_strategy_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(collection_name, version_id) DO UPDATE SET
                     document_id = excluded.document_id,
                     source_hash = excluded.source_hash,
                     embedding_model = excluded.embedding_model,
                     embedding_dimension = excluded.embedding_dimension,
                     chunk_count = excluded.chunk_count,
-                    indexed_at = excluded.indexed_at;
+                    indexed_at = excluded.indexed_at,
+                    instruction_strategy_version = excluded.instruction_strategy_version;
                 """,
                 (
                     entry.collection_name,
@@ -1532,6 +1602,7 @@ class SqliteDocumentRepository:
                     entry.embedding_dimension,
                     entry.chunk_count,
                     entry.indexed_at.isoformat(),
+                    entry.instruction_strategy_version,
                 ),
             )
 
@@ -1567,6 +1638,7 @@ class SqliteDocumentRepository:
                 embedding_dimension=int(r["embedding_dimension"]),
                 chunk_count=int(r["chunk_count"]),
                 indexed_at=datetime.fromisoformat(r["indexed_at"]),
+                instruction_strategy_version=str(r["instruction_strategy_version"] or ""),
             )
             for r in rows
         ]

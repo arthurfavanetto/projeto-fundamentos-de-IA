@@ -35,6 +35,9 @@ class DocumentRepositoryPort(Protocol):
     def initialize(self) -> None:
         """Aplica migrações versionadas de esquema de forma idempotente."""
 
+    def list_applied_migrations(self) -> list[str]:
+        """Lista as versões de migração já aplicadas em `schema_migrations`."""
+
     def upsert_document(self, document: RegulatoryDocument) -> RegulatoryDocument:
         """Cadastra ou atualiza um documento regulatório no catálogo."""
 
@@ -178,6 +181,9 @@ class DocumentRepositoryPort(Protocol):
         limit: int = 10,
     ) -> list[tuple[str, float]]:
         """Executa busca textual FTS5 (BM25, tolerante a acentos) retornando (chunk_id, score)."""
+
+    def rebuild_fts_index(self, *, version_id: str | None = None) -> int:
+        """Reconstrói o índice derivado FTS5 a partir dos chunks persistidos no SQLite."""
 
     def upsert_index_registry(self, entry: IndexRegistryEntry) -> None:
         """Registra/atualiza o estado de indexação vetorial de uma versão em uma coleção."""

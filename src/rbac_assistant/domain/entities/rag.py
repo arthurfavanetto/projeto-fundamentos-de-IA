@@ -201,6 +201,7 @@ class IndexRegistryEntry:
     embedding_dimension: int
     chunk_count: int
     indexed_at: datetime
+    instruction_strategy_version: str = ""
 
 
 @dataclass(frozen=True, slots=True)
