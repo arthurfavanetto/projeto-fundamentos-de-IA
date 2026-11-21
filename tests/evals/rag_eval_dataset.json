@@ -1,0 +1,288 @@
+{
+  "dataset_name": "rbac_synthetic_controlled_eval_v1",
+  "disclaimer": "Dataset 100% sintético/fictício para validação estrutural, lexical, semântica, RRF, filtros, ambiguidade e governança. NÃO substitui avaliação futura com o PDF oficial real do RBAC 43.",
+  "cases": [
+    {
+      "case_id": "Q01",
+      "category": "exact_section_ref",
+      "query": "RBAC 43.3",
+      "expected_keys": ["43:05:43.3"],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "has_explicit_reg_or_version": true,
+      "expected_pdf_pages": [2, 3]
+    },
+    {
+      "case_id": "Q02",
+      "category": "exact_section_ref",
+      "query": "O que diz o RBAC 145.109?",
+      "expected_keys": ["145:06:145.109"],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "has_explicit_reg_or_version": true
+    },
+    {
+      "case_id": "Q03",
+      "category": "paragraph_alinea_ref",
+      "query": "Consulte o parágrafo RBAC 43.9(a)",
+      "expected_keys": ["43:05:43.9"],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "has_explicit_reg_or_version": true
+    },
+    {
+      "case_id": "Q04",
+      "category": "item_subitem_ref",
+      "query": "Qual a exigência do RBAC 43.9(a)(1)(i)?",
+      "expected_keys": ["43:05:43.9"],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "has_explicit_reg_or_version": true
+    },
+    {
+      "case_id": "Q05",
+      "category": "item_subitem_ref",
+      "query": "O que prevê a seção 43.3(a)(1)?",
+      "expected_keys": ["43:05:43.3"],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "has_explicit_reg_or_version": false
+    },
+    {
+      "case_id": "Q06",
+      "category": "appendix_ref",
+      "query": "O que estabelece o Apêndice A do RBAC 43?",
+      "expected_keys": ["43:05:apêndice a"],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "has_explicit_reg_or_version": true
+    },
+    {
+      "case_id": "Q07",
+      "category": "article_resolution_ref",
+      "query": "Qual o conteúdo do Art. 1º da Resolução 700?",
+      "expected_keys": ["700:00:art. 1º"],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "has_explicit_reg_or_version": true
+    },
+    {
+      "case_id": "Q08",
+      "category": "natural_language",
+      "query": "Quem está autorizado a executar manutenção em aeronaves civis?",
+      "expected_keys": ["43:05:43.3"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q09",
+      "category": "natural_language",
+      "query": "Quem pode aprovar o retorno ao serviço de uma aeronave após manutenção?",
+      "expected_keys": ["43:05:43.7"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q10",
+      "category": "natural_language",
+      "query": "Quando entra em vigor a Resolução 700?",
+      "expected_keys": ["700:00:art. 2º"],
+      "expected_behavior": "validated_answer",
+      "has_explicit_reg_or_version": true
+    },
+    {
+      "case_id": "Q11",
+      "category": "paraphrase_no_literal_terms",
+      "query": "Preciso saber qual profissional pode liberar o avião para voar de novo depois de um serviço",
+      "expected_keys": ["43:05:43.7"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q12",
+      "category": "paraphrase_no_literal_terms",
+      "query": "Trocar bateria ou pneu conta como serviço simples na classificação?",
+      "expected_keys": ["43:05:apêndice a"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q13",
+      "category": "paraphrase_no_literal_terms",
+      "query": "Quais são os poderes de uma oficina homologada para liberar componentes?",
+      "expected_keys": ["145:06:145.201"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q14",
+      "category": "synonym_semantic",
+      "query": "Qual anotação e rubrica devo lançar na caderneta de bordo ao finalizar o serviço?",
+      "expected_keys": ["43:05:43.9"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q15",
+      "category": "synonym_semantic",
+      "query": "Qual o período de arquivamento e retenção de arquivos na oficina homologada?",
+      "expected_keys": ["145:06:145.219"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q16",
+      "category": "synonym_semantic",
+      "query": "Quais instrumentos aferidos e ferramental são exigidos no hangar homologado?",
+      "expected_keys": ["145:06:145.109"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q17",
+      "category": "lexical_specific",
+      "query": "exclusão de aeronaves experimentais aplicabilidade",
+      "expected_keys": ["43:05:43.1"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q18",
+      "category": "lexical_specific",
+      "query": "SEGVOO 001 Emenda 04",
+      "expected_keys": ["43:04:43.3"],
+      "expected_behavior": "validated_answer",
+      "has_explicit_reg_or_version": true,
+      "only_current_version": false
+    },
+    {
+      "case_id": "Q19",
+      "category": "semantic_conceptual",
+      "query": "conserto estrutural na fuselagem e célula de aeronave",
+      "expected_keys": ["43:05:apêndice a"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q20",
+      "category": "semantic_conceptual",
+      "query": "definições de responsável técnico e artigos aeronáuticos na oficina",
+      "expected_keys": ["145:06:145.3"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q21",
+      "category": "hybrid_lexical_semantic",
+      "query": "registros de manutenção assinatura licença ANAC na caderneta de bordo",
+      "expected_keys": ["43:05:43.9"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q22",
+      "category": "hybrid_lexical_semantic",
+      "query": "oficina certificada ferramentas calibradas e dados técnicos atualizados",
+      "expected_keys": ["145:06:145.109"],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q23",
+      "category": "explicit_regulation_filter",
+      "query": "No RBAC 145, quais são as regras sobre registros de manutenção?",
+      "expected_keys": ["145:06:145.219"],
+      "expected_behavior": "validated_answer",
+      "has_explicit_reg_or_version": true
+    },
+    {
+      "case_id": "Q24",
+      "category": "explicit_regulation_filter",
+      "query": "No RBAC 43, o que deve constar nos registros de manutenção?",
+      "expected_keys": ["43:05:43.9"],
+      "expected_behavior": "validated_answer",
+      "has_explicit_reg_or_version": true
+    },
+    {
+      "case_id": "Q25",
+      "category": "explicit_amendment_filter",
+      "query": "O que previa o RBAC 43.3 na Emenda 04?",
+      "expected_keys": ["43:04:43.3"],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "has_explicit_reg_or_version": true
+    },
+    {
+      "case_id": "Q26",
+      "category": "explicit_amendment_filter",
+      "query": "Qual a regra do RBAC 43.3 na Emenda 5?",
+      "expected_keys": ["43:05:43.3"],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "has_explicit_reg_or_version": true
+    },
+    {
+      "case_id": "Q27",
+      "category": "ambiguous_version_no_current",
+      "query": "Qual a regra da seção 88.5?",
+      "expected_keys": [],
+      "expected_behavior": "version_ambiguity"
+    },
+    {
+      "case_id": "Q28",
+      "category": "ambiguous_version_multiple_matches",
+      "query": "RBAC 88.5",
+      "expected_keys": [],
+      "expected_behavior": "version_ambiguity",
+      "only_current_version": false
+    },
+    {
+      "case_id": "Q29",
+      "category": "similar_section_different_doc",
+      "query": "O que diz a seção 145.3?",
+      "expected_keys": ["145:06:145.3"],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "has_explicit_reg_or_version": true
+    },
+    {
+      "case_id": "Q30",
+      "category": "multi_page_section",
+      "query": "Qual o texto completo do RBAC 43.3 incluindo organização de manutenção certificada?",
+      "expected_keys": ["43:05:43.3"],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "has_explicit_reg_or_version": true,
+      "expected_pdf_pages": [2, 3]
+    },
+    {
+      "case_id": "Q31",
+      "category": "out_of_domain",
+      "query": "Qual a receita culinária de bolo de cenoura com cobertura de chocolate?",
+      "expected_keys": [],
+      "expected_behavior": "abstain_no_evidence"
+    },
+    {
+      "case_id": "Q32",
+      "category": "out_of_domain",
+      "query": "Como declarar imposto de renda sobre criptomoedas na bolsa de valores?",
+      "expected_keys": [],
+      "expected_behavior": "abstain_no_evidence"
+    },
+    {
+      "case_id": "Q33",
+      "category": "insufficient_evidence",
+      "query": "Qual o limite de ruído para foguetes orbitais no RBAC 999?",
+      "expected_keys": [],
+      "expected_behavior": "abstain_no_evidence"
+    },
+    {
+      "case_id": "Q34",
+      "category": "governance_native_unreviewed",
+      "query": "O que diz o RBAC 43.11 sobre inspeção de 100 horas?",
+      "expected_keys": ["43:05:43.11"],
+      "expected_behavior": "preliminary_location_no_llm"
+    },
+    {
+      "case_id": "Q35",
+      "category": "governance_ocr_pending",
+      "query": "O que determina o RBAC 43.13 sobre métodos e técnicas de manutenção?",
+      "expected_keys": ["43:05:43.13"],
+      "expected_behavior": "blocked_ocr_no_llm"
+    },
+    {
+      "case_id": "Q36",
+      "category": "governance_rejected_page",
+      "query": "Qual a regra do RBAC 43.15 para inspeção em helicópteros?",
+      "expected_keys": ["43:05:43.15"],
+      "expected_behavior": "blocked_rejected_no_llm"
+    }
+  ]
+}

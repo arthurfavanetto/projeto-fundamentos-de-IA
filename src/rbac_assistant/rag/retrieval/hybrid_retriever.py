@@ -480,6 +480,14 @@ class HybridNormativeRetriever:
             if len(usable_evidences) >= limit_final:
                 break
 
+        # Prioriza evidências validadas sobre preliminares mantendo ordem RRF em cada grupo
+        usable_evidences.sort(
+            key=lambda ev: (
+                0 if ev.trust_level == EvidenceTrustLevel.VALIDATED_LITERAL else 1,
+                -ev.rrf_score,
+            )
+        )
+
         # 5. Detecção explícita de ambiguidade de versão (nunca assume maior emenda como vigente)
         ambiguity_warnings = self._detect_result_version_ambiguity(
             evidences=usable_evidences,
@@ -553,6 +561,14 @@ class HybridNormativeRetriever:
                         document_type = DocumentType(hinted_type_str)
                     except ValueError:
                         document_type = None
+            else:
+                ref_regs = {
+                    ref.regulation_number.strip()
+                    for ref in resolved_refs
+                    if ref.regulation_number and ref.regulation_number.strip()
+                }
+                if len(ref_regs) == 1:
+                    regulation_number = next(iter(ref_regs))
 
         return SearchFilter(
             document_id=base.document_id,
