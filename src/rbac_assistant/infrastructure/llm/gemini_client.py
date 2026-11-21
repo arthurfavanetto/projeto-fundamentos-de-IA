@@ -1,9 +1,19 @@
-"""Adaptador oficial para a Google Gemini API usando o SDK `google-genai`.
+"""Adaptador oficial para a Google Gemini API usando o SDK `google-genai==3.6.1`.
 
 Recursos implementados:
-- Geração de explicações fundamentadas (`LLMPort`) e embeddings (`EmbeddingPort`).
-- Modelos configuráveis via variáveis de ambiente (`GEMINI_GENERATION_MODEL` /
-  `GEMINI_EMBEDDING_MODEL`) e dimensionalidade MRL configurável.
+- Geração de explicações fundamentadas (`LLMPort`), padrão `gemini-4-neon` (sem fallback
+  silencioso entre modelos; falhas de modelo indisponível são reportadas explicitamente).
+- Embeddings multimodais/textuais (`EmbeddingPort`), padrão `gemini-embedding-2` (768d MRL):
+  - Sem parâmetro `task_type` (não suportado pelo `gemini-embedding-2`).
+  - Convenção oficial de recuperação assimétrica incorporada apenas à representação de embedding
+    (nunca altera `original_text` nem `normalized_text` no SQLite):
+      - Consulta:  `task: search result | query: {consulta}`
+      - Documento: `title: {título} | text: {conteúdo}` (ou `title: none | text: {conteúdo}`)
+  - Cada chunk é encapsulado em seu próprio objeto `types.Content` para impedir agregação
+    indevida no `gemini-embedding-2`, garantindo 1 vetor independente por chunk na mesma ordem.
+  - Dimensões reduzidas (ex.: 768) são normalizadas automaticamente pelo `gemini-embedding-2`,
+    dispensando normalização L2 manual redundante e mantendo compatibilidade com distância cosseno.
+  - Validação de texto não vazio e limite de entrada de 8.192 tokens.
 - Timeout explícito via `types.HttpOptions(timeout=ms)`.
 - Retry limitado com backoff exponencial via `tenacity` apenas em falhas transitórias
   (HTTP 429 rate limit, 5xx ou timeout).
@@ -37,6 +47,46 @@ from rbac_assistant.security.secret_redactor import redact_text
 logger = structlog.get_logger(__name__)
 
 _TRANSIENT_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+DEFAULT_GENERATION_MODEL = "gemini-4-neon"
+DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2"
+DEFAULT_EMBEDDING_DIMENSIONS = 768
+DEFAULT_EMBEDDING_INSTRUCTION_VERSION = "ge2_asymmetric_v1"
+DEFAULT_EMBEDDING_MAX_INPUT_TOKENS = 8192
+_CONSERVATIVE_CHARS_PER_TOKEN = 3
+
+
+def is_gemini_embedding_2(model_name: str) -> bool:
+    """Identifica se o modelo configurado pertence à família `gemini-embedding-2`."""
+    normalized = model_name.strip().lower().removeprefix("models/")
+    return normalized.startswith("gemini-embedding-2")
+
+
+def format_ge2_query(query: str) -> str:
+    """Formata consulta segundo a convenção oficial assimétrica do Gemini Embedding 2."""
+    clean_query = query.strip()
+    if not clean_query:
+        raise ValueError("Texto de consulta não pode ser vazio para geração de embedding.")
+    return f"task: search result | query: {clean_query}"
+
+
+def format_ge2_document(text: str, *, title: str | None = None) -> str:
+    """Formata documento segundo a convenção oficial do Gemini Embedding 2.
+
+    A representação formatada é efêmera e usada apenas na geração do vetor —
+    jamais altera `original_text` nem `normalized_text` no SQLite.
+    """
+    clean_text = text.strip()
+    if not clean_text:
+        raise ValueError("Texto de documento não pode ser vazio para geração de embedding.")
+    clean_title = (title or "").strip() or "none"
+    return f"title: {clean_title} | text: {clean_text}"
+
+
+def estimate_token_count(text: str) -> int:
+    """Estimativa conservadora de tokens em português para guarda de limite de entrada."""
+    word_est = int(len(text.split()) * 1.35)
+    char_est = len(text) // _CONSERVATIVE_CHARS_PER_TOKEN
+    return max(1, word_est, char_est)
 
 
 class _TransientGeminiError(Exception):
@@ -54,9 +104,11 @@ class GeminiClientAdapter:
         self,
         *,
         api_key: str | None = None,
-        generation_model: str = "gemini-3.5-flash-lite",
-        embedding_model: str = "gemini-embedding-001",
-        embedding_dimensions: int = 768,
+        generation_model: str = DEFAULT_GENERATION_MODEL,
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+        embedding_dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS,
+        embedding_instruction_version: str = DEFAULT_EMBEDDING_INSTRUCTION_VERSION,
+        embedding_max_input_tokens: int = DEFAULT_EMBEDDING_MAX_INPUT_TOKENS,
         timeout_seconds: float = 30.0,
         max_retries: int = 3,
         retry_min_wait_seconds: float = 0.5,
@@ -70,10 +122,17 @@ class GeminiClientAdapter:
             raise ValueError(
                 "GEMINI_API_KEY é obrigatória para inicializar o adaptador Google Gemini."
             )
+        if not (128 <= embedding_dimensions <= 3072):
+            raise ValueError(
+                f"embedding_dimensions deve estar entre 128 e 3072 (recebido: "
+                f"{embedding_dimensions})."
+            )
         self._api_key = api_key.strip() if api_key else None
         self._generation_model = generation_model.strip()
         self._embedding_model = embedding_model.strip()
         self._embedding_dimensions = embedding_dimensions
+        self._embedding_instruction_version = embedding_instruction_version.strip()
+        self._embedding_max_input_tokens = embedding_max_input_tokens
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
         self._retry_min_wait_seconds = retry_min_wait_seconds
@@ -98,6 +157,11 @@ class GeminiClientAdapter:
         """Retorna a dimensionalidade vetorial esperada (para `EmbeddingPort`)."""
         return self._embedding_dimensions
 
+    @property
+    def instruction_strategy_version(self) -> str:
+        """Retorna a versão da estratégia de instrução aplicada aos embeddings."""
+        return self._embedding_instruction_version
+
     def _get_client(self) -> Any:
         if self._client is None:
             timeout_ms = max(1000, int(self._timeout_seconds * 1000))
@@ -113,7 +177,7 @@ class GeminiClientAdapter:
         if self._client is not None and hasattr(self._client, "close"):
             self._client.close()
 
-    def _run_with_retry[T](self, operation_name: str, fn: Callable[[], T]) -> T:
+    def _run_with_retry[T](self, operation_name: str, model_id: str, fn: Callable[[], T]) -> T:
         attempts = self._max_retries + 1
         retrying = Retrying(
             reraise=True,
@@ -133,11 +197,14 @@ class GeminiClientAdapter:
                     except LLMServiceError:
                         raise
                     except Exception as exc:
-                        translated, is_transient = self._translate_exception(operation_name, exc)
+                        translated, is_transient = self._translate_exception(
+                            operation_name, model_id, exc
+                        )
                         if is_transient:
                             logger.warning(
                                 "gemini_transient_error",
                                 operation=operation_name,
+                                model=model_id,
                                 attempt=attempt.retry_state.attempt_number,
                                 max_attempts=attempts,
                                 error=redact_text(str(translated)),
@@ -149,12 +216,17 @@ class GeminiClientAdapter:
         raise LLMServiceError(f"Falha inesperada na operação Gemini '{operation_name}'.")
 
     @staticmethod
-    def _translate_exception(operation_name: str, exc: Exception) -> tuple[LLMServiceError, bool]:
+    def _translate_exception(
+        operation_name: str,
+        model_id: str,
+        exc: Exception,
+    ) -> tuple[LLMServiceError, bool]:
         safe_detail = redact_text(str(exc))
         if isinstance(exc, TimeoutError | httpx.TimeoutException):
             return (
                 LLMTimeoutError(
-                    f"Timeout na chamada Gemini ({operation_name}): {safe_detail}"
+                    f"Timeout na chamada Gemini ({operation_name}, modelo '{model_id}'): "
+                    f"{safe_detail}"
                 ),
                 True,
             )
@@ -163,8 +235,8 @@ class GeminiClientAdapter:
             if code == 429:
                 return (
                     LLMRateLimitError(
-                        f"Limite de taxa/cota atingido na Gemini API ({operation_name}, HTTP 429): "
-                        f"{safe_detail}"
+                        f"Limite de taxa/cota atingido na Gemini API ({operation_name}, "
+                        f"modelo '{model_id}', HTTP 429): {safe_detail}"
                     ),
                     True,
                 )
@@ -172,25 +244,40 @@ class GeminiClientAdapter:
                 return (
                     LLMServiceError(
                         f"Indisponibilidade temporária na Gemini API ({operation_name}, "
-                        f"HTTP {code}): {safe_detail}"
+                        f"modelo '{model_id}', HTTP {code}): {safe_detail}"
                     ),
                     True,
                 )
+            if code in (403, 404):
+                return (
+                    LLMServiceError(
+                        f"Modelo Gemini '{model_id}' indisponível ou sem acesso na conta "
+                        f"({operation_name}, HTTP {code}). Nenhum fallback silencioso foi "
+                        f"aplicado; ajuste a variável de ambiente manualmente. Detalhe: "
+                        f"{safe_detail}"
+                    ),
+                    False,
+                )
             return (
                 LLMServiceError(
-                    f"Erro na Gemini API ({operation_name}, HTTP {code}): {safe_detail}"
+                    f"Erro na Gemini API ({operation_name}, modelo '{model_id}', "
+                    f"HTTP {code}): {safe_detail}"
                 ),
                 False,
             )
         if isinstance(exc, httpx.HTTPError | ConnectionError):
             return (
                 LLMServiceError(
-                    f"Erro de conectividade com a Gemini API ({operation_name}): {safe_detail}"
+                    f"Erro de conectividade com a Gemini API ({operation_name}, "
+                    f"modelo '{model_id}'): {safe_detail}"
                 ),
                 True,
             )
         return (
-            LLMServiceError(f"Erro ao executar operação Gemini ({operation_name}): {safe_detail}"),
+            LLMServiceError(
+                f"Erro ao executar operação Gemini ({operation_name}, modelo '{model_id}'): "
+                f"{safe_detail}"
+            ),
             False,
         )
 
@@ -202,7 +289,10 @@ class GeminiClientAdapter:
         temperature: float | None = None,
         max_output_tokens: int | None = None,
     ) -> str:
-        """Gera explicação fundamentada usando `client.models.generate_content`."""
+        """Gera explicação fundamentada usando `client.models.generate_content`.
+
+        Não executa fallback silencioso para outro modelo em caso de erro.
+        """
         client = self._get_client()
         config = genai_types.GenerateContentConfig(
             system_instruction=system_instruction,
@@ -223,48 +313,115 @@ class GeminiClientAdapter:
             text = getattr(response, "text", None)
             if not isinstance(text, str) or not text.strip():
                 raise LLMServiceError(
-                    "Resposta vazia ou inválida retornada pelo modelo generativo Gemini."
+                    f"Resposta vazia ou inválida retornada pelo modelo '{self._generation_model}'."
                 )
             return text.strip()
 
-        return self._run_with_retry("generate_content", _call)
+        return self._run_with_retry("generate_content", self._generation_model, _call)
 
-    def embed_documents(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
-        """Gera vetores de embeddings em lotes para chunks de documentos regulatórios."""
+    def embed_documents(
+        self,
+        texts: Sequence[str],
+        *,
+        titles: Sequence[str | None] | None = None,
+    ) -> list[tuple[float, ...]]:
+        """Gera exatamente um vetor independente por chunk, preservando ordem e limites."""
         if not texts:
             return []
+        if titles is not None and len(titles) != len(texts):
+            raise ValueError(
+                f"Quantidade de títulos ({len(titles)}) difere da quantidade de textos "
+                f"({len(texts)})."
+            )
+
+        use_ge2 = is_gemini_embedding_2(self._embedding_model)
+        prepared: list[str] = []
+        for idx, raw_text in enumerate(texts):
+            if not isinstance(raw_text, str) or not raw_text.strip():
+                raise ValueError(
+                    f"Chunk na posição {idx} está vazio ou inválido para geração de embedding."
+                )
+            title = titles[idx] if titles is not None else None
+            payload = (
+                format_ge2_document(raw_text, title=title) if use_ge2 else raw_text.strip()
+            )
+            self._validate_token_budget(payload, label=f"chunk[{idx}]")
+            prepared.append(payload)
+
         all_vectors: list[tuple[float, ...]] = []
-        for start in range(0, len(texts), self._embedding_batch_size):
-            batch = list(texts[start : start + self._embedding_batch_size])
-            batch_vectors = self._embed_batch(batch, task_type="RETRIEVAL_DOCUMENT")
+        for start in range(0, len(prepared), self._embedding_batch_size):
+            batch = prepared[start : start + self._embedding_batch_size]
+            batch_vectors = self._embed_batch(
+                batch,
+                legacy_task_type="RETRIEVAL_DOCUMENT",
+                use_ge2=use_ge2,
+            )
             all_vectors.extend(batch_vectors)
         return all_vectors
 
     def embed_query(self, text: str) -> tuple[float, ...]:
-        """Gera vetor de embedding otimizado para consulta do usuário."""
-        if not text.strip():
+        """Gera vetor de embedding otimizado para uma consulta do usuário."""
+        if not isinstance(text, str) or not text.strip():
             raise ValueError("Texto de consulta não pode ser vazio para geração de embedding.")
-        vectors = self._embed_batch([text], task_type="RETRIEVAL_QUERY")
+
+        use_ge2 = is_gemini_embedding_2(self._embedding_model)
+        payload = format_ge2_query(text) if use_ge2 else text.strip()
+        self._validate_token_budget(payload, label="query")
+        vectors = self._embed_batch(
+            [payload],
+            legacy_task_type="RETRIEVAL_QUERY",
+            use_ge2=use_ge2,
+        )
         return vectors[0]
 
-    def _embed_batch(self, texts: list[str], *, task_type: str) -> list[tuple[float, ...]]:
+    def _validate_token_budget(self, payload: str, *, label: str) -> None:
+        estimated = estimate_token_count(payload)
+        if estimated > self._embedding_max_input_tokens:
+            raise ValueError(
+                f"Entrada '{label}' excede o limite de {self._embedding_max_input_tokens} tokens "
+                f"do modelo '{self._embedding_model}' (estimado: {estimated} tokens)."
+            )
+
+    def _embed_batch(
+        self,
+        payloads: list[str],
+        *,
+        legacy_task_type: str,
+        use_ge2: bool,
+    ) -> list[tuple[float, ...]]:
         client = self._get_client()
-        config = genai_types.EmbedContentConfig(
-            task_type=task_type,
-            output_dimensionality=self._embedding_dimensions,
-        )
+
+        if use_ge2:
+            # Gemini Embedding 2:
+            # 1) Não aceita `task_type` no EmbedContentConfig.
+            # 2) Para impedir agregação em vetor único ao enviar múltiplos chunks, cada chunk é
+            #    encapsulado em seu próprio objeto `types.Content`.
+            # 3) Dimensões truncadas (ex.: 768) são normalizadas automaticamente pelo modelo.
+            config = genai_types.EmbedContentConfig(
+                output_dimensionality=self._embedding_dimensions,
+            )
+            contents: Any = [
+                genai_types.Content(parts=[genai_types.Part.from_text(text=item)])
+                for item in payloads
+            ]
+        else:
+            config = genai_types.EmbedContentConfig(
+                task_type=legacy_task_type,
+                output_dimensionality=self._embedding_dimensions,
+            )
+            contents = payloads
 
         def _call() -> list[tuple[float, ...]]:
             response = client.models.embed_content(
                 model=self._embedding_model,
-                contents=texts,
+                contents=contents,
                 config=config,
             )
             raw_embeddings = getattr(response, "embeddings", None)
-            if not raw_embeddings or len(raw_embeddings) != len(texts):
+            if not raw_embeddings or len(raw_embeddings) != len(payloads):
                 raise LLMServiceError(
-                    "Resposta inválida do endpoint de embeddings Gemini: "
-                    f"esperados {len(texts)} vetor(es), recebidos "
+                    "Resposta inválida do endpoint de embeddings Gemini (possível agregação "
+                    f"indevida ou truncamento): esperados {len(payloads)} vetor(es), recebidos "
                     f"{len(raw_embeddings) if raw_embeddings is not None else 0}."
                 )
             vectors: list[tuple[float, ...]] = []
@@ -281,7 +438,7 @@ class GeminiClientAdapter:
                 vectors.append(vec)
             return vectors
 
-        return self._run_with_retry("embed_content", _call)
+        return self._run_with_retry("embed_content", self._embedding_model, _call)
 
 
 class GeminiEmbeddingAdapter:
@@ -298,8 +455,17 @@ class GeminiEmbeddingAdapter:
     def dimensions(self) -> int:
         return self._adapter.dimensions
 
-    def embed_documents(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
-        return self._adapter.embed_documents(texts)
+    @property
+    def instruction_strategy_version(self) -> str:
+        return self._adapter.instruction_strategy_version
+
+    def embed_documents(
+        self,
+        texts: Sequence[str],
+        *,
+        titles: Sequence[str | None] | None = None,
+    ) -> list[tuple[float, ...]]:
+        return self._adapter.embed_documents(texts, titles=titles)
 
     def embed_query(self, text: str) -> tuple[float, ...]:
         return self._adapter.embed_query(text)

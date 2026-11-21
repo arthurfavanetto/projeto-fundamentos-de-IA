@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import chromadb
@@ -127,14 +128,17 @@ class ChromaVectorStore:
         collection_name: str,
         embedding_model: str,
         embedding_dimension: int,
+        instruction_strategy_version: str | None = None,
     ) -> CollectionMetadata:
-        """Cria ou valida coleção garantindo compatibilidade de modelo e dimensionalidade."""
+        """Cria ou valida coleção garantindo compatibilidade de modelo, dimensão e estratégia."""
         existing = self._try_get_existing_collection(collection_name)
         if existing is not None:
             meta = dict(getattr(existing, "metadata", None) or {})
             stored_model = meta.get("embedding_model")
             stored_dim_raw = meta.get("embedding_dimension")
             stored_dim = int(stored_dim_raw) if stored_dim_raw is not None else None
+            stored_strategy = meta.get("instruction_strategy_version")
+            stored_created_at = meta.get("created_at")
             count = int(existing.count()) if hasattr(existing, "count") else 0
 
             if count > 0:
@@ -143,7 +147,8 @@ class ChromaVectorStore:
                         f"Incompatibilidade de modelo de embeddings na coleção "
                         f"'{collection_name}': coleção indexada com '{stored_model}', "
                         f"mas configuração atual exige '{embedding_model}'. "
-                        "Execute rebuild controlado da coleção vetorial a partir do SQLite."
+                        "Espaços vetoriais de modelos distintos são incompatíveis; utilize "
+                        "uma coleção versionada ou execute rebuild controlado a partir do SQLite."
                     )
                 if stored_dim is not None and stored_dim != embedding_dimension:
                     raise EmbeddingCompatibilityError(
@@ -151,27 +156,52 @@ class ChromaVectorStore:
                         f"coleção possui vetores de {stored_dim} dimensões, mas configuração "
                         f"atual exige {embedding_dimension}. Execute rebuild controlado."
                     )
+                if (
+                    instruction_strategy_version
+                    and stored_strategy is not None
+                    and str(stored_strategy) != instruction_strategy_version
+                ):
+                    raise EmbeddingCompatibilityError(
+                        f"Incompatibilidade de estratégia de instrução na coleção "
+                        f"'{collection_name}': coleção usa '{stored_strategy}', mas "
+                        f"configuração atual exige '{instruction_strategy_version}'. "
+                        "Execute rebuild controlado."
+                    )
             return CollectionMetadata(
                 name=collection_name,
                 embedding_model=str(stored_model) if stored_model is not None else embedding_model,
                 embedding_dimension=stored_dim if stored_dim is not None else embedding_dimension,
+                instruction_strategy_version=(
+                    str(stored_strategy)
+                    if stored_strategy is not None
+                    else instruction_strategy_version
+                ),
+                created_at=str(stored_created_at) if stored_created_at is not None else None,
                 count=count,
             )
+
+        created_at = datetime.now(UTC).isoformat()
+        col_metadata: dict[str, MetadataValue] = {
+            "hnsw:space": "cosine",
+            "embedding_model": embedding_model,
+            "embedding_dimension": int(embedding_dimension),
+            "created_at": created_at,
+        }
+        if instruction_strategy_version:
+            col_metadata["instruction_strategy_version"] = instruction_strategy_version
 
         try:
             collection = self._get_client().get_or_create_collection(
                 name=collection_name,
-                metadata={
-                    "hnsw:space": "cosine",
-                    "embedding_model": embedding_model,
-                    "embedding_dimension": int(embedding_dimension),
-                },
+                metadata=col_metadata,
             )
             count = int(collection.count()) if hasattr(collection, "count") else 0
             return CollectionMetadata(
                 name=collection_name,
                 embedding_model=embedding_model,
                 embedding_dimension=embedding_dimension,
+                instruction_strategy_version=instruction_strategy_version,
+                created_at=created_at,
                 count=count,
             )
         except (StorageConnectionError, EmbeddingCompatibilityError):
@@ -182,18 +212,24 @@ class ChromaVectorStore:
             ) from exc
 
     def get_collection_metadata(self, collection_name: str) -> CollectionMetadata | None:
-        """Retorna metadados de modelo, dimensão e contagem de uma coleção existente."""
+        """Retorna metadados de modelo, dimensão, estratégia e contagem de uma coleção."""
         existing = self._try_get_existing_collection(collection_name)
         if existing is None:
             return None
         meta = dict(getattr(existing, "metadata", None) or {})
         stored_model = meta.get("embedding_model")
         stored_dim_raw = meta.get("embedding_dimension")
+        stored_strategy = meta.get("instruction_strategy_version")
+        stored_created_at = meta.get("created_at")
         count = int(existing.count()) if hasattr(existing, "count") else 0
         return CollectionMetadata(
             name=collection_name,
             embedding_model=str(stored_model) if stored_model is not None else None,
             embedding_dimension=int(stored_dim_raw) if stored_dim_raw is not None else None,
+            instruction_strategy_version=(
+                str(stored_strategy) if stored_strategy is not None else None
+            ),
+            created_at=str(stored_created_at) if stored_created_at is not None else None,
             count=count,
         )
 

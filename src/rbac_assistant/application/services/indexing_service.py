@@ -52,7 +52,7 @@ class IndexingService:
         chunker: ChunkingPort,
         vector_store: VectorStorePort,
         embedding_port: EmbeddingPort,
-        default_collection_name: str = "regulatory_chunks_prod",
+        default_collection_name: str = "regulatory_chunks_ge2_768_v1",
     ) -> None:
         self._repository = repository
         self._catalog_service = catalog_service
@@ -79,11 +79,12 @@ class IndexingService:
             amendment_number=amendment_number,
         )
 
-        # Verifica compatibilidade de modelo e dimensão da coleção antes de gravar
+        # Verifica compatibilidade de modelo, dimensão e estratégia da coleção antes de gravar
         self._vector_store.ensure_collection_compatible(
             collection_name=target_collection,
             embedding_model=self._embedding_port.model_name,
             embedding_dimension=self._embedding_port.dimensions,
+            instruction_strategy_version=self._embedding_port.instruction_strategy_version,
         )
 
         # Verifica idempotência quando não for reindexação forçada
@@ -99,6 +100,8 @@ class IndexingService:
             and reg_entry.source_hash == version.source_hash
             and reg_entry.embedding_model == self._embedding_port.model_name
             and reg_entry.embedding_dimension == self._embedding_port.dimensions
+            and reg_entry.instruction_strategy_version
+            == self._embedding_port.instruction_strategy_version
             and len(existing_sqlite_chunks) == reg_entry.chunk_count
             and reg_entry.chunk_count > 0
         ):
@@ -145,8 +148,13 @@ class IndexingService:
                 f"(versão '{version.version_id}')."
             )
 
-        # Gera embeddings em lote para todos os chunks (usa search_text, nunca altera original_text)
-        vectors = self._embedding_port.embed_documents([c.search_text for c in raw_chunks])
+        # Gera 1 embedding independente por chunk usando título estrutural separado
+        # (nunca altera `original_text` nem `normalized_text` persistidos no SQLite)
+        chunk_titles = [self._build_embedding_title(c) for c in raw_chunks]
+        vectors = self._embedding_port.embed_documents(
+            [c.search_text for c in raw_chunks],
+            titles=chunk_titles,
+        )
         if len(vectors) != len(raw_chunks):
             raise IndexingError(
                 f"Divergência entre chunks ({len(raw_chunks)}) e embeddings gerados "
@@ -212,6 +220,7 @@ class IndexingService:
                 embedding_dimension=self._embedding_port.dimensions,
                 chunk_count=len(enriched_chunks),
                 indexed_at=datetime.now(UTC),
+                instruction_strategy_version=self._embedding_port.instruction_strategy_version,
             )
         )
 
@@ -348,6 +357,16 @@ class IndexingService:
                         f"dimensão alterada ({entry.embedding_dimension} -> "
                         f"{self._embedding_port.dimensions})"
                     )
+                if (
+                    entry.instruction_strategy_version
+                    and entry.instruction_strategy_version
+                    != self._embedding_port.instruction_strategy_version
+                ):
+                    is_stale = True
+                    stale_reasons.append(
+                        f"estratégia alterada ({entry.instruction_strategy_version} -> "
+                        f"{self._embedding_port.instruction_strategy_version})"
+                    )
                 if entry.chunk_count != sqlite_count:
                     is_stale = True
                     stale_reasons.append(
@@ -390,7 +409,17 @@ class IndexingService:
         )
 
     @staticmethod
-    def _build_vector_metadata(chunk: NormativeChunk) -> dict[str, MetadataValue]:
+    def _build_embedding_title(chunk: NormativeChunk) -> str | None:
+        parts = [
+            f"{chunk.document_type} {chunk.regulation_number}".strip(),
+            f"Emenda {chunk.amendment_number}" if chunk.amendment_number else "",
+            f"Seção {chunk.section_number}" if chunk.section_number else "",
+            chunk.title.strip(),
+        ]
+        joined = " — ".join(part for part in parts if part)
+        return joined or None
+
+    def _build_vector_metadata(self, chunk: NormativeChunk) -> dict[str, MetadataValue]:
         return {
             "chunk_id": chunk.chunk_id,
             "unit_id": chunk.unit_id,
@@ -414,4 +443,5 @@ class IndexingService:
             "validation_status": chunk.validation_status,
             "embedding_model": chunk.embedding_model,
             "embedding_dimension": chunk.embedding_dimension,
+            "instruction_strategy_version": self._embedding_port.instruction_strategy_version,
         }

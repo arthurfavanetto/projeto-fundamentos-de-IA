@@ -17,8 +17,17 @@ class EmbeddingPort(Protocol):
     def dimensions(self) -> int:
         """Dimensionalidade vetorial esperada dos embeddings gerados."""
 
-    def embed_documents(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
-        """Gera vetores de embeddings para uma lista de trechos/chunks de documentos."""
+    @property
+    def instruction_strategy_version(self) -> str:
+        """Versão da estratégia de instrução/formatação usada para gerar os embeddings."""
+
+    def embed_documents(
+        self,
+        texts: Sequence[str],
+        *,
+        titles: Sequence[str | None] | None = None,
+    ) -> list[tuple[float, ...]]:
+        """Gera exatamente um vetor independente por chunk de documento, preservando a ordem."""
 
     def embed_query(self, text: str) -> tuple[float, ...]:
         """Gera vetor de embedding otimizado para uma consulta do usuário."""

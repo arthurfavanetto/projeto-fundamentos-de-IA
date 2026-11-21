@@ -82,9 +82,17 @@ class _DeterministicSemanticEmbedder:
         "resolucao": "resolucao_vigor",
     }
 
-    def __init__(self, *, model_name: str = "fake-embed-v1", dimensions: int = 256) -> None:
+    def __init__(
+        self,
+        *,
+        model_name: str = "fake-embed-v1",
+        dimensions: int = 256,
+        instruction_strategy_version: str = "ge2_asymmetric_v1",
+    ) -> None:
         self._model_name = model_name
         self._dimensions = dimensions
+        self._instruction_strategy_version = instruction_strategy_version
+        self.received_titles: list[str | None] = []
 
     @property
     def model_name(self) -> str:
@@ -93,6 +101,10 @@ class _DeterministicSemanticEmbedder:
     @property
     def dimensions(self) -> int:
         return self._dimensions
+
+    @property
+    def instruction_strategy_version(self) -> str:
+        return self._instruction_strategy_version
 
     def _encode(self, text: str) -> tuple[float, ...]:
         normalized = unicodedata.normalize("NFKD", text.lower())
@@ -107,7 +119,14 @@ class _DeterministicSemanticEmbedder:
         norm = math.sqrt(sum(v * v for v in vec)) or 1.0
         return tuple(v / norm for v in vec)
 
-    def embed_documents(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
+    def embed_documents(
+        self,
+        texts: Sequence[str],
+        *,
+        titles: Sequence[str | None] | None = None,
+    ) -> list[tuple[float, ...]]:
+        if titles is not None:
+            self.received_titles.extend(titles)
         return [self._encode(t) for t in texts]
 
     def embed_query(self, text: str) -> tuple[float, ...]:
@@ -761,3 +780,60 @@ def test_operational_cli_scripts_status_and_no_llm_query(
     assert query_payload["is_literal_validated"] is True
     assert query_payload["used_fallback_without_llm"] is True
     assert "manutenção preventiva" in query_payload["normative_text"]
+
+
+@pytest.mark.integration
+def test_sqlite_migrations_fts5_rebuild_and_embedding_prefix_isolation(tmp_path: Path) -> None:
+    repo, catalog, ingestion, _, vector_store, _ = _build_env(tmp_path)
+
+    # 1. Migrações incrementais v001, v002 e v003 aplicadas e registradas
+    assert repo.list_applied_migrations() == [
+        "v001_initial_catalog",
+        "v002_fts5_and_chunks",
+        "v003_index_strategy_metadata",
+    ]
+
+    version_id = _ingest_synthetic_rbac(ingestion, tmp_path)
+    embedder = _DeterministicSemanticEmbedder(
+        model_name="gemini-embedding-2",
+        dimensions=256,
+        instruction_strategy_version="ge2_asymmetric_v1",
+    )
+    indexing = IndexingService(
+        repository=repo,
+        catalog_service=catalog,
+        chunker=StructuralNormativeChunker(),
+        vector_store=vector_store,
+        embedding_port=embedder,
+        default_collection_name="test_ge2_rebuild",
+    )
+    outcome = indexing.index_document(document_id="synth_rbac_43")
+    assert outcome.chunks_created >= 3
+    assert len(embedder.received_titles) == outcome.chunks_created
+    assert any(t and "RBAC 43" in t and "Seção 43.3" in t for t in embedder.received_titles)
+
+    # 2. Nenhum prefixo de embedding (title:/task:) contamina original_text ou normalized_text
+    stored_chunks = repo.list_chunks(version_id)
+    assert all(not c.original_text.startswith("title:") for c in stored_chunks)
+    assert all(not c.original_text.startswith("task:") for c in stored_chunks)
+    stored_pages = repo.get_pages(version_id)
+    assert any(p.original_text and p.normalized_text for p in stored_pages)
+
+    # 3. Apagar manualmente a tabela virtual FTS5 e reconstruí-la a partir do SQLite
+    with repo._connect() as conn, repo._transaction(conn):
+        conn.execute("DELETE FROM normative_chunks_fts;")
+    assert repo.search_chunks_fts(query="manutencao") == []
+
+    rebuilt_count = repo.rebuild_fts_index(version_id=version_id)
+    assert rebuilt_count == len(stored_chunks)
+    restored_hits = repo.search_chunks_fts(query="manutencao")
+    assert len(restored_hits) >= 1
+
+    # 4. Registro vetorial preserva estratégia de instrução no SQLite e no ChromaDB
+    reg = repo.list_index_registry(collection_name="test_ge2_rebuild")
+    assert len(reg) == 1
+    assert reg[0].instruction_strategy_version == "ge2_asymmetric_v1"
+    col_meta = vector_store.get_collection_metadata("test_ge2_rebuild")
+    assert col_meta is not None
+    assert col_meta.instruction_strategy_version == "ge2_asymmetric_v1"
+    assert col_meta.created_at is not None

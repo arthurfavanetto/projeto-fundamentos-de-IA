@@ -1,4 +1,16 @@
-"""Testes unitários do adaptador oficial Google Gemini (`google-genai`) e configurações."""
+"""Testes unitários do adaptador oficial Google Gemini (`google-genai==3.6.1`).
+
+Cobre:
+- Gemini 4 Neon (`gemini-4-neon`) como modelo de geração padrão (sem fallback silencioso).
+- Gemini Embedding 2 (`gemini-embedding-2`, 768d MRL):
+  - ausência de `task_type`;
+  - formato assimétrico oficial (`task: search result | query: ...` e `title: ... | text: ...`);
+  - encapsulamento individual em `types.Content` para impedir agregação indevida;
+  - preservação de ordem e contagem 1:1 de vetores por chunk;
+  - validação de texto vazio e limite de 8.192 tokens;
+- Retry limitado para 429/5xx/timeout e redação de segredos;
+- Variável canônica `GEMINI_GENERATION_MODEL` e aviso de depreciação em `GEMINI_CHAT_MODEL`.
+"""
 
 from __future__ import annotations
 
@@ -7,16 +19,22 @@ from typing import Any
 
 import pytest
 from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 
-from rbac_assistant.config.settings import AppSettings
+from rbac_assistant.config.settings import AppSettings, load_settings
 from rbac_assistant.domain.exceptions import (
     LLMRateLimitError,
     LLMServiceError,
     LLMTimeoutError,
 )
 from rbac_assistant.infrastructure.llm.gemini_client import (
+    DEFAULT_EMBEDDING_DIMENSIONS,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_GENERATION_MODEL,
     GeminiClientAdapter,
     GeminiEmbeddingAdapter,
+    format_ge2_document,
+    format_ge2_query,
 )
 
 
@@ -60,8 +78,12 @@ class _FakeModelsAPI:
             return outcome
         contents = kwargs["contents"]
         dim = kwargs["config"].output_dimensionality
+        # Gera vetor determinístico distinto por posição para validar ordem 1:1
         return _FakeEmbedResponse(
-            embeddings=[_FakeEmbeddingObj(values=[0.1] * dim) for _ in contents]
+            embeddings=[
+                _FakeEmbeddingObj(values=[float(idx + 1) / 100.0] + [0.0] * (dim - 1))
+                for idx, _ in enumerate(contents)
+            ]
         )
 
 
@@ -75,18 +97,42 @@ class _FakeGenAISDKClient:
 
 
 @pytest.mark.unit
+def test_default_models_and_versioned_collection_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for var in (
+        "GEMINI_GENERATION_MODEL",
+        "GEMINI_CHAT_MODEL",
+        "GEMINI_EMBEDDING_MODEL",
+        "GEMINI_EMBEDDING_DIMENSIONS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    settings = load_settings()
+    assert settings.gemini_generation_model == "gemini-4-neon"
+    assert settings.gemini_embedding_model == "gemini-embedding-2"
+    assert settings.effective_embedding_dimensions == 768
+    assert settings.vector_db.collection_name == "regulatory_chunks_ge2_768_v1"
+    assert settings.gemini.embedding_instruction_version == "ge2_asymmetric_v1"
+    assert settings.gemini.embedding_max_input_tokens == 8192
+    assert DEFAULT_GENERATION_MODEL == "gemini-4-neon"
+    assert DEFAULT_EMBEDDING_MODEL == "gemini-embedding-2"
+    assert DEFAULT_EMBEDDING_DIMENSIONS == 768
+
+
+@pytest.mark.unit
 def test_gemini_client_requires_api_key_without_injected_client() -> None:
     with pytest.raises(ValueError, match="GEMINI_API_KEY"):
         GeminiClientAdapter(api_key=None)
 
 
 @pytest.mark.unit
-def test_gemini_generate_and_embeddings_use_configured_models_and_dimensions() -> None:
+def test_gemini_4_neon_generation_and_ge2_asymmetric_embeddings() -> None:
     fake_sdk = _FakeGenAISDKClient()
     adapter = GeminiClientAdapter(
-        generation_model="gemini-3.5-flash-lite",
-        embedding_model="gemini-embedding-001",
-        embedding_dimensions=8,
+        generation_model="gemini-4-neon",
+        embedding_model="gemini-embedding-2",
+        embedding_dimensions=768,
         embedding_batch_size=2,
         retry_min_wait_seconds=0.0,
         retry_max_wait_seconds=0.0,
@@ -94,37 +140,125 @@ def test_gemini_generate_and_embeddings_use_configured_models_and_dimensions() -
     )
     emb_adapter = GeminiEmbeddingAdapter(adapter)
 
+    # 1. Geração com gemini-4-neon
     text = adapter.generate_text(
         system_instruction="Sistema normativo ANAC",
         user_prompt="Explique a seção 43.3",
     )
     assert text == "Explicação técnica fundamentada na seção."
-    assert fake_sdk.models.generate_calls[0]["model"] == "gemini-3.5-flash-lite"
+    assert fake_sdk.models.generate_calls[0]["model"] == "gemini-4-neon"
     gen_cfg = fake_sdk.models.generate_calls[0]["config"]
     assert gen_cfg.system_instruction == "Sistema normativo ANAC"
 
-    doc_vecs = emb_adapter.embed_documents(["trecho 1", "trecho 2", "trecho 3"])
-    assert len(doc_vecs) == 3
-    assert all(len(v) == 8 for v in doc_vecs)
-    # Batch size 2 => 2 chamadas (2 + 1)
-    assert len(fake_sdk.models.embed_calls) == 2
-    assert fake_sdk.models.embed_calls[0]["model"] == "gemini-embedding-001"
-    assert fake_sdk.models.embed_calls[0]["config"].task_type == "RETRIEVAL_DOCUMENT"
+    # 2. Embeddings de documentos com gemini-embedding-2 (768d, sem task_type, Content separado)
+    raw_texts = ["trecho original 1", "trecho original 2", "trecho original 3"]
+    titles = ["RBAC 43 — Seção 43.1", None, "RBAC 43 — Seção 43.9"]
+    doc_vecs = emb_adapter.embed_documents(raw_texts, titles=titles)
 
+    assert len(doc_vecs) == 3
+    assert all(len(v) == 768 for v in doc_vecs)
+    # Ordem 1:1 preservada em cada lote (lote 1: [0.01, 0.02], lote 2: [0.01])
+    assert doc_vecs[0][0] == pytest.approx(0.01)
+    assert doc_vecs[1][0] == pytest.approx(0.02)
+    assert doc_vecs[2][0] == pytest.approx(0.01)
+    # Textos originais não foram mutados
+    assert raw_texts == ["trecho original 1", "trecho original 2", "trecho original 3"]
+
+    assert len(fake_sdk.models.embed_calls) == 2
+    first_call = fake_sdk.models.embed_calls[0]
+    assert first_call["model"] == "gemini-embedding-2"
+    assert first_call["config"].task_type is None
+    assert first_call["config"].output_dimensionality == 768
+    assert len(first_call["contents"]) == 2
+    assert all(isinstance(item, genai_types.Content) for item in first_call["contents"])
+    assert (
+        first_call["contents"][0].parts[0].text
+        == "title: RBAC 43 — Seção 43.1 | text: trecho original 1"
+    )
+    assert (
+        first_call["contents"][1].parts[0].text
+        == "title: none | text: trecho original 2"
+    )
+
+    # 3. Embedding de consulta com prefixo oficial assimétrico e sem task_type
     q_vec = emb_adapter.embed_query("quem executa manutenção")
-    assert len(q_vec) == 8
-    assert fake_sdk.models.embed_calls[-1]["config"].task_type == "RETRIEVAL_QUERY"
+    assert len(q_vec) == 768
+    query_call = fake_sdk.models.embed_calls[-1]
+    assert query_call["model"] == "gemini-embedding-2"
+    assert query_call["config"].task_type is None
+    assert query_call["config"].output_dimensionality == 768
+    assert isinstance(query_call["contents"][0], genai_types.Content)
+    assert (
+        query_call["contents"][0].parts[0].text
+        == "task: search result | query: quem executa manutenção"
+    )
 
     adapter.close()
     assert fake_sdk.closed is True
 
 
 @pytest.mark.unit
-def test_gemini_retries_transient_429_and_eventually_succeeds() -> None:
+def test_ge2_rejects_aggregated_single_vector_empty_text_and_token_overflow() -> None:
     fake_sdk = _FakeGenAISDKClient()
-    rate_err = genai_errors.APIError(429, {"error": {"message": "Quota exceeded"}})
+    adapter = GeminiClientAdapter(
+        embedding_model="gemini-embedding-2",
+        embedding_dimensions=768,
+        embedding_max_input_tokens=200,
+        max_retries=0,
+        retry_min_wait_seconds=0.0,
+        retry_max_wait_seconds=0.0,
+        sdk_client=fake_sdk,
+    )
+
+    # Simula API retornando apenas 1 vetor agregado para 2 chunks => deve falhar explicitamente
+    fake_sdk.models.embed_side_effects = [
+        _FakeEmbedResponse(embeddings=[_FakeEmbeddingObj(values=[0.1] * 768)])
+    ]
+    with pytest.raises(LLMServiceError, match="agregação indevida"):
+        adapter.embed_documents(["chunk A", "chunk B"])
+
+    with pytest.raises(ValueError, match="vazio"):
+        adapter.embed_documents(["   "])
+
+    with pytest.raises(ValueError, match="vazio"):
+        adapter.embed_query("   ")
+
+    with pytest.raises(ValueError, match="excede o limite"):
+        adapter.embed_documents(["palavra " * 300])
+
+    assert format_ge2_query("teste") == "task: search result | query: teste"
+    assert format_ge2_document("corpo", title=None) == "title: none | text: corpo"
+    assert format_ge2_document("corpo", title="Seção 43.3") == "title: Seção 43.3 | text: corpo"
+
+
+@pytest.mark.unit
+def test_gemini_model_unavailable_has_no_silent_fallback() -> None:
+    fake_sdk = _FakeGenAISDKClient()
     fake_sdk.models.generate_side_effects = [
-        rate_err,
+        genai_errors.APIError(404, {"error": {"message": "Model gemini-4-neon not found"}})
+    ]
+    adapter = GeminiClientAdapter(
+        generation_model="gemini-4-neon",
+        max_retries=2,
+        retry_min_wait_seconds=0.0,
+        retry_max_wait_seconds=0.0,
+        sdk_client=fake_sdk,
+    )
+
+    with pytest.raises(LLMServiceError, match="Nenhum fallback silencioso foi aplicado"):
+        adapter.generate_text(system_instruction="sys", user_prompt="usr")
+
+    # 404 não é transitório e não dispara retry nem troca silenciosa de modelo
+    assert len(fake_sdk.models.generate_calls) == 1
+    assert fake_sdk.models.generate_calls[0]["model"] == "gemini-4-neon"
+
+
+@pytest.mark.unit
+def test_gemini_retries_transient_429_and_503_and_eventually_succeeds() -> None:
+    fake_sdk = _FakeGenAISDKClient()
+    fake_sdk.models.generate_side_effects = [
+        genai_errors.APIError(429, {"error": {"message": "Quota exceeded"}}),
+        genai_errors.APIError(503, {"error": {"message": "Service unavailable"}}),
         _FakeGenerateResponse(text="Explicação após retry."),
     ]
     adapter = GeminiClientAdapter(
@@ -136,7 +270,7 @@ def test_gemini_retries_transient_429_and_eventually_succeeds() -> None:
 
     result = adapter.generate_text(system_instruction="sys", user_prompt="usr")
     assert result == "Explicação após retry."
-    assert len(fake_sdk.models.generate_calls) == 2
+    assert len(fake_sdk.models.generate_calls) == 3
 
 
 @pytest.mark.unit
@@ -175,7 +309,7 @@ def test_gemini_rejects_empty_response_and_wrong_embedding_dimension() -> None:
     fake_sdk = _FakeGenAISDKClient()
     fake_sdk.models.generate_side_effects = [_FakeGenerateResponse(text="   ")]
     adapter = GeminiClientAdapter(
-        embedding_dimensions=8,
+        embedding_dimensions=768,
         max_retries=0,
         retry_min_wait_seconds=0.0,
         retry_max_wait_seconds=0.0,
@@ -193,15 +327,22 @@ def test_gemini_rejects_empty_response_and_wrong_embedding_dimension() -> None:
 
 
 @pytest.mark.unit
-def test_settings_supports_gemini_chat_model_alias_and_embedding_dimensions(
+def test_settings_canonical_env_var_and_legacy_chat_model_deprecation_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("GEMINI_GENERATION_MODEL", raising=False)
-    monkeypatch.setenv("GEMINI_CHAT_MODEL", "gemini-3.8-flash")
-    monkeypatch.setenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+    monkeypatch.setenv("GEMINI_GENERATION_MODEL", "gemini-4-hydrogen")
+    monkeypatch.setenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
     monkeypatch.setenv("GEMINI_EMBEDDING_DIMENSIONS", "1536")
+    monkeypatch.delenv("GEMINI_CHAT_MODEL", raising=False)
 
     settings = AppSettings(_env_file=None)  # type: ignore[call-arg]
-    assert settings.gemini_generation_model == "gemini-3.8-flash"
-    assert settings.gemini_embedding_model == "gemini-embedding-001"
+    assert settings.gemini_generation_model == "gemini-4-hydrogen"
+    assert settings.gemini_embedding_model == "gemini-embedding-2"
     assert settings.effective_embedding_dimensions == 1536
+
+    # Alias legado GEMINI_CHAT_MODEL ainda aceito temporariamente, mas emite DeprecationWarning
+    monkeypatch.delenv("GEMINI_GENERATION_MODEL", raising=False)
+    monkeypatch.setenv("GEMINI_CHAT_MODEL", "gemini-4-carbon")
+    with pytest.warns(DeprecationWarning, match="GEMINI_GENERATION_MODEL"):
+        legacy_settings = AppSettings(_env_file=None)  # type: ignore[call-arg]
+    assert legacy_settings.gemini_generation_model == "gemini-4-carbon"

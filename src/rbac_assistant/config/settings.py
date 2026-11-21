@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import warnings
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator
+from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -68,7 +70,7 @@ class VectorDBConfig(BaseModel):
     pinned_version: str = "1.5.9"
     heartbeat_path: str = "/api/v2/heartbeat"
     request_timeout_seconds: float = Field(default=5.0, gt=0.0)
-    collection_name: str = Field(default="regulatory_chunks_prod", min_length=1)
+    collection_name: str = Field(default="regulatory_chunks_ge2_768_v1", min_length=1)
     test_collection_prefix: str = Field(default="test_", min_length=1)
 
     @field_validator("heartbeat_path")
@@ -88,7 +90,9 @@ class GeminiConfig(BaseModel):
     retry_max_wait_seconds: float = Field(default=8.0, ge=0.0, le=120.0)
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_output_tokens: int = Field(default=2048, ge=128, le=8192)
-    embedding_dimensions: int = Field(default=768, ge=64, le=3072)
+    embedding_dimensions: int = Field(default=768, ge=128, le=3072)
+    embedding_instruction_version: str = Field(default="ge2_asymmetric_v1", min_length=1)
+    embedding_max_input_tokens: int = Field(default=8192, ge=256, le=32768)
     embedding_batch_size: int = Field(default=32, ge=1, le=256)
     prompts_dir: Path = Path("config/prompts")
 
@@ -108,6 +112,8 @@ class RetrievalConfig(BaseModel):
     lexical_top_k: int = Field(default=5, ge=1, le=50)
     final_top_k: int = Field(default=5, ge=1, le=50)
     rrf_k: int = Field(default=60, ge=1, le=1000)
+    # Threshold inicial/provisório para distância de cosseno no ChromaDB (`hnsw:space: cosine`),
+    # sujeito a calibração por benchmark real após ingestão do RBAC 43.
     max_vector_distance: float = Field(default=0.85, gt=0.0, le=2.0)
     only_current_amendment_by_default: bool = True
     reconstruct_full_section_from_ssot: bool = True
@@ -162,13 +168,14 @@ class AppSettings(BaseSettings):
     chroma_port: int = Field(default=8000, ge=1, le=65535)
 
     # Identificadores configuráveis dos modelos Gemini (Etapa 3)
+    # Canônica: GEMINI_GENERATION_MODEL (GEMINI_CHAT_MODEL mantida apenas como alias legado)
     gemini_generation_model: str = Field(
-        default="gemini-3.5-flash-lite",
+        default="gemini-4-neon",
         min_length=1,
         validation_alias=AliasChoices("GEMINI_GENERATION_MODEL", "GEMINI_CHAT_MODEL"),
     )
-    gemini_embedding_model: str = Field(default="gemini-embedding-001", min_length=1)
-    gemini_embedding_dimensions: int | None = Field(default=None, ge=64, le=3072)
+    gemini_embedding_model: str = Field(default="gemini-embedding-2", min_length=1)
+    gemini_embedding_dimensions: int | None = Field(default=None, ge=128, le=3072)
 
     # Credenciais opcionais nas Etapas 1 e 2; obrigatórias para chamadas reais Gemini/Telegram
     gemini_api_key: SecretStr | None = None
@@ -186,6 +193,17 @@ class AppSettings(BaseSettings):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+
+    @model_validator(mode="after")
+    def _warn_deprecated_chat_model_env(self) -> AppSettings:
+        if os.environ.get("GEMINI_CHAT_MODEL") and not os.environ.get("GEMINI_GENERATION_MODEL"):
+            warnings.warn(
+                "A variável GEMINI_CHAT_MODEL está obsoleta; utilize a variável canônica "
+                "GEMINI_GENERATION_MODEL.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return self
 
     @property
     def effective_embedding_dimensions(self) -> int:

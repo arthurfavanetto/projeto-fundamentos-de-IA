@@ -209,6 +209,7 @@ class HybridNormativeRetriever:
                     collection_name=self._collection_name,
                     embedding_model=self._embedding_port.model_name,
                     embedding_dimension=self._embedding_port.dimensions,
+                    instruction_strategy_version=self._embedding_port.instruction_strategy_version,
                 )
                 query_vector = self._embedding_port.embed_query(clean_query)
                 where_filter = self._build_chroma_where(effective_filters)

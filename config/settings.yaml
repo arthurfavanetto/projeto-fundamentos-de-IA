@@ -35,7 +35,8 @@ vector_db:
   pinned_version: "1.5.9"
   heartbeat_path: "/api/v2/heartbeat"
   request_timeout_seconds: 5.0
-  collection_name: "regulatory_chunks_prod"
+  # Coleção versionada dedicada ao Gemini Embedding 2 (768d, estratégia assimétrica v1)
+  collection_name: "regulatory_chunks_ge2_768_v1"
   test_collection_prefix: "test_"
 
 gemini:
@@ -45,12 +46,15 @@ gemini:
   retry_max_wait_seconds: 8.0
   temperature: 0.1
   max_output_tokens: 2048
+  # Gemini Embedding 2 (MRL 128-3072; recomendadas: 768, 1536, 3072; limite 8.192 tokens)
   embedding_dimensions: 768
+  embedding_instruction_version: "ge2_asymmetric_v1"
+  embedding_max_input_tokens: 8192
   embedding_batch_size: 32
   prompts_dir: "config/prompts"
 
 chunking:
-  # Preserva seções completas dentro da janela alvo; divide por parágrafos quando exceder
+  # Preserva seções completas dentro da janela alvo (folga ampla abaixo dos 8.192 tokens do GE2)
   max_chunk_tokens: 1200
   overlap_tokens: 0
   preserve_hierarchy: true
@@ -60,6 +64,8 @@ retrieval:
   lexical_top_k: 5
   final_top_k: 5
   rrf_k: 60
+  # Threshold inicial/provisório para distância de cosseno no ChromaDB (`hnsw:space: cosine`).
+  # Deverá ser calibrado com benchmark real após ingestão do PDF oficial do RBAC 43.
   max_vector_distance: 0.85
   only_current_amendment_by_default: true
   reconstruct_full_section_from_ssot: true

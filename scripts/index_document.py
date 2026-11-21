@@ -36,9 +36,16 @@ from rbac_assistant.rag.ingestion.structural_chunker import StructuralNormativeC
 class _MetadataOnlyEmbeddingDescriptor:
     """Descritor somente leitura usado por `--status` sem exigir `GEMINI_API_KEY`."""
 
-    def __init__(self, *, model_name: str, dimensions: int) -> None:
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        dimensions: int,
+        instruction_strategy_version: str,
+    ) -> None:
         self._model_name = model_name
         self._dimensions = dimensions
+        self._instruction_strategy_version = instruction_strategy_version
 
     @property
     def model_name(self) -> str:
@@ -48,7 +55,16 @@ class _MetadataOnlyEmbeddingDescriptor:
     def dimensions(self) -> int:
         return self._dimensions
 
-    def embed_documents(self, texts: Any) -> list[tuple[float, ...]]:
+    @property
+    def instruction_strategy_version(self) -> str:
+        return self._instruction_strategy_version
+
+    def embed_documents(
+        self,
+        texts: Any,
+        *,
+        titles: Any = None,
+    ) -> list[tuple[float, ...]]:
         raise RuntimeError("Operação de embedding indisponível no modo somente leitura (--status).")
 
     def embed_query(self, text: str) -> tuple[float, ...]:
@@ -86,6 +102,8 @@ def _build_indexing_service(
             generation_model=settings.gemini_generation_model,
             embedding_model=settings.gemini_embedding_model,
             embedding_dimensions=settings.effective_embedding_dimensions,
+            embedding_instruction_version=settings.gemini.embedding_instruction_version,
+            embedding_max_input_tokens=settings.gemini.embedding_max_input_tokens,
             timeout_seconds=settings.gemini.timeout_seconds,
             max_retries=settings.gemini.max_retries,
             retry_min_wait_seconds=settings.gemini.retry_min_wait_seconds,
@@ -97,6 +115,7 @@ def _build_indexing_service(
         embedding_port = _MetadataOnlyEmbeddingDescriptor(
             model_name=settings.gemini_embedding_model,
             dimensions=settings.effective_embedding_dimensions,
+            instruction_strategy_version=settings.gemini.embedding_instruction_version,
         )
 
     service = IndexingService(

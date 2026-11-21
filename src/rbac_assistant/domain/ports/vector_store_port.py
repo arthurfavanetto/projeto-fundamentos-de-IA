@@ -31,11 +31,13 @@ class VectorSearchHit:
 
 @dataclass(frozen=True, slots=True)
 class CollectionMetadata:
-    """Metadados de controle de modelo e dimensionalidade associados a uma coleção vetorial."""
+    """Metadados de controle de modelo, dimensão e estratégia associados a uma coleção vetorial."""
 
     name: str
     embedding_model: str | None = None
     embedding_dimension: int | None = None
+    instruction_strategy_version: str | None = None
+    created_at: str | None = None
     count: int = 0
 
 
@@ -51,8 +53,9 @@ class VectorStorePort(Protocol):
         collection_name: str,
         embedding_model: str,
         embedding_dimension: int,
+        instruction_strategy_version: str | None = None,
     ) -> CollectionMetadata:
-        """Cria ou valida coleção garantindo compatibilidade de modelo e dimensionalidade."""
+        """Cria ou valida coleção garantindo compatibilidade de modelo, dimensão e estratégia."""
 
     def get_collection_metadata(self, collection_name: str) -> CollectionMetadata | None:
         """Retorna metadados e contagem de uma coleção existente ou `None` se não existir."""

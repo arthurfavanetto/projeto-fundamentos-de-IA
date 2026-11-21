@@ -193,39 +193,60 @@ class _InMemoryChromaClient:
 
 
 @pytest.mark.unit
-def test_chroma_vector_store_blocks_incompatible_embedding_model_and_dimensions() -> None:
+def test_chroma_vector_store_blocks_incompatible_embedding_model_dim_and_strategy() -> None:
     client = _InMemoryChromaClient()
     store = ChromaVectorStore(client=client)
-    store.ensure_collection_compatible(
-        collection_name="test_compat",
-        embedding_model="gemini-embedding-001",
-        embedding_dimension=4,
+    meta = store.ensure_collection_compatible(
+        collection_name="test_compat_ge2_768_v1",
+        embedding_model="gemini-embedding-2",
+        embedding_dimension=768,
+        instruction_strategy_version="ge2_asymmetric_v1",
     )
+    assert meta.embedding_model == "gemini-embedding-2"
+    assert meta.embedding_dimension == 768
+    assert meta.instruction_strategy_version == "ge2_asymmetric_v1"
+    assert meta.created_at is not None
+    # Métrica de distância cosseno compatível com embeddings normalizados do GE2
+    assert client.collections["test_compat_ge2_768_v1"].metadata["hnsw:space"] == "cosine"
+
     store.upsert_records(
-        collection_name="test_compat",
+        collection_name="test_compat_ge2_768_v1",
         records=[
             VectorRecord(
                 record_id="c1",
                 document="doc",
-                embedding=(1.0, 0.0, 0.0, 0.0),
+                embedding=(1.0,) + (0.0,) * 767,
                 metadata={"version_id": "v1", "regulation_number": "43"},
             )
         ],
     )
-    assert store.count_records("test_compat") == 1
+    assert store.count_records("test_compat_ge2_768_v1") == 1
 
+    # Mesmo com 768 dimensões, não permite misturar gemini-embedding-001 com gemini-embedding-2
     with pytest.raises(EmbeddingCompatibilityError, match="Incompatibilidade de modelo"):
         store.ensure_collection_compatible(
-            collection_name="test_compat",
-            embedding_model="outro-modelo-embedding",
-            embedding_dimension=4,
+            collection_name="test_compat_ge2_768_v1",
+            embedding_model="gemini-embedding-001",
+            embedding_dimension=768,
+            instruction_strategy_version="ge2_asymmetric_v1",
         )
 
     with pytest.raises(EmbeddingCompatibilityError, match="Incompatibilidade de dimensionalidade"):
         store.ensure_collection_compatible(
-            collection_name="test_compat",
-            embedding_model="gemini-embedding-001",
+            collection_name="test_compat_ge2_768_v1",
+            embedding_model="gemini-embedding-2",
+            embedding_dimension=1536,
+            instruction_strategy_version="ge2_asymmetric_v1",
+        )
+
+    with pytest.raises(
+        EmbeddingCompatibilityError, match="Incompatibilidade de estratégia de instrução"
+    ):
+        store.ensure_collection_compatible(
+            collection_name="test_compat_ge2_768_v1",
+            embedding_model="gemini-embedding-2",
             embedding_dimension=768,
+            instruction_strategy_version="ge2_asymmetric_v2",
         )
 
 
@@ -242,6 +263,31 @@ def test_chroma_vector_store_surfaces_connection_error_when_unavailable() -> Non
     with pytest.raises(StorageConnectionError, match="ChromaDB offline"):
         store.ensure_collection_compatible(
             collection_name="test_offline",
-            embedding_model="gemini-embedding-001",
-            embedding_dimension=4,
+            embedding_model="gemini-embedding-2",
+            embedding_dimension=768,
         )
+
+
+@pytest.mark.unit
+def test_sqlite_canonical_path_matches_docker_volume_and_ci_uses_node24_actions(
+    repo_root: Any,
+) -> None:
+    from rbac_assistant.config.settings import load_settings
+
+    settings = load_settings(repo_root / "config" / "settings.yaml")
+    assert str(settings.storage.sqlite_path) == "/app/data/documents/catalog.sqlite3"
+    assert settings.vector_db.collection_name == "regulatory_chunks_ge2_768_v1"
+
+    compose_text = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "regulatory_documents:/app/data/documents" in compose_text
+
+    ci_text = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "actions/checkout@v7.0.1" in ci_text
+    assert "astral-sh/setup-uv@v10.4.0" in ci_text
+    assert "actions/checkout@v4" not in ci_text
+    assert "astral-sh/setup-uv@v5" not in ci_text
+    assert "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24" not in ci_text
+    assert "ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION" not in ci_text
+    assert "quality-and-tests:" in ci_text
+    assert "docker-smoke-test:" in ci_text
+    assert "normative_chunks_fts" in ci_text
