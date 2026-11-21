@@ -29,11 +29,33 @@ class VectorSearchHit:
     distance: float
 
 
+@dataclass(frozen=True, slots=True)
+class CollectionMetadata:
+    """Metadados de controle de modelo e dimensionalidade associados a uma coleção vetorial."""
+
+    name: str
+    embedding_model: str | None = None
+    embedding_dimension: int | None = None
+    count: int = 0
+
+
 class VectorStorePort(Protocol):
     """Interface de comunicação com o servidor vetorial (ex.: ChromaDB HTTP)."""
 
     def check_heartbeat(self) -> int:
         """Verifica conectividade com o servidor vetorial e retorna o timestamp de heartbeat."""
+
+    def ensure_collection_compatible(
+        self,
+        *,
+        collection_name: str,
+        embedding_model: str,
+        embedding_dimension: int,
+    ) -> CollectionMetadata:
+        """Cria ou valida coleção garantindo compatibilidade de modelo e dimensionalidade."""
+
+    def get_collection_metadata(self, collection_name: str) -> CollectionMetadata | None:
+        """Retorna metadados e contagem de uma coleção existente ou `None` se não existir."""
 
     def upsert_records(
         self,
@@ -51,6 +73,33 @@ class VectorStorePort(Protocol):
     ) -> list[VectorRecord]:
         """Recupera registros vetoriais diretamente pelos seus IDs determinísticos."""
 
+    def delete_records(
+        self,
+        *,
+        collection_name: str,
+        record_ids: Sequence[str],
+    ) -> None:
+        """Remove registros obsoletos específicos pelos seus identificadores."""
+
+    def delete_by_where(
+        self,
+        *,
+        collection_name: str,
+        where: Mapping[str, MetadataValue],
+    ) -> None:
+        """Remove todos os registros que satisfaçam um filtro de metadados."""
+
+    def count_records(self, collection_name: str) -> int:
+        """Retorna a quantidade de vetores persistidos na coleção (0 se inexistente)."""
+
+    def list_record_ids(
+        self,
+        *,
+        collection_name: str,
+        where: Mapping[str, MetadataValue] | None = None,
+    ) -> list[str]:
+        """Lista os IDs de registros persistidos na coleção (opcionalmente filtrados)."""
+
     def query_similar(
         self,
         *,
@@ -63,3 +112,4 @@ class VectorStorePort(Protocol):
 
     def delete_collection(self, collection_name: str) -> None:
         """Remove uma coleção completa (usado em limpeza de testes ou reindexação)."""
+

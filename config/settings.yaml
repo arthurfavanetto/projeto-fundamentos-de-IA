@@ -36,6 +36,19 @@ vector_db:
   pinned_version: "1.5.9"
   heartbeat_path: "/api/v2/heartbeat"
   request_timeout_seconds: 5.0
+  collection_name: "regulatory_chunks_prod"
+  test_collection_prefix: "test_"
+
+gemini:
+  timeout_seconds: 30.0
+  max_retries: 3
+  retry_min_wait_seconds: 0.5
+  retry_max_wait_seconds: 8.0
+  temperature: 0.1
+  max_output_tokens: 2048
+  embedding_dimensions: 768
+  embedding_batch_size: 32
+  prompts_dir: "config/prompts"
 
 chunking:
   # Preserva seções completas dentro da janela alvo; divide por parágrafos quando exceder
@@ -45,8 +58,13 @@ chunking:
 
 retrieval:
   semantic_top_k: 5
+  lexical_top_k: 5
+  final_top_k: 5
+  rrf_k: 60
+  max_vector_distance: 0.85
   only_current_amendment_by_default: true
   reconstruct_full_section_from_ssot: true
+  allow_preliminary_native_search: true
 
 telegram:
   mode: "long_polling"

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -69,6 +69,8 @@ class VectorDBConfig(BaseModel):
     pinned_version: str = "1.5.9"
     heartbeat_path: str = "/api/v2/heartbeat"
     request_timeout_seconds: float = Field(default=5.0, gt=0.0)
+    collection_name: str = Field(default="regulatory_chunks_prod", min_length=1)
+    test_collection_prefix: str = Field(default="test_", min_length=1)
 
     @field_validator("heartbeat_path")
     @classmethod
@@ -76,6 +78,20 @@ class VectorDBConfig(BaseModel):
         if not value.startswith("/"):
             raise ValueError("heartbeat_path deve iniciar com '/'.")
         return value
+
+
+class GeminiConfig(BaseModel):
+    """Parâmetros operacionais da integração oficial com Google Gemini (`google-genai`)."""
+
+    timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
+    max_retries: int = Field(default=3, ge=0, le=10)
+    retry_min_wait_seconds: float = Field(default=0.5, ge=0.0, le=30.0)
+    retry_max_wait_seconds: float = Field(default=8.0, ge=0.0, le=120.0)
+    temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    max_output_tokens: int = Field(default=2048, ge=128, le=8192)
+    embedding_dimensions: int = Field(default=768, ge=64, le=3072)
+    embedding_batch_size: int = Field(default=32, ge=1, le=256)
+    prompts_dir: Path = Path("config/prompts")
 
 
 class ChunkingConfig(BaseModel):
@@ -87,11 +103,16 @@ class ChunkingConfig(BaseModel):
 
 
 class RetrievalConfig(BaseModel):
-    """Parâmetros de busca híbrida e isolamento de emendas."""
+    """Parâmetros de busca híbrida (FTS5 + ChromaDB + RRF) e isolamento de emendas."""
 
     semantic_top_k: int = Field(default=5, ge=1, le=50)
+    lexical_top_k: int = Field(default=5, ge=1, le=50)
+    final_top_k: int = Field(default=5, ge=1, le=50)
+    rrf_k: int = Field(default=60, ge=1, le=1000)
+    max_vector_distance: float = Field(default=0.85, gt=0.0, le=2.0)
     only_current_amendment_by_default: bool = True
     reconstruct_full_section_from_ssot: bool = True
+    allow_preliminary_native_search: bool = True
 
 
 class TelegramConfig(BaseModel):
@@ -141,11 +162,16 @@ class AppSettings(BaseSettings):
     chroma_host: str = Field(default="chromadb", min_length=1)
     chroma_port: int = Field(default=8000, ge=1, le=65535)
 
-    # Identificadores configuráveis dos modelos Gemini (usados a partir da Etapa 3)
-    gemini_generation_model: str = Field(default="gemini-2.5-flash", min_length=1)
-    gemini_embedding_model: str = Field(default="text-embedding-004", min_length=1)
+    # Identificadores configuráveis dos modelos Gemini (Etapa 3)
+    gemini_generation_model: str = Field(
+        default="gemini-3.5-flash-lite",
+        min_length=1,
+        validation_alias=AliasChoices("GEMINI_GENERATION_MODEL", "GEMINI_CHAT_MODEL"),
+    )
+    gemini_embedding_model: str = Field(default="gemini-embedding-001", min_length=1)
+    gemini_embedding_dimensions: int | None = Field(default=None, ge=64, le=3072)
 
-    # Credenciais opcionais nas Etapas 1 e 2; obrigatórias nas Etapas 3 e 4
+    # Credenciais opcionais nas Etapas 1 e 2; obrigatórias para chamadas reais Gemini/Telegram
     gemini_api_key: SecretStr | None = None
     telegram_bot_token: SecretStr | None = None
 
@@ -156,10 +182,20 @@ class AppSettings(BaseSettings):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     vector_db: VectorDBConfig = Field(default_factory=VectorDBConfig)
+    gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+
+    @property
+    def effective_embedding_dimensions(self) -> int:
+        """Retorna a dimensão vetorial efetiva (env var sobrepõe YAML)."""
+        return (
+            self.gemini_embedding_dimensions
+            if self.gemini_embedding_dimensions is not None
+            else self.gemini.embedding_dimensions
+        )
 
     @property
     def chroma_base_url(self) -> str:
@@ -213,6 +249,7 @@ def load_settings(yaml_path: Path | None = None) -> AppSettings:
         "storage",
         "extraction",
         "vector_db",
+        "gemini",
         "chunking",
         "retrieval",
         "telegram",

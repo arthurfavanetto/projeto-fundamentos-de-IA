@@ -68,3 +68,30 @@ Este documento consolida as Decisões Arquiteturais (*Architecture Decision Reco
 - **Consequências:**
   - Operadores copiam os templates localmente no host antes do deploy.
   - Reduz drasticamente o risco de vazamento acidental de credenciais ou dados de usuários.
+
+---
+
+## ADR-07 — SQLite (SSOT + FTS5) + ChromaDB 1.5.9 com Fusão RRF (Etapas 2 e 3)
+
+- **Status:** Aprovada
+- **Contexto:** O armazenamento canônico evoluiu para SQLite 3 (modo WAL, `FOREIGN KEYs ON`, transações ACID) no volume `regulatory_documents`. Na Etapa 3, consultas regulatórias precisam localizar termos exatos com e sem acentuação em português (ex.: `manutencao` vs. `manutenção`), referências estruturais (`RBAC 43.3`, `Art. 1º`) e perguntas semânticas abertas.
+- **Decisão:**
+  - Adotar índice lexical **SQLite FTS5** com tokenizador `unicode61 remove_diacritics 2` na migração incremental `v002_fts5_and_chunks.sql`, preservando `original_text` intacto no SSOT.
+  - Combinar busca estrutural exata (`section_resolver`), busca lexical FTS5 (BM25) e busca vetorial no ChromaDB 1.5.9 via **Reciprocal Rank Fusion (RRF)**.
+  - Hidratar todas as evidências ao vivo a partir do SQLite aplicando `ValidationService` (`review_on_demand`), impedindo que páginas OCR pendentes ou reprovadas fundamentem respostas.
+- **Consequências:**
+  - Nenhuma dependência externa adicional (FTS5 é nativo no Python 3.12 / SQLite 3.53).
+  - Aprovações ou reprovações de páginas refletem imediatamente nas consultas sem necessidade de reindexar vetores.
+
+---
+
+## ADR-08 — SDK Oficial `google-genai`, Modelos Ativos e Guarda de Compatibilidade de Embeddings
+
+- **Status:** Aprovada
+- **Contexto:** O legado `google-generativeai` foi descontinuado em favor de `google-genai`; adicionalmente, o modelo `text-embedding-004` foi encerrado em janeiro/2026 e `gemini-2.5-flash` encontra-se em processo de descontinuação com roteamento para `gemini-3.5-flash-lite`.
+- **Decisão:**
+  - Adotar exclusivamente o SDK oficial `google-genai` (`v3.x`), mantendo `GEMINI_GENERATION_MODEL` (padrão `gemini-3.5-flash-lite`, com alias opcional `GEMINI_CHAT_MODEL`), `GEMINI_EMBEDDING_MODEL` (padrão `gemini-embedding-001`) e `GEMINI_EMBEDDING_DIMENSIONS` (padrão `768`, MRL) 100% configuráveis por ambiente.
+  - Registrar modelo e dimensionalidade nos metadados da coleção ChromaDB e em `vector_index_registry` (SQLite), bloqueando mistura incompatível (`EmbeddingCompatibilityError`) e oferecendo reconstrução controlada (`rebuild_vector_index`) a partir do SQLite SSOT.
+- **Consequências:**
+  - Troca futura de modelo de geração ou embeddings ocorre sem reescrita de código e sem risco silencioso de degradação vetorial.
+
