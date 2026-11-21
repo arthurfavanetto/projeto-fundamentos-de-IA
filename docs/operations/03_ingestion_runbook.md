@@ -1,42 +1,58 @@
-# Runbook Operacional — Ingestão, Validação, Indexação e Consulta (Etapas 2 e 3)
+# Runbook Operacional — Ingestão, Validação, Indexação e Consulta
 
-Este runbook descreve o procedimento real e verificado para homologar, ingerir, validar páginas, indexar (SQLite FTS5 + ChromaDB) e executar consultas sobre regulamentos oficiais da ANAC — sem versionar PDFs nem chaves no Git.
+Este runbook detalha a sequência operacional executável no repositório para homologar, ingerir, validar páginas, indexar (SQLite FTS5 + ChromaDB) e consultar regulamentos oficiais da ANAC. Para a hierarquia completa de fontes de dados (PDF original, SQLite, FTS5, ChromaDB e Gemini), consulte a **Seção 2 do [`README.md`](../../README.md#2-arquitetura-de-dados-sqlite-e-fontes-de-verdade)**.
 
----
-
-## 1. Protocolo Mandatório Pré-Ingestão (Governança ANAC)
-
-> **Regra Inviolável:** Nunca presumir que uma emenda histórica permanece vigente. Todo regulamento deve ser conferido diretamente no portal oficial da ANAC antes da ingestão. Consultas públicas **não** são normas vigentes.
-
-1. Consulte o portal oficial da ANAC e confirme a **Emenda vigente**, a **Resolução aprovadora**, as datas (`publication_date`, `effective_date`) e a URL oficial (`official_url` / `source_url`).
-2. Atualize (se necessário) o manifesto declarativo em `config/regulations_catalog.yaml`.
-3. Baixe o PDF oficial localmente (fora do Git) — por exemplo, para `data/raw_pdfs/RBAC43EMD05.pdf` — ou copie-o para o volume persistente `regulatory_documents` (`/app/data/documents/raw_pdfs/`).
-4. Configure o arquivo `.env` local (nunca versionado no Git) com:
-   - `GEMINI_API_KEY=<sua-chave-real>`
-   - `GEMINI_GENERATION_MODEL=gemini-3.5-flash-lite` (ou outro modelo ativo configurado)
-   - `GEMINI_EMBEDDING_MODEL=gemini-embedding-001`
-   - `GEMINI_EMBEDDING_DIMENSIONS=768`
+> **Governança ANAC:** nunca presuma que uma emenda histórica permanece vigente sem conferência prévia no portal oficial da ANAC. Consultas públicas **não** são normas vigentes. PDFs oficiais e arquivos `.env` **nunca** são versionados no Git.
 
 ---
 
-## 2. Passo a Passo Real (Docker Compose no PC Central Windows ou Linux)
+## Sequência Operacional Completa (10 Passos)
 
-### Passo 1 — Subir/reconstruir os contêineres
+### Passo 1 — Atualizar a `main` após o merge do PR
+
+```bash
+git checkout main
+git pull origin main
+```
+
+### Passo 2 — Configurar o `.env` local
+
+Copie `.env.example` para `.env` na raiz do repositório e preencha sua chave e modelos (nunca versione o `.env`):
+
+```env
+GEMINI_API_KEY=<sua-chave-gemini-api>
+GEMINI_GENERATION_MODEL=gemini-4-neon
+GEMINI_EMBEDDING_MODEL=gemini-embedding-2
+GEMINI_EMBEDDING_DIMENSIONS=768
+CHROMA_HOST=chromadb
+CHROMA_PORT=8000
+ENVIRONMENT=local
+LOG_LEVEL=INFO
+```
+
+> **Atenção:** `gemini-4-neon` exige tier pago na Gemini API (US\$ 3 / US\$ 15 por 1M tokens). Para testes em conta sem faturamento pago, altere manualmente `GEMINI_GENERATION_MODEL=gemini-4-hydrogen`.
+
+### Passo 3 — Inicializar a stack Docker
 
 ```bash
 docker compose up -d --build
-```
-
-Verifique saúde de ambos os serviços:
-
-```bash
 docker compose ps
 docker compose exec rbac-bot python -m rbac_assistant.healthcheck
 ```
 
-### Passo 2 — Ingerir o PDF oficial no SQLite (SSOT)
+Verifique que ambos os contêineres (`rbac-chromadb` e `rbac-bot`) reportam status `healthy` operando como non-root (UID/GID `10001`).
 
-Se o PDF foi copiado para o contêiner (por exemplo `/app/data/documents/raw_pdfs/RBAC43EMD05.pdf`):
+### Passo 4 — Adicionar o PDF original no caminho persistente correto
+
+Copie o PDF oficial conferido na ANAC (ex.: `RBAC43EMD05.pdf`) para dentro do volume persistente `regulatory_documents` montado em `/app/data/documents`:
+
+```bash
+docker compose cp ./RBAC43EMD05.pdf rbac-bot:/app/data/documents/raw_pdfs/RBAC43EMD05.pdf
+```
+
+*(O banco operacional SQLite ficará no mesmo volume persistente em `/app/data/documents/catalog.sqlite3`.)*
+
+### Passo 5 — Executar a ingestão no SQLite
 
 ```bash
 docker compose exec rbac-bot python scripts/ingest_regulation.py \
@@ -44,26 +60,26 @@ docker compose exec rbac-bot python scripts/ingest_regulation.py \
   --pdf-path /app/data/documents/raw_pdfs/RBAC43EMD05.pdf
 ```
 
-*(Alternativamente, se desejar baixar diretamente pela URL oficial HTTPS homologada em `config/regulations_catalog.yaml`, omita `--pdf-path`.)*
+### Passo 6 — Validar e inspecionar a extração
 
-### Passo 3 — Inspecionar o documento ingerido e estados por página
+Inspecione o documento ingerido, a contagem de páginas/unidades e o estado inicial de validação:
 
 ```bash
 docker compose exec rbac-bot python scripts/inspect_document.py --document-id anac_rbac_43
 docker compose exec rbac-bot python scripts/inspect_document.py --document-id anac_rbac_43 --section 43.3
 ```
 
-### Passo 4 — Revisar e aprovar páginas sob demanda (`review_on_demand`)
+### Passo 7 — Revisar e aprovar as páginas necessárias (`review_on_demand`)
 
-Antes de uma seção poder ser entregue como **transcrição literal validada**, **todas** as páginas que a compõem precisam de aprovação humana explícita após conferência com o PDF oficial:
+Antes que uma seção seja apresentada como **transcrição literal validada**, todas as páginas que a compõem exigem revisão humana explícita após conferência com o PDF original:
 
 ```bash
-# 1. Inspecionar as páginas da seção (modo somente leitura):
+# Modo somente inspeção (exibe texto original extraído página a página):
 docker compose exec rbac-bot python scripts/validate_extraction.py \
   --document-id anac_rbac_43 \
   --section 43.3
 
-# 2. Aprovar explicitamente após conferência com o PDF oficial:
+# Registro explícito de aprovação após conferência com o PDF oficial:
 docker compose exec rbac-bot python scripts/validate_extraction.py \
   --document-id anac_rbac_43 \
   --section 43.3 \
@@ -75,43 +91,35 @@ docker compose exec rbac-bot python scripts/validate_extraction.py \
 
 > Páginas extraídas via OCR permanecem bloqueadas (`pending_manual_review`) e páginas reprovadas (`rejected`) nunca são utilizadas para fundamentar respostas.
 
-### Passo 5 — Indexar o documento no SQLite FTS5 e no ChromaDB
+### Passo 8 — Indexar os chunks no SQLite FTS5 e no ChromaDB
+
+Gera chunks estruturais determinísticos no SQLite (`normative_chunks`), atualiza o índice lexical FTS5 (`normative_chunks_fts`) e envia vetores `gemini-embedding-2` (768d) para a coleção versionada `regulatory_chunks_ge2_768_v1` no ChromaDB:
 
 ```bash
 docker compose exec rbac-bot python scripts/index_document.py --document-id anac_rbac_43
 ```
 
-Verifique o status consolidado dos índices (chunks no SQLite, vetores no ChromaDB, versões pendentes ou defasadas):
+### Passo 9 — Inspecionar o status da indexação
+
+Verifique chunks no SQLite, vetores no ChromaDB, versões não indexadas, versões defasadas e compatibilidade de modelo/dimensionalidade:
 
 ```bash
 docker compose exec rbac-bot python scripts/index_document.py --status
 ```
 
-Para forçar reindexação controlada do mesmo documento:
-
-```bash
-docker compose exec rbac-bot python scripts/index_document.py --document-id anac_rbac_43 --reindex
-```
-
-Se você alterar `GEMINI_EMBEDDING_MODEL` ou `GEMINI_EMBEDDING_DIMENSIONS` no `.env`, o sistema bloqueará automaticamente a mistura de vetores incompatíveis. Reconstrua a coleção vetorial a partir do SQLite (preservando PDFs e aprovações humanas):
-
-```bash
-docker compose exec rbac-bot python scripts/index_document.py --rebuild-collection --confirm
-```
-
-### Passo 6 — Executar a primeira consulta real (sem Telegram)
+### Passo 10 — Executar consulta de teste (sem Telegram)
 
 ```bash
 # Consulta completa (busca híbrida + explicação fundamentada via Gemini):
 docker compose exec rbac-bot python scripts/query_assistant.py \
   --question "Quem pode executar manutenção segundo o RBAC 43.3?"
 
-# Consulta somente recuperação (sem chamar o modelo generativo Gemini):
+# Consulta somente recuperação (SSOT SQLite + FTS5, sem chamada generativa ao Gemini):
 docker compose exec rbac-bot python scripts/query_assistant.py \
   --question "RBAC 43.3" \
   --no-llm
 
-# Consulta estritamente limitada a dispositivos com transcrição literal aprovada:
+# Consulta restrita apenas a seções com todas as páginas aprovadas para transcrição literal:
 docker compose exec rbac-bot python scripts/query_assistant.py \
   --question "Quais os registros obrigatórios de manutenção no RBAC 43.9?" \
   --only-approved
@@ -119,12 +127,19 @@ docker compose exec rbac-bot python scripts/query_assistant.py \
 
 ---
 
-## 3. Verificação de Qualidade e Testes Automatizados
+## Operações de Manutenção Controlada
 
-No ambiente de desenvolvimento local (usa exclusivamente PDFs sintéticos em `tmp_path` e mocks determinísticos, com zero custo de API):
-
-```bash
-uv run ruff check src tests scripts
-uv run mypy src
-uv run pytest --cov=rbac_assistant --cov-report=term-missing
-```
+- **Reindexar um documento específico:**
+  ```bash
+  docker compose exec rbac-bot python scripts/index_document.py --document-id anac_rbac_43 --reindex
+  ```
+- **Reconstruir a coleção vetorial a partir do SQLite** (após alterar modelo de embeddings, dimensionalidade ou estratégia de instrução — preserva PDFs, SQLite e aprovações humanas):
+  ```bash
+  docker compose exec rbac-bot python scripts/index_document.py --rebuild-collection --confirm
+  ```
+- **Executar suíte automatizada de qualidade (usa apenas fixtures sintéticas e mocks, sem custo de API):**
+  ```bash
+  uv run ruff check src tests scripts
+  uv run mypy src
+  uv run pytest --cov=rbac_assistant --cov-report=term-missing
+  ```

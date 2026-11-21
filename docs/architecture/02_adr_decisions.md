@@ -4,14 +4,14 @@ Este documento consolida as Decisões Arquiteturais (*Architecture Decision Reco
 
 ---
 
-## ADR-01 — Separação entre Armazenamento Canônico (SSOT) e Banco Vetorial (ChromaDB)
+## ADR-01 — Separação entre Fonte Normativa Primária (PDF), SSOT Operacional (SQLite) e Índice Vetorial (ChromaDB)
 
-- **Status:** Aprovada
+- **Status:** Aprovada (atualizada nas Etapas 2 e 3)
 - **Contexto:** Bancos vetoriais otimizam busca por similaridade semântica, mas fragmentam documentos normativos em chunks. Em regulamentação aeronáutica, omitir um parágrafo de exceção ou alterar pontuação compromete a validade técnica e jurídica da orientação.
-- **Decisão:** Utilizar o **ChromaDB** exclusivamente como índice de recuperação semântica e filtragem por metadados, mantendo o texto normativo oficial validado em arquivos JSON estruturados no volume `regulatory_documents` (*Single Source of Truth* — SSOT).
+- **Decisão:** Preservar o **PDF oficial da ANAC** intacto no volume `regulatory_documents` como fonte normativa primária, utilizar o **SQLite** (`/app/data/documents/catalog.sqlite3`) como fonte de verdade operacional dos dados estruturados e revisados (mantendo `original_text` separado de `normalized_text`) e restringir o **ChromaDB** ao papel de índice vetorial derivado e reconstruível. (Detalhes consolidados na Seção 2 do `README.md`.)
 - **Consequências:**
-  - Transcrições oficiais (`TEXTO OFICIAL`) são lidas diretamente do SSOT em Python, sem jamais passar por geração ou reescrita do LLM.
-  - Exige manutenção de consistência entre o JSON canônico e os índices do ChromaDB (resolvida via pipeline idempotente com `SHA-256`).
+  - Transcrições oficiais (`TEXTO NORMATIVO`) são lidas exclusivamente do campo `original_text` no SQLite em páginas aprovadas, sem jamais passar por geração ou reescrita do LLM.
+  - Tanto o índice lexical FTS5 quanto a coleção vetorial do ChromaDB podem ser reconstruídos integralmente a partir do SQLite sem perda de revisões humanas.
 
 ---
 
@@ -71,27 +71,30 @@ Este documento consolida as Decisões Arquiteturais (*Architecture Decision Reco
 
 ---
 
-## ADR-07 — SQLite (SSOT + FTS5) + ChromaDB 1.5.9 com Fusão RRF (Etapas 2 e 3)
+## ADR-07 — SQLite (SSOT Operacional + FTS5) + ChromaDB 1.5.9 com Fusão RRF (Etapas 2 e 3)
 
 - **Status:** Aprovada
-- **Contexto:** O armazenamento canônico evoluiu para SQLite 3 (modo WAL, `FOREIGN KEYs ON`, transações ACID) no volume `regulatory_documents`. Na Etapa 3, consultas regulatórias precisam localizar termos exatos com e sem acentuação em português (ex.: `manutencao` vs. `manutenção`), referências estruturais (`RBAC 43.3`, `Art. 1º`) e perguntas semânticas abertas.
+- **Contexto:** O armazenamento operacional da aplicação consolidou-se em SQLite 3 (`/app/data/documents/catalog.sqlite3`, modo WAL, `FOREIGN KEYs ON`, `synchronous = FULL`, transações ACID) no volume `regulatory_documents`, enquanto o PDF oficial da ANAC permanece como fonte normativa primária. Na Etapa 3, consultas regulatórias precisam combinar referências estruturais (`RBAC 43.3`, `Art. 1º`), termos exatos com/sem acento (`manutencao` vs. `manutenção`) e busca semântica aberta.
 - **Decisão:**
-  - Adotar índice lexical **SQLite FTS5** com tokenizador `unicode61 remove_diacritics 2` na migração incremental `v002_fts5_and_chunks.sql`, preservando `original_text` intacto no SSOT.
-  - Combinar busca estrutural exata (`section_resolver`), busca lexical FTS5 (BM25) e busca vetorial no ChromaDB 1.5.9 via **Reciprocal Rank Fusion (RRF)**.
-  - Hidratar todas as evidências ao vivo a partir do SQLite aplicando `ValidationService` (`review_on_demand`), impedindo que páginas OCR pendentes ou reprovadas fundamentem respostas.
+  - Adotar índice lexical derivado **SQLite FTS5** (`normative_chunks_fts`, tokenizador `unicode61 remove_diacritics 2`) via migração incremental `v002_fts5_and_chunks.sql`, preservando `original_text` separado de `normalized_text` e oferecendo reconstrução completa (`rebuild_fts_index()`).
+  - Combinar busca estrutural exata (`section_resolver`), busca lexical FTS5 (BM25) e busca vetorial no ChromaDB 1.5.9 via **Reciprocal Rank Fusion (RRF)**, com limiar inicial/provisório `max_vector_distance=0.85` (distância de cosseno `hnsw:space: cosine`, pendente de calibração por benchmark real com o RBAC 43).
+  - Hidratar todas as evidências ao vivo a partir do SQLite aplicando `ValidationService` (`review_on_demand`), bloqueando páginas OCR pendentes ou reprovadas.
 - **Consequências:**
-  - Nenhuma dependência externa adicional (FTS5 é nativo no Python 3.12 / SQLite 3.53).
+  - Nenhuma dependência externa adicional para busca lexical (FTS5 é nativo no Python 3.12 / SQLite 3.53).
   - Aprovações ou reprovações de páginas refletem imediatamente nas consultas sem necessidade de reindexar vetores.
 
 ---
 
-## ADR-08 — SDK Oficial `google-genai`, Modelos Ativos e Guarda de Compatibilidade de Embeddings
+## ADR-08 — SDK Oficial `google-genai`, Gemini 4 Neon e Gemini Embedding 2 (768d)
 
 - **Status:** Aprovada
-- **Contexto:** O legado `google-generativeai` foi descontinuado em favor de `google-genai`; adicionalmente, o modelo `text-embedding-004` foi encerrado em janeiro/2026 e `gemini-2.5-flash` encontra-se em processo de descontinuação com roteamento para `gemini-3.5-flash-lite`.
+- **Contexto:** Em novembro/2026, a família Gemini 4 (`gemini-4-neon`, `gemini-4-hydrogen`, `gemini-4-carbon`) e o modelo multimodal estável `gemini-embedding-2` (8.192 tokens, MRL 128–3072) representam o padrão atual da Gemini API via SDK oficial `google-genai==3.6.1`. Além disso, `gemini-embedding-2` possui espaço vetorial incompatível com `gemini-embedding-001`, não utiliza o parâmetro `task_type`, exige instruções assimétricas no texto e agrega múltiplos inputs se não encapsulados em objetos `Content` individuais.
 - **Decisão:**
-  - Adotar exclusivamente o SDK oficial `google-genai` (`v3.x`), mantendo `GEMINI_GENERATION_MODEL` (padrão `gemini-3.5-flash-lite`, com alias opcional `GEMINI_CHAT_MODEL`), `GEMINI_EMBEDDING_MODEL` (padrão `gemini-embedding-001`) e `GEMINI_EMBEDDING_DIMENSIONS` (padrão `768`, MRL) 100% configuráveis por ambiente.
-  - Registrar modelo e dimensionalidade nos metadados da coleção ChromaDB e em `vector_index_registry` (SQLite), bloqueando mistura incompatível (`EmbeddingCompatibilityError`) e oferecendo reconstrução controlada (`rebuild_vector_index`) a partir do SQLite SSOT.
+  - Definir `GEMINI_GENERATION_MODEL=gemini-4-neon` como variável canônica e padrão de geração (tier pago: US\$ 3 / US\$ 15 por 1M tokens), mantendo `gemini-4-hydrogen` e `gemini-4-carbon` como alternativas configuráveis pelo usuário, **sem fallback silencioso** em caso de indisponibilidade.
+  - Adotar `GEMINI_EMBEDDING_MODEL=gemini-embedding-2` com `GEMINI_EMBEDDING_DIMENSIONS=768` (dimensão MRL recomendada e auto-normalizada pelo modelo, compatível com métrica cosseno do ChromaDB).
+  - Aplicar a convenção oficial assimétrica apenas na representação efêmera de embedding (`task: search result | query: {consulta}` e `title: {título|none} | text: {conteúdo}`), encapsulando cada chunk em um objeto `types.Content` próprio para garantir 1 vetor independente por chunk.
+  - Versionar a coleção de produção como **`regulatory_chunks_ge2_768_v1`**, registrando modelo, dimensão, versão da estratégia (`ge2_asymmetric_v1` — migração `v003_index_strategy_metadata.sql`) e data de criação para bloquear qualquer mistura de espaços vetoriais incompatíveis (`EmbeddingCompatibilityError`).
 - **Consequências:**
-  - Troca futura de modelo de geração ou embeddings ocorre sem reescrita de código e sem risco silencioso de degradação vetorial.
+  - Elimina risco de agregação silenciosa ou mistura de vetores entre `gemini-embedding-001` e `gemini-embedding-2`.
+  - Permite migração futura para 1536d ou outro modelo mediante nova coleção versionada ou rebuild controlado a partir do SQLite.
 
