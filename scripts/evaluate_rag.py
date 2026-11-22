@@ -32,12 +32,14 @@ import contextlib
 import json
 import sys
 import tempfile
-from dataclasses import asdict
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from rbac_assistant.config.settings import load_settings
 from rbac_assistant.domain.ports.rag_ports import EmbeddingPort
 from rbac_assistant.infrastructure.llm.gemini_client import (
+    DEFAULT_EMBEDDING_MAX_INPUT_TOKENS,
     GeminiClientAdapter,
     GeminiEmbeddingAdapter,
 )
@@ -261,6 +263,107 @@ def render_report_table(
     return "\n".join(lines)
 
 
+@dataclass(frozen=True, slots=True)
+class QueryEmbeddingCacheKey:
+    """Chave composta imutável para cache temporário de embeddings de consulta no benchmark."""
+
+    query_text: str
+    embedding_model: str
+    embedding_dimensions: int
+    instruction_strategy_version: str
+    extra_parameters: tuple[tuple[str, str], ...] = ()
+
+
+class InMemoryQueryEmbeddingCache:
+    """Cache temporário em memória exclusivo para embeddings de consulta no benchmark RAG.
+
+    Garantias:
+    - Vive apenas em memória RAM durante uma única execução do benchmark (zero persistência em
+      disco, SQLite, ChromaDB ou volumes Docker).
+    - Chave composta por texto exato da consulta, modelo de embedding, dimensionalidade, versão
+      da estratégia de instrução/prefixo e parâmetros adicionais que possam alterar o vetor.
+    - Encaminha `embed_documents(...)` diretamente ao adaptador delegado sem cache nem alteração.
+    - Não altera nenhum serviço de recuperação em produção.
+    """
+
+    def __init__(
+        self,
+        delegate: EmbeddingPort,
+        *,
+        extra_parameters: Mapping[str, object] | None = None,
+    ) -> None:
+        self._delegate = delegate
+        self._extra_parameters: tuple[tuple[str, str], ...] = tuple(
+            sorted((str(k), str(v)) for k, v in (extra_parameters or {}).items())
+        )
+        self._cache: dict[QueryEmbeddingCacheKey, tuple[float, ...]] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
+
+    @property
+    def model_name(self) -> str:
+        return self._delegate.model_name
+
+    @property
+    def dimensions(self) -> int:
+        return self._delegate.dimensions
+
+    @property
+    def instruction_strategy_version(self) -> str:
+        return self._delegate.instruction_strategy_version
+
+    @property
+    def extra_parameters(self) -> tuple[tuple[str, str], ...]:
+        return self._extra_parameters
+
+    @property
+    def cache_hits(self) -> int:
+        return self._cache_hits
+
+    @property
+    def cache_misses(self) -> int:
+        return self._cache_misses
+
+    @property
+    def cached_entries(self) -> int:
+        return len(self._cache)
+
+    def make_cache_key(self, text: str) -> QueryEmbeddingCacheKey:
+        """Constrói chave completa impedindo mistura entre modelos, dimensões ou estratégias."""
+        return QueryEmbeddingCacheKey(
+            query_text=text,
+            embedding_model=self._delegate.model_name,
+            embedding_dimensions=self._delegate.dimensions,
+            instruction_strategy_version=self._delegate.instruction_strategy_version,
+            extra_parameters=self._extra_parameters,
+        )
+
+    def clear(self) -> None:
+        """Limpa explicitamente todas as entradas em memória ao final da execução."""
+        self._cache.clear()
+
+    def embed_documents(
+        self,
+        texts: Sequence[str],
+        *,
+        titles: Sequence[str | None] | None = None,
+    ) -> list[tuple[float, ...]]:
+        """Encaminha vetorização documental sem cache e sem alterar payloads/vetores."""
+        return self._delegate.embed_documents(texts, titles=titles)
+
+    def embed_query(self, text: str) -> tuple[float, ...]:
+        """Reutiliza vetor em memória para consultas idênticas dentro da mesma execução."""
+        key = self.make_cache_key(text)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache_hits += 1
+            return cached
+        vector = self._delegate.embed_query(text)
+        self._cache[key] = vector
+        self._cache_misses += 1
+        return vector
+
+
 def _build_real_gemini_embedding_port() -> tuple[GeminiClientAdapter, EmbeddingPort]:
     """Cria adaptador real `gemini-embedding-2` (768d, Free Tier Standard, sem modelos pagos)."""
     settings = load_settings()
@@ -296,21 +399,42 @@ def _build_real_gemini_embedding_port() -> tuple[GeminiClientAdapter, EmbeddingP
     return client, GeminiEmbeddingAdapter(client)
 
 
+def _real_query_cache_extra_parameters(client: GeminiClientAdapter | None) -> dict[str, object]:
+    """Extrai parâmetros efetivos de vetorização que influenciam o vetor produzido."""
+    max_tokens = getattr(client, "_embedding_max_input_tokens", DEFAULT_EMBEDDING_MAX_INPUT_TOKENS)
+    return {
+        "embedding_max_input_tokens": max_tokens,
+        "query_prefix_template": "task: search result | query: {query}",
+        "task_type": "none",
+    }
+
+
 def _run_benchmark_for_backend(
     *,
     backend: str,
     threshold: float,
     include_ablations: bool,
+    enable_query_cache: bool | None = None,
 ) -> EvaluationSummaryReport:
     cases = load_eval_dataset()
     evaluator = RagEvaluator()
     client: GeminiClientAdapter | None = None
     embedder: EmbeddingPort | None = None
+    query_cache: InMemoryQueryEmbeddingCache | None = None
     collection = "eval_synthetic_ge2_768_v1"
 
     try:
         if backend == "gemini-embedding-2":
-            client, embedder = _build_real_gemini_embedding_port()
+            client, raw_embedder = _build_real_gemini_embedding_port()
+            should_cache = True if enable_query_cache is None else enable_query_cache
+            if should_cache:
+                query_cache = InMemoryQueryEmbeddingCache(
+                    raw_embedder,
+                    extra_parameters=_real_query_cache_extra_parameters(client),
+                )
+                embedder = query_cache
+            else:
+                embedder = raw_embedder
             collection = "eval_synthetic_real_ge2_768_v1"
 
         with (
@@ -331,6 +455,8 @@ def _run_benchmark_for_backend(
                 include_ablations=include_ablations,
             )
     finally:
+        if query_cache is not None:
+            query_cache.clear()
         if client is not None:
             client.close()
 
