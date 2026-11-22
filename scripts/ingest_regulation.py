@@ -18,6 +18,7 @@ from rbac_assistant.application.dto.ingestion_dto import (
 from rbac_assistant.application.services.ingestion_service import IngestionService
 from rbac_assistant.application.services.validation_service import ValidationService
 from rbac_assistant.application.use_cases.ingest_document import IngestDocumentUseCase
+from rbac_assistant.config.logging_config import configure_cli_logging
 from rbac_assistant.config.settings import load_settings
 from rbac_assistant.domain.entities.regulatory_document import (
     DocumentStatus,
@@ -61,6 +62,10 @@ def _load_catalog_entry(catalog_yaml: Path, document_id: str) -> dict[str, Any]:
 def build_ingestion_use_case(documents_dir: Path | None = None) -> IngestDocumentUseCase:
     """Monta o caso de uso de ingestão com adaptadores concretos."""
     settings = load_settings()
+    configure_cli_logging(
+        log_level=settings.log_level,
+        redact_secrets=settings.security.audit.redact_secrets,
+    )
     base_dir = documents_dir or settings.storage.documents_dir
     sqlite_path = base_dir / settings.storage.sqlite_filename
 

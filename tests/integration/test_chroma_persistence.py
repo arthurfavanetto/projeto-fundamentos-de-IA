@@ -19,57 +19,60 @@ def test_chromadb_159_write_read_and_persistence_across_reopen(tmp_path: Path) -
 
     # Sessão 1: inicialização, escrita e leitura imediata
     client_session_1 = chromadb.PersistentClient(path=str(persist_dir))
-    store_1 = ChromaVectorStore(client=client_session_1)
+    try:
+        store_1 = ChromaVectorStore(client=client_session_1)
 
-    record = VectorRecord(
-        record_id="rbac_43_persist_001",
-        document=(
-            "43.3 Pessoas autorizadas a executar manutenção, "
-            "manutenção preventiva e alteração."
-        ),
-        embedding=(0.25, 0.5, 0.75, 1.0),
-        metadata={
-            "regulation_number": "RBAC 43",
-            "section_number": "43.3",
-            "extraction_method": "native_pdf",
-            "validation_status": "validated",
-        },
-    )
-    store_1.upsert_records(collection_name="rbac_43_integration", records=[record])
-    # Reexecução idempotente não deve duplicar
-    store_1.upsert_records(collection_name="rbac_43_integration", records=[record])
+        record = VectorRecord(
+            record_id="rbac_43_persist_001",
+            document=(
+                "43.3 Pessoas autorizadas a executar manutenção, "
+                "manutenção preventiva e alteração."
+            ),
+            embedding=(0.25, 0.5, 0.75, 1.0),
+            metadata={
+                "regulation_number": "RBAC 43",
+                "section_number": "43.3",
+                "extraction_method": "native_pdf",
+                "validation_status": "validated",
+            },
+        )
+        store_1.upsert_records(collection_name="rbac_43_integration", records=[record])
+        # Reexecução idempotente não deve duplicar
+        store_1.upsert_records(collection_name="rbac_43_integration", records=[record])
 
-    immediate = store_1.get_records(
-        collection_name="rbac_43_integration",
-        record_ids=["rbac_43_persist_001"],
-    )
-    assert len(immediate) == 1
-    assert immediate[0].document == record.document
-
-    # Simula reinicialização liberando a primeira instância e reabrindo do mesmo diretório
-    del store_1
-    del client_session_1
+        immediate = store_1.get_records(
+            collection_name="rbac_43_integration",
+            record_ids=["rbac_43_persist_001"],
+        )
+        assert len(immediate) == 1
+        assert immediate[0].document == record.document
+    finally:
+        # Fecha explicitamente handles SQLite/ChromaDB antes de reabrir (evita lock no Windows)
+        client_session_1.close()
 
     # Sessão 2: leitura e consulta semântica após reabertura do volume persistido
     client_session_2 = chromadb.PersistentClient(path=str(persist_dir))
-    store_2 = ChromaVectorStore(client=client_session_2)
+    try:
+        store_2 = ChromaVectorStore(client=client_session_2)
 
-    persisted = store_2.get_records(
-        collection_name="rbac_43_integration",
-        record_ids=["rbac_43_persist_001"],
-    )
-    assert len(persisted) == 1
-    assert persisted[0].record_id == "rbac_43_persist_001"
-    assert persisted[0].document == record.document
-    assert persisted[0].metadata["section_number"] == "43.3"
+        persisted = store_2.get_records(
+            collection_name="rbac_43_integration",
+            record_ids=["rbac_43_persist_001"],
+        )
+        assert len(persisted) == 1
+        assert persisted[0].record_id == "rbac_43_persist_001"
+        assert persisted[0].document == record.document
+        assert persisted[0].metadata["section_number"] == "43.3"
 
-    hits = store_2.query_similar(
-        collection_name="rbac_43_integration",
-        query_embedding=(0.25, 0.5, 0.75, 1.0),
-        top_k=3,
-        where={"regulation_number": "RBAC 43"},
-    )
-    assert len(hits) == 1
-    assert hits[0].record_id == "rbac_43_persist_001"
+        hits = store_2.query_similar(
+            collection_name="rbac_43_integration",
+            query_embedding=(0.25, 0.5, 0.75, 1.0),
+            top_k=3,
+            where={"regulation_number": "RBAC 43"},
+        )
+        assert len(hits) == 1
+        assert hits[0].record_id == "rbac_43_persist_001"
 
-    store_2.delete_collection("rbac_43_integration")
+        store_2.delete_collection("rbac_43_integration")
+    finally:
+        client_session_2.close()

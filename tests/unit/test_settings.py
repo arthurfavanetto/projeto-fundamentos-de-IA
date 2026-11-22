@@ -132,3 +132,107 @@ def test_secret_helpers_fail_when_missing_and_mask_when_present(
     assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ" not in repr(settings_loaded)
     assert settings_loaded.require_gemini_api_key() == "AIzaFakeKey12345678901234567890"
     assert settings_loaded.require_telegram_bot_token().startswith("123456789:")
+
+
+@pytest.mark.unit
+def test_dotenv_isolation_and_real_gemini_block_hold_in_process_and_subprocesses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repo_root: Path,
+) -> None:
+    """Comprova que testes e subprocessos filhos nunca leem `.env` nem acionam Gemini real."""
+    import os
+    import subprocess
+    import sys
+
+    from google import genai as google_genai
+
+    from rbac_assistant.infrastructure.llm.gemini_client import GeminiClientAdapter
+
+    # Cria `.env` fictício no diretório temporário simulando o `.env` local de um host Windows
+    fake_key = "AIzaFakeDotEnvKeyForSubprocessRegressionTest999"
+    (tmp_path / ".env").write_text(f"GEMINI_API_KEY={fake_key}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    # 1. No processo de teste, AppSettings() e load_settings() ignoram `.env` em disco
+    assert AppSettings().gemini_api_key is None
+    assert load_settings(yaml_path=repo_root / "config" / "settings.yaml").gemini_api_key is None
+
+    # 2. Mesmo com chave fictícia fornecida manualmente, chamadas reais à Gemini são bloqueadas
+    adapter = GeminiClientAdapter(api_key=fake_key)
+    with pytest.raises(RuntimeError, match="RBAC_BLOCK_REAL_GEMINI_API"):
+        adapter.embed_documents(["teste de bloqueio sem sdk_client"])
+    with pytest.raises(RuntimeError, match="RBAC_BLOCK_REAL_GEMINI_API"):
+        adapter.embed_query("consulta de bloqueio sem sdk_client")
+    with pytest.raises(RuntimeError, match="RBAC_BLOCK_REAL_GEMINI_API"):
+        adapter.generate_text(system_instruction="sys", user_prompt="usr")
+    with pytest.raises(RuntimeError, match="RBAC_BLOCK_REAL_GEMINI_API"):
+        google_genai.Client(api_key=fake_key)
+
+    # 3. Subprocesso filho herdando o ambiente do pytest TAMBÉM ignora `.env` e bloqueia SDK real
+    child_env = dict(os.environ)
+    child_env["PYTHONPATH"] = os.pathsep.join([str(repo_root / "src"), str(repo_root)])
+    sub_check = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from rbac_assistant.config.settings import AppSettings; "
+                "from rbac_assistant.infrastructure.llm.gemini_client import GeminiClientAdapter; "
+                "assert AppSettings().gemini_api_key is None; "
+                "ad = GeminiClientAdapter(api_key='AIzaFakeSubprocessOnlyKey'); "
+                "ok = False\n"
+                "try:\n"
+                "    ad.embed_query('consulta bloqueada')\n"
+                "except RuntimeError as exc:\n"
+                "    ok = 'RBAC_BLOCK_REAL_GEMINI_API' in str(exc)\n"
+                "assert ok, 'Gemini real deveria estar bloqueado no subprocesso'"
+            ),
+        ],
+        cwd=tmp_path,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert sub_check.returncode == 0, sub_check.stderr
+
+    # 4. Subprocesso da CLI `scripts/evaluate_rag.py` no dir com `.env` falha rápido sem API real
+    eval_sub = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "evaluate_rag.py"),
+            "--embedding-backend",
+            "gemini-embedding-2",
+        ],
+        cwd=tmp_path,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert eval_sub.returncode != 0
+    assert "GEMINI_API_KEY" in eval_sub.stderr
+
+    # 5. Subprocesso de produção (sem RBAC_DISABLE_DOTENV) continua lendo `.env` normalmente
+    prod_env = dict(child_env)
+    prod_env.pop("RBAC_DISABLE_DOTENV", None)
+    prod_env.pop("GEMINI_API_KEY", None)
+    prod_check = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from rbac_assistant.config.settings import AppSettings; "
+                "s = AppSettings(); "
+                f"assert s.require_gemini_api_key() == {fake_key!r}"
+            ),
+        ],
+        cwd=tmp_path,
+        env=prod_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert prod_check.returncode == 0, prod_check.stderr
+

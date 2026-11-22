@@ -249,28 +249,64 @@ def _deserialize_extraction_metadata(raw_json: str) -> ExtractionMetadata | None
 class SqliteDocumentRepository:
     """Implementação SSOT de `DocumentRepositoryPort` usando SQLite 3 (WAL + ACID)."""
 
-    def __init__(self, db_path: Path, *, busy_timeout_ms: int = 5000) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        busy_timeout_ms: int = 5000,
+        reuse_connection: bool = False,
+    ) -> None:
         self._db_path = db_path
+        self._is_memory = str(db_path) == ":memory:"
         self._busy_timeout_ms = busy_timeout_ms
+        # Bancos `:memory:` exigem reutilização da mesma conexão durante o ciclo de vida do repo
+        self._reuse_connection = True if self._is_memory else reuse_connection
+        self._shared_conn: sqlite3.Connection | None = None
+        self._parent_ensured = self._is_memory
 
     @property
     def db_path(self) -> Path:
         return self._db_path
 
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+    def close(self) -> None:
+        """Fecha explicitamente a conexão reutilizada quando `reuse_connection=True`."""
+        if self._shared_conn is not None:
+            self._shared_conn.close()
+            self._shared_conn = None
+
+    def __enter__(self) -> SqliteDocumentRepository:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def _open_connection(self) -> sqlite3.Connection:
+        if not self._parent_ensured:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._parent_ensured = True
+        conn_target: str | Path = ":memory:" if self._is_memory else self._db_path
         conn = sqlite3.connect(
-            self._db_path,
+            conn_target,
             timeout=self._busy_timeout_ms / 1000.0,
             isolation_level=None,
         )
         conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode = WAL;")
-            conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA foreign_keys = ON;")
+        if not self._is_memory:
             conn.execute("PRAGMA synchronous = FULL;")
-            conn.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms};")
+        conn.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms};")
+        return conn
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        if self._reuse_connection:
+            if self._shared_conn is None:
+                self._shared_conn = self._open_connection()
+            yield self._shared_conn
+            return
+
+        conn = self._open_connection()
+        try:
             yield conn
         finally:
             conn.close()
@@ -286,8 +322,10 @@ class SqliteDocumentRepository:
             raise
 
     def initialize(self) -> None:
-        """Aplica todas as migrações SQL pendentes de forma idempotente."""
+        """Aplica WAL persistente (em disco) e todas as migrações SQL pendentes."""
         with self._connect() as conn:
+            if not self._is_memory:
+                conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schema_migrations (
