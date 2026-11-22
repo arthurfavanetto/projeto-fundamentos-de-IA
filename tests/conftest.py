@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,27 +10,62 @@ from typing import Any
 
 import pytest
 import structlog
+from google import genai as google_genai
 
-from rbac_assistant.config.settings import AppSettings
-from rbac_assistant.domain.entities.normative_unit import (
+# Proteção imediata no tempo de importação (antes da coleta de qualquer módulo de teste,
+# inclusive em cada worker `pytest-xdist` criado por `spawn` no Windows e em subprocessos).
+_SECRET_ENV_VARS: tuple[str, ...] = ("GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN")
+os.environ["RBAC_DISABLE_DOTENV"] = "1"
+os.environ["RBAC_BLOCK_REAL_GEMINI_API"] = "1"
+for _secret_var in _SECRET_ENV_VARS:
+    os.environ.pop(_secret_var, None)
+
+from rbac_assistant.config.settings import AppSettings  # noqa: E402
+from rbac_assistant.domain.entities.normative_unit import (  # noqa: E402
     ExtractionMethod,
     PageExtractionMetadata,
     ValidationStatus,
 )
+
+AppSettings.model_config["env_file"] = None
+
+
+def _blocked_real_genai_client(*_args: Any, **_kwargs: Any) -> Any:
+    raise RuntimeError(
+        "Instanciação real de `google.genai.Client` bloqueada durante a suíte de testes "
+        "(RBAC_BLOCK_REAL_GEMINI_API=1). Injete um `sdk_client` simulado."
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Reforça isolamento de `.env` e bloqueio de chamadas Gemini antes da coleta."""
+    del config
+    os.environ["RBAC_DISABLE_DOTENV"] = "1"
+    os.environ["RBAC_BLOCK_REAL_GEMINI_API"] = "1"
+    for secret_var in _SECRET_ENV_VARS:
+        os.environ.pop(secret_var, None)
+    AppSettings.model_config["env_file"] = None
 
 
 @pytest.fixture(autouse=True)
 def _isolate_tests_from_host_dotenv_and_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:
-    """Impede vazamento de `.env` local e estado de logging entre testes/workers xdist.
+    """Impede vazamento de `.env`, chamadas reais à Gemini e estado de logging entre testes.
 
-    Em hosts (como Windows 11 local) onde `.env` já contém `GEMINI_API_KEY`, `AppSettings`
-    carregaria credenciais reais durante `pytest`, disparando conexões externas indevidas ao
-    ChromaDB/Gemini. Em produção fora do `pytest`, `.env` continua ativo normalmente.
+    Abrange:
+    - tempo de importação e `pytest_configure` (antes de qualquer fixture);
+    - cada teste individual e cada worker `pytest-xdist` (`spawn` no Windows);
+    - subprocessos filhos via `RBAC_DISABLE_DOTENV=1` e `RBAC_BLOCK_REAL_GEMINI_API=1`;
+    - tentativa direta de criar `google.genai.Client` sem fake injetado;
+    - reset determinístico do `structlog` no teardown.
+    Em produção fora do `pytest`, `.env` e o SDK Gemini operam normalmente.
     """
+    monkeypatch.setenv("RBAC_DISABLE_DOTENV", "1")
+    monkeypatch.setenv("RBAC_BLOCK_REAL_GEMINI_API", "1")
     monkeypatch.setitem(AppSettings.model_config, "env_file", None)
-    for secret_var in ("GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN"):
+    monkeypatch.setattr(google_genai, "Client", _blocked_real_genai_client)
+    for secret_var in _SECRET_ENV_VARS:
         monkeypatch.delenv(secret_var, raising=False)
     try:
         yield
