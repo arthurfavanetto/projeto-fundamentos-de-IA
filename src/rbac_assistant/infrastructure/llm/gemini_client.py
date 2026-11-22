@@ -1,20 +1,23 @@
 """Adaptador oficial para a Google Gemini Developer API usando `google-genai==3.6.1`.
 
 Recursos implementados:
-- Geração de explicações fundamentadas (`LLMPort`), padrão Free Tier Standard
-  `gemini-4-hydrogen` (sem fallback silencioso entre modelos e sem ferramentas pagas como
-  Google Search grounding, Google Maps ou Batch API).
-- Embeddings textuais (`EmbeddingPort`), padrão Free Tier Standard `gemini-embedding-2` (768d MRL):
-  - Sem parâmetro `task_type` (não suportado pelo `gemini-embedding-2`).
-  - Convenção oficial de recuperação assimétrica incorporada apenas à representação de embedding
-    (nunca altera `original_text` nem `normalized_text` no SQLite):
-      - Consulta:  `task: search result | query: {consulta}`
-      - Documento: `title: {título} | text: {conteúdo}` (ou `title: none | text: {conteúdo}`)
-  - Cada chunk é encapsulado em seu próprio objeto `types.Content` para impedir agregação
-    indevida no `gemini-embedding-2`, garantindo 1 vetor independente por chunk na mesma ordem.
-  - Dimensões reduzidas (ex.: 768) são normalizadas automaticamente pelo `gemini-embedding-2`,
-    dispensando normalização L2 manual redundante e mantendo compatibilidade com distância cosseno.
-  - Validação de texto não vazio e limite de entrada de 8.192 tokens.
+- Política única de modelos em runtime (Free Tier Standard, sem fallback silencioso):
+  - Geração (`LLMPort`): exclusivamente `gemini-4-hydrogen` (sem fallback para Flash-Lite,
+    Gemini 3.8 Flash ou modelos pagos, e sem ferramentas pagas como Google Search grounding,
+    Google Maps ou Batch API).
+  - Embeddings textuais (`EmbeddingPort`): exclusivamente `gemini-embedding-2` com
+    dimensionalidade obrigatória de `768` (MRL):
+    - Sem parâmetro `task_type` (não suportado pelo `gemini-embedding-2`) e sem suporte
+      operacional ao legado `gemini-embedding-001`.
+    - Convenção oficial de recuperação assimétrica incorporada apenas à representação de embedding
+      (nunca altera `original_text` nem `normalized_text` no SQLite):
+        - Consulta:  `task: search result | query: {consulta}`
+        - Documento: `title: {título} | text: {conteúdo}` (ou `title: none | text: {conteúdo}`)
+    - Cada chunk é encapsulado em seu próprio objeto `types.Content` para impedir agregação
+      indevida no `gemini-embedding-2`, garantindo 1 vetor independente por chunk na mesma ordem.
+    - Dimensões truncadas para `768` são normalizadas automaticamente pelo `gemini-embedding-2`,
+      dispensando normalização L2 manual redundante e mantendo compatibilidade com cosseno.
+    - Validação de texto não vazio e limite de entrada de 8.192 tokens.
 - Timeout explícito via `types.HttpOptions(timeout=ms)`.
 - Retry limitado com backoff exponencial via `tenacity` apenas em falhas transitórias
   (HTTP 429 rate limit, 5xx ou timeout).
@@ -57,9 +60,9 @@ _CONSERVATIVE_CHARS_PER_TOKEN = 3
 
 
 def is_gemini_embedding_2(model_name: str) -> bool:
-    """Identifica se o modelo configurado pertence à família `gemini-embedding-2`."""
+    """Verifica se o identificador corresponde exatamente ao modelo `gemini-embedding-2`."""
     normalized = model_name.strip().lower().removeprefix("models/")
-    return normalized.startswith("gemini-embedding-2")
+    return normalized == DEFAULT_EMBEDDING_MODEL
 
 
 def format_ge2_query(query: str) -> str:
@@ -123,15 +126,30 @@ class GeminiClientAdapter:
             raise ValueError(
                 "GEMINI_API_KEY é obrigatória para inicializar o adaptador Google Gemini."
             )
-        if not (128 <= embedding_dimensions <= 3072):
+        normalized_generation = generation_model.strip().lower().removeprefix("models/")
+        if normalized_generation != DEFAULT_GENERATION_MODEL:
             raise ValueError(
-                f"embedding_dimensions deve estar entre 128 e 3072 (recebido: "
-                f"{embedding_dimensions})."
+                f"Modelo de geração '{generation_model}' não autorizado pela política única "
+                f"Gemini. Somente '{DEFAULT_GENERATION_MODEL}' é permitido em runtime "
+                "(sem fallback silencioso)."
+            )
+        normalized_embedding = embedding_model.strip().lower().removeprefix("models/")
+        if normalized_embedding != DEFAULT_EMBEDDING_MODEL:
+            raise ValueError(
+                f"Modelo de embeddings '{embedding_model}' não autorizado pela política única "
+                f"Gemini. Somente '{DEFAULT_EMBEDDING_MODEL}' é permitido em runtime "
+                "(sem fallback silencioso)."
+            )
+        if embedding_dimensions != DEFAULT_EMBEDDING_DIMENSIONS:
+            raise ValueError(
+                f"Dimensionalidade de embeddings inválida ({embedding_dimensions}). "
+                f"A integração real com '{DEFAULT_EMBEDDING_MODEL}' exige exatamente "
+                f"{DEFAULT_EMBEDDING_DIMENSIONS} dimensões."
             )
         self._api_key = api_key.strip() if api_key else None
-        self._generation_model = generation_model.strip()
-        self._embedding_model = embedding_model.strip()
-        self._embedding_dimensions = embedding_dimensions
+        self._generation_model = DEFAULT_GENERATION_MODEL
+        self._embedding_model = DEFAULT_EMBEDDING_MODEL
+        self._embedding_dimensions = DEFAULT_EMBEDDING_DIMENSIONS
         self._embedding_instruction_version = embedding_instruction_version.strip()
         self._embedding_max_input_tokens = embedding_max_input_tokens
         self._timeout_seconds = timeout_seconds
@@ -254,8 +272,8 @@ class GeminiClientAdapter:
                     LLMServiceError(
                         f"Modelo Gemini '{model_id}' indisponível ou sem acesso na conta "
                         f"({operation_name}, HTTP {code}). Nenhum fallback silencioso foi "
-                        f"aplicado; ajuste a variável de ambiente manualmente. Detalhe: "
-                        f"{safe_detail}"
+                        f"aplicado; verifique a disponibilidade do modelo autorizado na sua "
+                        f"conta/chave da Gemini Developer API. Detalhe: {safe_detail}"
                     ),
                     False,
                 )
@@ -326,7 +344,7 @@ class GeminiClientAdapter:
         *,
         titles: Sequence[str | None] | None = None,
     ) -> list[tuple[float, ...]]:
-        """Gera exatamente um vetor independente por chunk, preservando ordem e limites."""
+        """Gera exatamente um vetor independente por chunk (`gemini-embedding-2`, 768d)."""
         if not texts:
             return []
         if titles is not None and len(titles) != len(texts):
@@ -335,7 +353,6 @@ class GeminiClientAdapter:
                 f"({len(texts)})."
             )
 
-        use_ge2 = is_gemini_embedding_2(self._embedding_model)
         prepared: list[str] = []
         for idx, raw_text in enumerate(texts):
             if not isinstance(raw_text, str) or not raw_text.strip():
@@ -343,36 +360,25 @@ class GeminiClientAdapter:
                     f"Chunk na posição {idx} está vazio ou inválido para geração de embedding."
                 )
             title = titles[idx] if titles is not None else None
-            payload = (
-                format_ge2_document(raw_text, title=title) if use_ge2 else raw_text.strip()
-            )
+            payload = format_ge2_document(raw_text, title=title)
             self._validate_token_budget(payload, label=f"chunk[{idx}]")
             prepared.append(payload)
 
         all_vectors: list[tuple[float, ...]] = []
         for start in range(0, len(prepared), self._embedding_batch_size):
             batch = prepared[start : start + self._embedding_batch_size]
-            batch_vectors = self._embed_batch(
-                batch,
-                legacy_task_type="RETRIEVAL_DOCUMENT",
-                use_ge2=use_ge2,
-            )
+            batch_vectors = self._embed_batch(batch)
             all_vectors.extend(batch_vectors)
         return all_vectors
 
     def embed_query(self, text: str) -> tuple[float, ...]:
-        """Gera vetor de embedding otimizado para uma consulta do usuário."""
+        """Gera vetor de embedding otimizado para consulta (`gemini-embedding-2`, 768d)."""
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Texto de consulta não pode ser vazio para geração de embedding.")
 
-        use_ge2 = is_gemini_embedding_2(self._embedding_model)
-        payload = format_ge2_query(text) if use_ge2 else text.strip()
+        payload = format_ge2_query(text)
         self._validate_token_budget(payload, label="query")
-        vectors = self._embed_batch(
-            [payload],
-            legacy_task_type="RETRIEVAL_QUERY",
-            use_ge2=use_ge2,
-        )
+        vectors = self._embed_batch([payload])
         return vectors[0]
 
     def _validate_token_budget(self, payload: str, *, label: str) -> None:
@@ -383,34 +389,21 @@ class GeminiClientAdapter:
                 f"do modelo '{self._embedding_model}' (estimado: {estimated} tokens)."
             )
 
-    def _embed_batch(
-        self,
-        payloads: list[str],
-        *,
-        legacy_task_type: str,
-        use_ge2: bool,
-    ) -> list[tuple[float, ...]]:
+    def _embed_batch(self, payloads: list[str]) -> list[tuple[float, ...]]:
         client = self._get_client()
 
-        if use_ge2:
-            # Gemini Embedding 2:
-            # 1) Não aceita `task_type` no EmbedContentConfig.
-            # 2) Para impedir agregação em vetor único ao enviar múltiplos chunks, cada chunk é
-            #    encapsulado em seu próprio objeto `types.Content`.
-            # 3) Dimensões truncadas (ex.: 768) são normalizadas automaticamente pelo modelo.
-            config = genai_types.EmbedContentConfig(
-                output_dimensionality=self._embedding_dimensions,
-            )
-            contents: Any = [
-                genai_types.Content(parts=[genai_types.Part.from_text(text=item)])
-                for item in payloads
-            ]
-        else:
-            config = genai_types.EmbedContentConfig(
-                task_type=legacy_task_type,
-                output_dimensionality=self._embedding_dimensions,
-            )
-            contents = payloads
+        # Gemini Embedding 2 (modelo único de runtime, 768d):
+        # 1) Não aceita `task_type` no EmbedContentConfig.
+        # 2) Para impedir agregação em vetor único ao enviar múltiplos chunks, cada chunk é
+        #    encapsulado em seu próprio objeto `types.Content`.
+        # 3) Dimensões truncadas para 768 são normalizadas automaticamente pelo modelo.
+        config = genai_types.EmbedContentConfig(
+            output_dimensionality=self._embedding_dimensions,
+        )
+        contents: Any = [
+            genai_types.Content(parts=[genai_types.Part.from_text(text=item)])
+            for item in payloads
+        ]
 
         def _call() -> list[tuple[float, ...]]:
             response = client.models.embed_content(

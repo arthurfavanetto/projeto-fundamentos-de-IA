@@ -210,10 +210,10 @@ Toda resposta normativa separa rigorosamente transcrição literal (SSOT SQLite)
 ## 5. Estratégia Gemini, Telegram e Docker
 
 ### Google Gemini (`google-genai`)
-- Utiliza exclusivamente o SDK oficial `google-genai`.
-- Modelos configuráveis via `.env` (`GEMINI_GENERATION_MODEL` e `GEMINI_EMBEDDING_MODEL`), validados na conta antes do deploy.
-- Utiliza API Key dedicada do Google AI Studio / Google Cloud (assinatura pessoal Google AI Pro não fornece cota de API Python).
-- Em caso de indisponibilidade da API Gemini, o sistema aplica *graceful degradation*, entregando `TEXTO OFICIAL` e `FUNDAMENTAÇÃO` recuperados localmente.
+- Utiliza exclusivamente o SDK oficial `google-genai==3.6.1`.
+- Aplica **política única de modelos em runtime** via `.env` (`GEMINI_GENERATION_MODEL=gemini-4-hydrogen`, `GEMINI_EMBEDDING_MODEL=gemini-embedding-2`, `GEMINI_EMBEDDING_DIMENSIONS=768`, `GEMINI_ALLOW_PAID_MODELS=false`), com validação estrita em `AppSettings` e `GeminiClientAdapter` e **sem fallback silencioso** (ver ADR-08).
+- Utiliza API Key dedicada da Gemini Developer API (Google AI Studio) separada da assinatura pessoal Google AI Pro usada no Antigravity para desenvolvimento; ausência de cobrança depende também de manter o projeto Google sem Cloud Billing vinculado.
+- Em caso de indisponibilidade da API Gemini, o sistema aplica *graceful degradation*, entregando `TEXTO NORMATIVO` e `REFERÊNCIA` recuperados localmente do SQLite.
 
 ### Telegram (Long Polling)
 - Comunicação exclusivamente de saída (*outbound HTTPS*), sem abertura de portas ou webhooks.

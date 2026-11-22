@@ -1,10 +1,14 @@
 """Testes unitários do adaptador oficial Google Gemini (`google-genai==3.6.1`).
 
 Cobre:
-- Gemini 4 Hydrogen (`gemini-4-hydrogen`) como modelo de geração padrão no Free Tier Standard;
-- Trava de segurança Free Tier rejeitando modelos pagos (`gemini-4-neon`, `gemini-4-carbon`,
-  `gemini-4-argon`) salvo habilitação explícita (`GEMINI_ALLOW_PAID_MODELS=true`);
-- Ausência de fallback silencioso e de ferramentas pagas (Google Search grounding/Maps/Batch);
+- Política única de modelos em runtime no Free Tier Standard:
+  - Geração: exclusivamente `gemini-4-hydrogen` (rejeita `gemini-3.5-flash-lite`,
+    `gemini-3.8-flash`, `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-argon` e qualquer outro);
+  - Embeddings: exclusivamente `gemini-embedding-2` com `768` dimensões obrigatórias
+    (rejeita `gemini-embedding-001` e dimensões diferentes de 768);
+  - `GEMINI_ALLOW_PAID_MODELS=false` obrigatório (rejeita `true`);
+- Ausência de fallback silencioso em geração e embeddings e ausência de ferramentas pagas
+  (Google Search grounding/Maps/Batch);
 - Gemini Embedding 2 (`gemini-embedding-2`, 768d MRL):
   - ausência de `task_type`;
   - formato assimétrico oficial (`task: search result | query: ...` e `title: ... | text: ...`);
@@ -24,7 +28,7 @@ import pytest
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 
-from rbac_assistant.config.settings import AppSettings, load_settings
+from rbac_assistant.config.settings import AppSettings, GeminiConfig, load_settings
 from rbac_assistant.domain.exceptions import (
     LLMRateLimitError,
     LLMServiceError,
@@ -38,6 +42,7 @@ from rbac_assistant.infrastructure.llm.gemini_client import (
     GeminiEmbeddingAdapter,
     format_ge2_document,
     format_ge2_query,
+    is_gemini_embedding_2,
 )
 
 
@@ -117,41 +122,92 @@ def test_default_free_tier_models_and_versioned_collection_configuration(
     assert settings.gemini_embedding_model == "gemini-embedding-2"
     assert settings.effective_embedding_dimensions == 768
     assert settings.gemini_allow_paid_models is False
+    assert settings.gemini.allowed_free_tier_generation_models == ("gemini-4-hydrogen",)
+    assert settings.gemini.allowed_free_tier_embedding_models == ("gemini-embedding-2",)
     assert settings.vector_db.collection_name == "regulatory_chunks_ge2_768_v1"
     assert settings.gemini.embedding_instruction_version == "ge2_asymmetric_v1"
     assert settings.gemini.embedding_max_input_tokens == 8192
     assert DEFAULT_GENERATION_MODEL == "gemini-4-hydrogen"
     assert DEFAULT_EMBEDDING_MODEL == "gemini-embedding-2"
     assert DEFAULT_EMBEDDING_DIMENSIONS == 768
+    assert is_gemini_embedding_2("gemini-embedding-2") is True
+    assert is_gemini_embedding_2("gemini-embedding-001") is False
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("paid_model", ["gemini-4-neon", "gemini-4-carbon", "gemini-4-argon"])
-def test_free_tier_guard_blocks_paid_models_by_default(
+@pytest.mark.parametrize(
+    "unauthorized_model",
+    [
+        "gemini-4-neon",
+        "gemini-4-carbon",
+        "gemini-4-argon",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash",
+    ],
+)
+def test_single_model_policy_blocks_all_non_hydrogen_generation_models(
     monkeypatch: pytest.MonkeyPatch,
-    paid_model: str,
+    unauthorized_model: str,
 ) -> None:
-    monkeypatch.setenv("GEMINI_GENERATION_MODEL", paid_model)
+    monkeypatch.setenv("GEMINI_GENERATION_MODEL", unauthorized_model)
     monkeypatch.delenv("GEMINI_ALLOW_PAID_MODELS", raising=False)
 
-    with pytest.raises(ValueError, match="guarda Free Tier"):
+    with pytest.raises(ValueError, match="política única Free Tier"):
         AppSettings(_env_file=None)  # type: ignore[call-arg]
 
+    fake_sdk = _FakeGenAISDKClient()
+    with pytest.raises(ValueError, match="política única Gemini"):
+        GeminiClientAdapter(generation_model=unauthorized_model, sdk_client=fake_sdk)
+
 
 @pytest.mark.unit
-def test_free_tier_guard_allows_documented_free_alternatives_and_explicit_override(
+def test_single_model_policy_blocks_legacy_embeddings_bad_dims_paid_flag_and_yaml_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("GEMINI_ALLOW_PAID_MODELS", raising=False)
-    monkeypatch.setenv("GEMINI_GENERATION_MODEL", "gemini-3.8-flash")
-    alt_settings = AppSettings(_env_file=None)  # type: ignore[call-arg]
-    assert alt_settings.gemini_generation_model == "gemini-3.8-flash"
+    for var in (
+        "GEMINI_GENERATION_MODEL",
+        "GEMINI_CHAT_MODEL",
+        "GEMINI_EMBEDDING_MODEL",
+        "GEMINI_EMBEDDING_DIMENSIONS",
+        "GEMINI_ALLOW_PAID_MODELS",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
-    # Override explícito do usuário permite configurar outro modelo se desejar
-    monkeypatch.setenv("GEMINI_GENERATION_MODEL", "gemini-4-neon")
+    # 1. Bloqueio de modelos de embedding legados / alternativos em AppSettings e no adapter
+    monkeypatch.setenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+    with pytest.raises(ValueError, match="gemini-embedding-001"):
+        AppSettings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.delenv("GEMINI_EMBEDDING_MODEL", raising=False)
+
+    fake_sdk = _FakeGenAISDKClient()
+    with pytest.raises(ValueError, match="gemini-embedding-2"):
+        GeminiClientAdapter(embedding_model="gemini-embedding-001", sdk_client=fake_sdk)
+
+    # 2. Bloqueio de dimensionalidade diferente de 768 em AppSettings, GeminiConfig e adapter
+    for bad_dim in (256, 512, 1536, 3072):
+        monkeypatch.setenv("GEMINI_EMBEDDING_DIMENSIONS", str(bad_dim))
+        with pytest.raises(ValueError, match="768"):
+            AppSettings(_env_file=None)  # type: ignore[call-arg]
+        with pytest.raises(ValueError, match="768"):
+            GeminiConfig(embedding_dimensions=bad_dim)
+        with pytest.raises(ValueError, match="768"):
+            GeminiClientAdapter(embedding_dimensions=bad_dim, sdk_client=fake_sdk)
+    monkeypatch.delenv("GEMINI_EMBEDDING_DIMENSIONS", raising=False)
+
+    # 3. Bloqueio explícito de GEMINI_ALLOW_PAID_MODELS=true
     monkeypatch.setenv("GEMINI_ALLOW_PAID_MODELS", "true")
-    override_settings = AppSettings(_env_file=None)  # type: ignore[call-arg]
-    assert override_settings.gemini_generation_model == "gemini-4-neon"
+    with pytest.raises(ValueError, match="GEMINI_ALLOW_PAID_MODELS=true"):
+        AppSettings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.delenv("GEMINI_ALLOW_PAID_MODELS", raising=False)
+
+    # 4. Allowlist YAML não pode reintroduzir modelos removidos
+    with pytest.raises(ValueError, match="allowlist operacional de geração"):
+        GeminiConfig(
+            allowed_free_tier_generation_models=("gemini-4-hydrogen", "gemini-3.5-flash-lite")
+        )
+    with pytest.raises(ValueError, match="allowlist operacional de embeddings"):
+        GeminiConfig(allowed_free_tier_embedding_models=("gemini-embedding-001",))
 
 
 @pytest.mark.unit
@@ -269,8 +325,13 @@ def test_gemini_model_unavailable_has_no_silent_fallback() -> None:
     fake_sdk.models.generate_side_effects = [
         genai_errors.APIError(404, {"error": {"message": "Model gemini-4-hydrogen not found"}})
     ]
+    fake_sdk.models.embed_side_effects = [
+        genai_errors.APIError(404, {"error": {"message": "Model gemini-embedding-2 not found"}})
+    ]
     adapter = GeminiClientAdapter(
         generation_model="gemini-4-hydrogen",
+        embedding_model="gemini-embedding-2",
+        embedding_dimensions=768,
         max_retries=2,
         retry_min_wait_seconds=0.0,
         retry_max_wait_seconds=0.0,
@@ -282,6 +343,12 @@ def test_gemini_model_unavailable_has_no_silent_fallback() -> None:
 
     assert len(fake_sdk.models.generate_calls) == 1
     assert fake_sdk.models.generate_calls[0]["model"] == "gemini-4-hydrogen"
+
+    with pytest.raises(LLMServiceError, match="Nenhum fallback silencioso foi aplicado"):
+        adapter.embed_query("manutenção preventiva")
+
+    assert len(fake_sdk.models.embed_calls) == 1
+    assert fake_sdk.models.embed_calls[0]["model"] == "gemini-embedding-2"
 
 
 @pytest.mark.unit
@@ -363,18 +430,26 @@ def test_settings_canonical_env_var_and_legacy_chat_model_deprecation_warning(
 ) -> None:
     monkeypatch.setenv("GEMINI_GENERATION_MODEL", "gemini-4-hydrogen")
     monkeypatch.setenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
-    monkeypatch.setenv("GEMINI_EMBEDDING_DIMENSIONS", "1536")
+    monkeypatch.setenv("GEMINI_EMBEDDING_DIMENSIONS", "768")
     monkeypatch.delenv("GEMINI_CHAT_MODEL", raising=False)
     monkeypatch.delenv("GEMINI_ALLOW_PAID_MODELS", raising=False)
 
     settings = AppSettings(_env_file=None)  # type: ignore[call-arg]
     assert settings.gemini_generation_model == "gemini-4-hydrogen"
     assert settings.gemini_embedding_model == "gemini-embedding-2"
-    assert settings.effective_embedding_dimensions == 1536
+    assert settings.effective_embedding_dimensions == 768
 
-    # Alias legado GEMINI_CHAT_MODEL ainda aceito temporariamente, mas emite DeprecationWarning
+    # Alias legado GEMINI_CHAT_MODEL ainda aceito somente para o modelo autorizado com aviso
     monkeypatch.delenv("GEMINI_GENERATION_MODEL", raising=False)
-    monkeypatch.setenv("GEMINI_CHAT_MODEL", "gemini-3.8-flash")
+    monkeypatch.setenv("GEMINI_CHAT_MODEL", "gemini-4-hydrogen")
     with pytest.warns(DeprecationWarning, match="GEMINI_GENERATION_MODEL"):
         legacy_settings = AppSettings(_env_file=None)  # type: ignore[call-arg]
-    assert legacy_settings.gemini_generation_model == "gemini-3.8-flash"
+    assert legacy_settings.gemini_generation_model == "gemini-4-hydrogen"
+
+    # Mesmo via alias legado GEMINI_CHAT_MODEL, outros modelos são rejeitados sem fallback
+    monkeypatch.setenv("GEMINI_CHAT_MODEL", "gemini-3.5-flash-lite")
+    with (
+        pytest.warns(DeprecationWarning, match="GEMINI_GENERATION_MODEL"),
+        pytest.raises(ValueError, match="política única Free Tier"),
+    ):
+        AppSettings(_env_file=None)  # type: ignore[call-arg]

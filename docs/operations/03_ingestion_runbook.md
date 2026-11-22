@@ -31,9 +31,9 @@ ENVIRONMENT=local
 LOG_LEVEL=INFO
 ```
 
-> **Proteção de custos e privacidade (Free Tier):**
-> - `GEMINI_ALLOW_PAID_MODELS=false` impede o uso acidental de modelos exclusivos do tier pago (ex.: `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-argon`). Alternativa gratuita configurável: `gemini-3.8-flash`.
-> - A validação no código não substitui a configuração de conta no Google Cloud; mantenha o projeto da API Key sem faturamento vinculado para garantia de custo zero.
+> **Proteção de custos, política única de modelos e privacidade (Free Tier):**
+> - Política única obrigatória em runtime: `GEMINI_GENERATION_MODEL=gemini-4-hydrogen`, `GEMINI_EMBEDDING_MODEL=gemini-embedding-2`, `GEMINI_EMBEDDING_DIMENSIONS=768` e `GEMINI_ALLOW_PAID_MODELS=false`. Outros modelos (como `gemini-3.5-flash-lite`, `gemini-3.8-flash`, `gemini-embedding-001` ou modelos pagos `neon`/`carbon`/`argon`) são rejeitados na validação sem fallback silencioso.
+> - A validação no código não garante sozinha ausência absoluta de cobrança; mantenha o projeto da `GEMINI_API_KEY` sem Cloud Billing vinculado no Google Cloud e respeite as condições do Free Tier.
 > - No Free Tier, processe **apenas documentos regulatórios públicos oficiais da ANAC** (nunca dados pessoais ou confidenciais).
 
 ### Passo 3 — Inicializar a stack Docker
@@ -142,15 +142,16 @@ docker compose exec rbac-bot python scripts/query_assistant.py \
   ```bash
   docker compose exec rbac-bot python scripts/index_document.py --rebuild-collection --confirm
   ```
-- **Executar benchmark quantitativo sintético controlado (40 consultas, 0 chamadas externas):**
+- **Executar avaliação sintética determinística controlada (40 consultas, 0 chamadas externas, embedder sintético `eval-deterministic-embed-v1` — NÃO representa qualidade real do Gemini):**
   ```bash
   uv run python scripts/evaluate_rag.py --per-query
   ```
-- **Benchmark manual opcional com `gemini-embedding-2` real (Free Tier Standard, fora do CI, somente corpus sintético — consome cota gratuita da `GEMINI_API_KEY` local):**
+- **Benchmark manual opcional com `gemini-embedding-2` real (768d, Free Tier Standard, fora do CI, ainda sobre corpus sintético — consome cota da `GEMINI_API_KEY` local):**
   ```bash
   uv run python scripts/evaluate_rag.py --embedding-backend compare
   ```
-- **Executar suíte automatizada de qualidade (usa apenas fixtures sintéticas e mocks, sem custo de API):**
+- **Validação futura com PDF real do RBAC 43:** após ingerir, revisar e indexar o PDF oficial da ANAC (Passos 4 a 9), recalibrar o limiar provisório `retrieval.max_vector_distance: 0.85` e validar fidelidade literal/grounding sobre o documento oficial.
+- **Executar suíte automatizada de qualidade (usa apenas fixtures sintéticas e mocks, sem chamadas reais à API Gemini):**
   ```bash
   uv run ruff check src tests scripts
   uv run mypy src

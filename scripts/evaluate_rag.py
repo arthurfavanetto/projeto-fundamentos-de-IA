@@ -274,6 +274,11 @@ def _build_real_gemini_embedding_port() -> tuple[GeminiClientAdapter, EmbeddingP
             f"Modelo de embedding configurado '{settings.gemini_embedding_model}' diverge de "
             "'gemini-embedding-2' (768d) exigido para este benchmark."
         )
+    if settings.effective_embedding_dimensions != 768:
+        raise ValueError(
+            f"Dimensionalidade configurada ({settings.effective_embedding_dimensions}) diverge de "
+            "768 dimensões obrigatórias para 'gemini-embedding-2'."
+        )
     api_key = settings.require_gemini_api_key()
     client = GeminiClientAdapter(
         api_key=api_key,

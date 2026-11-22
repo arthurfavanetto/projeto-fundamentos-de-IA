@@ -64,8 +64,8 @@ A coleção de produção versionada para o `gemini-embedding-2` (768 dimensões
 
 A API oficial do **Google Gemini** (`google-genai==3.6.1`) cumpre dois papéis estritamente delimitados:
 
-- **Embeddings (`gemini-embedding-2`, 768d):** vetorização de chunks e consultas utilizando a convenção oficial assimétrica (`title: {título} | text: {conteúdo}` para documentos e `task: search result | query: {consulta}` para buscas, sem `task_type` e com objetos `Content` individuais por chunk para impedir agregação).
-- **Explicações (`gemini-4-hydrogen`, Free Tier Standard, configurável):** elaboração de explicações técnicas fundamentadas exclusivamente nas evidências **aprovadas** recuperadas do SQLite, protegidas pelo `PromptGuard` e auditadas server-side pelo `CitationValidator` (`[EV-N]`). Páginas não aprovadas (`native_quality_checked`, OCR pendente ou reprovadas) **não são enviadas ao Gemini**.
+- **Embeddings (`gemini-embedding-2`, 768d obrigatório):** vetorização de chunks e consultas utilizando a convenção oficial assimétrica (`title: {título} | text: {conteúdo}` para documentos e `task: search result | query: {consulta}` para buscas, sem `task_type` e com objetos `Content` individuais por chunk para impedir agregação). Modelos legados como `gemini-embedding-001` não são aceitos em runtime.
+- **Explicações (`gemini-4-hydrogen`, único modelo de geração permitido no Free Tier Standard):** elaboração de explicações técnicas fundamentadas exclusivamente nas evidências **aprovadas** recuperadas do SQLite, protegidas pelo `PromptGuard` e auditadas server-side pelo `CitationValidator` (`[EV-N]`). Páginas não aprovadas (`native_quality_checked`, OCR pendente ou reprovadas) **não são enviadas ao Gemini**.
 
 O Gemini **não é fonte normativa primária** e **não pode criar, corrigir, completar ou substituir redações normativas**.
 
@@ -77,7 +77,7 @@ A stack Docker (`docker-compose.yml`) opera com dois contêineres non-root (UID/
 - `chroma_data` → `/data` no contêiner `chromadb` (índice vetorial derivado);
 - `audit_logs` → `/app/logs` (logs estruturados).
 
-Caso o índice lexical ou o índice vetorial precise ser recriado (ex.: mudança de modelo de embeddings ou dimensionalidade), ambos são reconstruídos diretamente a partir do SQLite sem reingerir PDFs e preservando 100% das aprovações humanas de revisão:
+Caso o índice lexical ou o índice vetorial precise ser recriado (ex.: rebuild administrativo ou migração controlada de versão), ambos são reconstruídos diretamente a partir do SQLite sem reingerir PDFs e preservando 100% das aprovações humanas de revisão:
 
 - **Reconstrução FTS5:** `SqliteDocumentRepository.rebuild_fts_index()`.
 - **Reconstrução vetorial ChromaDB:** `python scripts/index_document.py --rebuild-collection --confirm`.
@@ -91,11 +91,11 @@ Arquivos com credenciais, Telegram User IDs ou PDFs oficiais **nunca são versio
 ### 3.1. Separação obrigatória entre ambiente de desenvolvimento e runtime da aplicação
 
 - **Desenvolvimento (Antigravity):** utiliza a assinatura pessoal **Google AI Pro** diretamente no seletor de modelos do Antigravity — nunca via chave de API do projeto.
-- **Execução da aplicação (bot Python):** utiliza a **Gemini Developer API** via chave `GEMINI_API_KEY` configurada em **Free Tier Standard** (sem necessidade de ativar Google Cloud Billing):
-  - **Geração padrão:** `GEMINI_GENERATION_MODEL=gemini-4-hydrogen` (Free Tier Standard; alternativa gratuita: `gemini-3.8-flash`).
-  - **Embeddings padrão:** `GEMINI_EMBEDDING_MODEL=gemini-embedding-2` com `GEMINI_EMBEDDING_DIMENSIONS=768` (Free Tier Standard, modalidade somente texto).
-  - **Proteção contra custo acidental:** `GEMINI_ALLOW_PAID_MODELS=false` bloqueia por padrão modelos exclusivos do tier pago (ex.: `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-argon`), sem fallback silencioso para modelos pagos, sem Batch API e sem Google Search/Maps grounding.
-  - **Aviso importante sobre cobrança:** a validação no código reduz o risco de uso acidental de modelos pagos, mas **não substitui** a configuração da conta Google; para garantia total de custo zero, mantenha o projeto da `GEMINI_API_KEY` no AI Studio **sem Google Cloud Billing vinculado**.
+- **Execução da aplicação (bot Python):** utiliza a **Gemini Developer API** via chave `GEMINI_API_KEY` sob **política única de modelos em Free Tier Standard**:
+  - **Geração (modelo único permitido):** `GEMINI_GENERATION_MODEL=gemini-4-hydrogen` (Free Tier Standard; qualquer outro modelo — incluindo `gemini-3.5-flash-lite`, `gemini-3.8-flash` ou modelos pagos — é rejeitado explicitamente na validação de configuração e no adaptador, **sem fallback silencioso**).
+  - **Embeddings (modelo único e dimensão obrigatória):** `GEMINI_EMBEDDING_MODEL=gemini-embedding-2` com `GEMINI_EMBEDDING_DIMENSIONS=768` (Free Tier Standard, modalidade somente texto; `gemini-embedding-001` e outras dimensões são rejeitados em runtime, **sem fallback silencioso**).
+  - **Política de custos (`GEMINI_ALLOW_PAID_MODELS=false`):** obrigatório pela política do projeto; impede modelos exclusivos do tier pago (ex.: `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-argon`), sem fallback pago, sem Batch API e sem Google Search/Maps grounding.
+  - **Aviso importante sobre cobrança:** a configuração local no código **não garante sozinha ausência absoluta de cobrança** — isso também depende do projeto Google associado à `GEMINI_API_KEY` estar no Free Tier **sem Google Cloud Billing vinculado**.
 
 ### 3.2. Limites e privacidade no Gemini API Free Tier
 
@@ -114,7 +114,10 @@ GEMINI_EMBEDDING_DIMENSIONS=768
 GEMINI_ALLOW_PAID_MODELS=false
 ```
 
-2. **Threshold vetorial inicial:** o parâmetro `retrieval.max_vector_distance: 0.85` (distância de cosseno no ChromaDB) é **provisório** (avaliado apenas no dataset sintético de 40 consultas com embedder determinístico local) e exige recalibração após a ingestão real do PDF oficial do RBAC 43 com `gemini-embedding-2` real.
+2. **Separação metodológica das avaliações RAG e threshold provisório:**
+   - **Avaliação sintética determinística (CI / offline):** `scripts/evaluate_rag.py` usa 40 consultas sobre corpus sintético fictício com embedder determinístico local (`eval-deterministic-embed-v1`, 768d) — **não** representa qualidade semântica real do `gemini-embedding-2` nem respostas reais do `gemini-4-hydrogen`.
+   - **Benchmark manual opcional com API real:** `scripts/evaluate_rag.py --embedding-backend compare` compara o embedder sintético com `gemini-embedding-2` (768d, Free Tier) ainda sobre o corpus sintético (fora do CI, consome cota da `GEMINI_API_KEY` local).
+   - **Validação futura com PDF real do RBAC 43:** o limiar `retrieval.max_vector_distance: 0.85` (distância de cosseno no ChromaDB) é **provisório** e deverá ser recalibrado após a ingestão real do PDF oficial do RBAC 43 com `gemini-embedding-2` (768d).
 3. Para ingestão, validação, indexação, diagnóstico (`--debug`), benchmark sintético (`--embedding-backend compare`) e consulta passo a passo, consulte o **[Runbook Operacional](docs/operations/03_ingestion_runbook.md)**.
 
 ---

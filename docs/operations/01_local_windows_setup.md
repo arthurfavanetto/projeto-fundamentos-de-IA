@@ -41,8 +41,8 @@ Na raiz do projeto clonado:
 
 1. Criar `.env` a partir de `.env.example` e preencher:
    - `TELEGRAM_BOT_TOKEN` (obtido no `@BotFather`; usar token exclusivo de produção no PC Central)
-   - `GEMINI_API_KEY` (Google AI Studio / Google Cloud — não usar assinatura pessoal Google AI Pro)
-   - `GEMINI_GENERATION_MODEL` e `GEMINI_EMBEDDING_MODEL` (validados na conta)
+   - `GEMINI_API_KEY` (Gemini Developer API no Google AI Studio, sem Cloud Billing vinculado — separada da assinatura pessoal Google AI Pro usada no Antigravity)
+   - Política única obrigatória de modelos em runtime: `GEMINI_GENERATION_MODEL=gemini-4-hydrogen`, `GEMINI_EMBEDDING_MODEL=gemini-embedding-2`, `GEMINI_EMBEDDING_DIMENSIONS=768` e `GEMINI_ALLOW_PAID_MODELS=false` (sem fallback silencioso)
 2. Criar `config/access_control.yaml` a partir de `config/access_control.example.yaml` com os `Telegram User IDs` numéricos autorizados (`admins` e `users`).
 3. Verificar que o `config/regulations_catalog.yaml` contém os metadados oficiais homologados na ANAC (conforme [`03_ingestion_runbook.md`](./03_ingestion_runbook.md)).
 

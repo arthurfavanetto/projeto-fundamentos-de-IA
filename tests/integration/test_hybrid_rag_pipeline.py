@@ -66,7 +66,12 @@ from tests.unit.test_rag_components import _InMemoryChromaClient
 
 
 class _DeterministicSemanticEmbedder:
-    """Embedder local determinístico (hashing semântico + sinônimos) sem chamadas externas."""
+    """Embedder sintético determinístico para testes de integração offline (sem API Gemini).
+
+    NOTA: Este mock utiliza vetores sintéticos de dimensão reduzida (256d por padrão) apenas
+    para testes mecânicos rápidos do pipeline. NÃO representa chamadas reais ao
+    `gemini-embedding-2`, cuja integração real exige obrigatoriamente `768` dimensões.
+    """
 
     _CONCEPT_SYNONYMS: ClassVar[dict[str, str]] = {
         "mecanico": "habilitacao_execucao",
@@ -85,7 +90,7 @@ class _DeterministicSemanticEmbedder:
     def __init__(
         self,
         *,
-        model_name: str = "fake-embed-v1",
+        model_name: str = "fake-deterministic-embed-256d",
         dimensions: int = 256,
         instruction_strategy_version: str = "ge2_asymmetric_v1",
     ) -> None:
@@ -134,9 +139,9 @@ class _DeterministicSemanticEmbedder:
 
 
 class _RecordingFakeLLM:
-    """Fake de LLMPort que registra prompts recebidos e opcionalmente simula erros."""
+    """Fake neutro de LLMPort que registra prompts recebidos e opcionalmente simula erros."""
 
-    def __init__(self, *, model_name: str = "fake-gemini-3.5-flash-lite") -> None:
+    def __init__(self, *, model_name: str = "fake-generation-model") -> None:
         self._model_name = model_name
         self.calls: list[dict[str, str]] = []
         self.raise_error: Exception | None = None
@@ -797,8 +802,9 @@ def test_sqlite_migrations_fts5_rebuild_and_embedding_prefix_isolation(tmp_path:
     ]
 
     version_id = _ingest_synthetic_rbac(ingestion, tmp_path)
+    # Mock sintético determinístico de 256d (NÃO representa chamada real ao gemini-embedding-2 768d)
     embedder = _DeterministicSemanticEmbedder(
-        model_name="gemini-embedding-2",
+        model_name="fake-deterministic-embed-256d",
         dimensions=256,
         instruction_strategy_version="ge2_asymmetric_v1",
     )
@@ -1011,7 +1017,11 @@ def test_chroma_amendment_number_key_prevents_top_k_eviction_across_competing_am
     do ChromaDB, emendas concorrentes ocupariam a janela top_k e expulsariam a Emenda 05.
     """
     repo, catalog, ingestion, validate_uc, vector_store, validation = _build_env(tmp_path)
-    embedder = _DeterministicSemanticEmbedder(model_name="gemini-embedding-2", dimensions=256)
+    # Mock sintético determinístico de 256d (NÃO representa chamada real ao gemini-embedding-2 768d)
+    embedder = _DeterministicSemanticEmbedder(
+        model_name="fake-deterministic-embed-256d",
+        dimensions=256,
+    )
     indexing = IndexingService(
         repository=repo,
         catalog_service=catalog,

@@ -81,6 +81,16 @@ class VectorDBConfig(BaseModel):
         return value
 
 
+CANONICAL_GEMINI_GENERATION_MODEL = "gemini-4-hydrogen"
+CANONICAL_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2"
+CANONICAL_GEMINI_EMBEDDING_DIMENSIONS = 768
+
+
+def _normalize_gemini_model_id(value: str) -> str:
+    """Normaliza identificador de modelo Gemini removendo espaços e prefixo `models/`."""
+    return value.strip().lower().removeprefix("models/")
+
+
 class GeminiConfig(BaseModel):
     """Parâmetros operacionais da integração oficial com Google Gemini (`google-genai`)."""
 
@@ -90,17 +100,54 @@ class GeminiConfig(BaseModel):
     retry_max_wait_seconds: float = Field(default=8.0, ge=0.0, le=120.0)
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_output_tokens: int = Field(default=2048, ge=128, le=8192)
-    embedding_dimensions: int = Field(default=768, ge=128, le=3072)
+    embedding_dimensions: int = Field(
+        default=CANONICAL_GEMINI_EMBEDDING_DIMENSIONS,
+        ge=128,
+        le=3072,
+    )
     embedding_instruction_version: str = Field(default="ge2_asymmetric_v1", min_length=1)
     embedding_max_input_tokens: int = Field(default=8192, ge=256, le=32768)
     embedding_batch_size: int = Field(default=32, ge=1, le=256)
     prompts_dir: Path = Path("config/prompts")
     allowed_free_tier_generation_models: tuple[str, ...] = (
-        "gemini-4-hydrogen",
-        "gemini-3.8-flash",
-        "gemini-3.5-flash-lite",
+        CANONICAL_GEMINI_GENERATION_MODEL,
     )
-    allowed_free_tier_embedding_models: tuple[str, ...] = ("gemini-embedding-2",)
+    allowed_free_tier_embedding_models: tuple[str, ...] = (
+        CANONICAL_GEMINI_EMBEDDING_MODEL,
+    )
+
+    @field_validator("embedding_dimensions")
+    @classmethod
+    def _validate_canonical_embedding_dimensions(cls, value: int) -> int:
+        if value != CANONICAL_GEMINI_EMBEDDING_DIMENSIONS:
+            raise ValueError(
+                f"Dimensionalidade de embeddings inválida ({value}). "
+                f"A política única de integração real exige exatamente "
+                f"{CANONICAL_GEMINI_EMBEDDING_DIMENSIONS} dimensões."
+            )
+        return value
+
+    @field_validator("allowed_free_tier_generation_models")
+    @classmethod
+    def _validate_single_generation_allowlist(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(_normalize_gemini_model_id(item) for item in value)
+        if normalized != (CANONICAL_GEMINI_GENERATION_MODEL,):
+            raise ValueError(
+                "A allowlist operacional de geração deve conter exclusivamente "
+                f"'{CANONICAL_GEMINI_GENERATION_MODEL}' (recebido: {list(value)})."
+            )
+        return (CANONICAL_GEMINI_GENERATION_MODEL,)
+
+    @field_validator("allowed_free_tier_embedding_models")
+    @classmethod
+    def _validate_single_embedding_allowlist(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(_normalize_gemini_model_id(item) for item in value)
+        if normalized != (CANONICAL_GEMINI_EMBEDDING_MODEL,):
+            raise ValueError(
+                "A allowlist operacional de embeddings deve conter exclusivamente "
+                f"'{CANONICAL_GEMINI_EMBEDDING_MODEL}' (recebido: {list(value)})."
+            )
+        return (CANONICAL_GEMINI_EMBEDDING_MODEL,)
 
 
 class ChunkingConfig(BaseModel):
@@ -173,14 +220,14 @@ class AppSettings(BaseSettings):
     chroma_host: str = Field(default="chromadb", min_length=1)
     chroma_port: int = Field(default=8000, ge=1, le=65535)
 
-    # Identificadores configuráveis dos modelos Gemini — Free Tier Standard por padrão
+    # Política única de modelos Gemini em runtime (Free Tier Standard, sem fallback silencioso)
     # Canônica: GEMINI_GENERATION_MODEL (GEMINI_CHAT_MODEL mantida apenas como alias legado)
     gemini_generation_model: str = Field(
-        default="gemini-4-hydrogen",
+        default=CANONICAL_GEMINI_GENERATION_MODEL,
         min_length=1,
         validation_alias=AliasChoices("GEMINI_GENERATION_MODEL", "GEMINI_CHAT_MODEL"),
     )
-    gemini_embedding_model: str = Field(default="gemini-embedding-2", min_length=1)
+    gemini_embedding_model: str = Field(default=CANONICAL_GEMINI_EMBEDDING_MODEL, min_length=1)
     gemini_embedding_dimensions: int | None = Field(default=None, ge=128, le=3072)
     gemini_allow_paid_models: bool = False
 
@@ -211,35 +258,50 @@ class AppSettings(BaseSettings):
                 stacklevel=2,
             )
 
-        if not self.gemini_allow_paid_models:
-            gen_norm = self.gemini_generation_model.strip().lower().removeprefix("models/")
-            allowed_gen = {
-                m.strip().lower().removeprefix("models/")
-                for m in self.gemini.allowed_free_tier_generation_models
-            }
-            if gen_norm not in allowed_gen:
-                raise ValueError(
-                    f"Modelo de geração '{self.gemini_generation_model}' bloqueado pela guarda "
-                    f"Free Tier (permitidos por padrão: "
-                    f"{sorted(self.gemini.allowed_free_tier_generation_models)}). "
-                    "Não há fallback automático para modelos pagos. Para autorizar explicitamente "
-                    "outro modelo, defina GEMINI_ALLOW_PAID_MODELS=true (lembrando que o código "
-                    "não controla o faturamento da sua conta Google Cloud)."
-                )
+        if self.gemini_allow_paid_models:
+            raise ValueError(
+                "GEMINI_ALLOW_PAID_MODELS=true é bloqueado pela política única Free Tier do "
+                f"projeto. Mantenha GEMINI_ALLOW_PAID_MODELS=false com "
+                f"'{CANONICAL_GEMINI_GENERATION_MODEL}' e '{CANONICAL_GEMINI_EMBEDDING_MODEL}' "
+                f"({CANONICAL_GEMINI_EMBEDDING_DIMENSIONS}d)."
+            )
 
-            emb_norm = self.gemini_embedding_model.strip().lower().removeprefix("models/")
-            allowed_emb = {
-                m.strip().lower().removeprefix("models/")
-                for m in self.gemini.allowed_free_tier_embedding_models
-            }
-            if emb_norm not in allowed_emb:
-                raise ValueError(
-                    f"Modelo de embeddings '{self.gemini_embedding_model}' bloqueado pela guarda "
-                    f"Free Tier (permitidos por padrão: "
-                    f"{sorted(self.gemini.allowed_free_tier_embedding_models)}). "
-                    "Para autorizar explicitamente outro modelo, defina "
-                    "GEMINI_ALLOW_PAID_MODELS=true."
-                )
+        gen_norm = _normalize_gemini_model_id(self.gemini_generation_model)
+        allowed_gen = {
+            _normalize_gemini_model_id(m) for m in self.gemini.allowed_free_tier_generation_models
+        }
+        if gen_norm != CANONICAL_GEMINI_GENERATION_MODEL or gen_norm not in allowed_gen:
+            raise ValueError(
+                f"Modelo de geração '{self.gemini_generation_model}' bloqueado pela política única "
+                f"Free Tier (único modelo permitido em runtime: "
+                f"'{CANONICAL_GEMINI_GENERATION_MODEL}'). Não há fallback silencioso para "
+                "Flash-Lite, Gemini 3.8 Flash ou modelos pagos."
+            )
+        self.gemini_generation_model = CANONICAL_GEMINI_GENERATION_MODEL
+
+        emb_norm = _normalize_gemini_model_id(self.gemini_embedding_model)
+        allowed_emb = {
+            _normalize_gemini_model_id(m) for m in self.gemini.allowed_free_tier_embedding_models
+        }
+        if emb_norm != CANONICAL_GEMINI_EMBEDDING_MODEL or emb_norm not in allowed_emb:
+            raise ValueError(
+                f"Modelo de embeddings '{self.gemini_embedding_model}' bloqueado pela política "
+                f"única Free Tier (único modelo permitido em runtime: "
+                f"'{CANONICAL_GEMINI_EMBEDDING_MODEL}', "
+                f"{CANONICAL_GEMINI_EMBEDDING_DIMENSIONS}d). Modelos legados como "
+                "'gemini-embedding-001' não são aceitos e não há fallback silencioso."
+            )
+        self.gemini_embedding_model = CANONICAL_GEMINI_EMBEDDING_MODEL
+
+        effective_dim = self.effective_embedding_dimensions
+        if effective_dim != CANONICAL_GEMINI_EMBEDDING_DIMENSIONS:
+            raise ValueError(
+                f"Dimensionalidade de embeddings inválida ({effective_dim}). "
+                f"A integração real com '{CANONICAL_GEMINI_EMBEDDING_MODEL}' exige exatamente "
+                f"{CANONICAL_GEMINI_EMBEDDING_DIMENSIONS} dimensões "
+                "(GEMINI_EMBEDDING_DIMENSIONS=768)."
+            )
+
         return self
 
     @property

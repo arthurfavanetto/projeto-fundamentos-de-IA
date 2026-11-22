@@ -367,7 +367,15 @@ class _InMemoryChromaClient:
 
 
 @pytest.mark.unit
-def test_chroma_vector_store_blocks_incompatible_embedding_model_dim_and_strategy() -> None:
+def test_chroma_vector_store_rejects_legacy_embedding_001_and_incompatible_dim_or_strategy() -> (
+    None
+):
+    """Teste negativo de compatibilidade vetorial no ChromaDB.
+
+    Comprova que a coleção indexada com `gemini-embedding-2` (768d, `ge2_asymmetric_v1`)
+    rejeita explicitamente mistura com o modelo legado `gemini-embedding-001`, com outras
+    dimensões (ex.: 1536) ou com versão distinta de estratégia de instrução.
+    """
     client = _InMemoryChromaClient()
     store = ChromaVectorStore(client=client)
     meta = store.ensure_collection_compatible(
@@ -396,7 +404,7 @@ def test_chroma_vector_store_blocks_incompatible_embedding_model_dim_and_strateg
     )
     assert store.count_records("test_compat_ge2_768_v1") == 1
 
-    # Mesmo com 768 dimensões, não permite misturar gemini-embedding-001 com gemini-embedding-2
+    # Teste negativo: mesmo com 768 dimensões, rejeita mistura com legado gemini-embedding-001
     with pytest.raises(EmbeddingCompatibilityError, match="Incompatibilidade de modelo"):
         store.ensure_collection_compatible(
             collection_name="test_compat_ge2_768_v1",
@@ -405,6 +413,7 @@ def test_chroma_vector_store_blocks_incompatible_embedding_model_dim_and_strateg
             instruction_strategy_version="ge2_asymmetric_v1",
         )
 
+    # Teste negativo: rejeita mistura de dimensionalidade na mesma coleção
     with pytest.raises(EmbeddingCompatibilityError, match="Incompatibilidade de dimensionalidade"):
         store.ensure_collection_compatible(
             collection_name="test_compat_ge2_768_v1",
@@ -413,6 +422,7 @@ def test_chroma_vector_store_blocks_incompatible_embedding_model_dim_and_strateg
             instruction_strategy_version="ge2_asymmetric_v1",
         )
 
+    # Teste negativo: rejeita mistura de versão de estratégia de instrução
     with pytest.raises(
         EmbeddingCompatibilityError, match="Incompatibilidade de estratégia de instrução"
     ):

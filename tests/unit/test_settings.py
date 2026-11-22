@@ -30,27 +30,66 @@ def test_load_settings_from_repository_yaml(
     assert settings.security.deny_by_default is True
     assert settings.gemini_generation_model == "gemini-4-hydrogen"
     assert settings.gemini_embedding_model == "gemini-embedding-2"
+    assert settings.effective_embedding_dimensions == 768
     assert settings.gemini_allow_paid_models is False
+    assert settings.gemini.allowed_free_tier_generation_models == ("gemini-4-hydrogen",)
+    assert settings.gemini.allowed_free_tier_embedding_models == ("gemini-embedding-2",)
 
 
 @pytest.mark.unit
-def test_env_overrides_models_and_chroma_endpoint(
+def test_env_overrides_canonical_models_and_chroma_endpoint(
     repo_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CHROMA_HOST", "internal-chroma")
     monkeypatch.setenv("CHROMA_PORT", "8100")
-    monkeypatch.setenv("GEMINI_GENERATION_MODEL", "gemini-3.8-flash")
+    monkeypatch.setenv("GEMINI_GENERATION_MODEL", "gemini-4-hydrogen")
     monkeypatch.setenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
+    monkeypatch.setenv("GEMINI_EMBEDDING_DIMENSIONS", "768")
+    monkeypatch.setenv("GEMINI_ALLOW_PAID_MODELS", "false")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
     settings = load_settings(yaml_path=repo_root / "config" / "settings.yaml")
 
     assert settings.chroma_base_url == "http://internal-chroma:8100"
-    assert settings.gemini_generation_model == "gemini-3.8-flash"
+    assert settings.gemini_generation_model == "gemini-4-hydrogen"
     assert settings.gemini_embedding_model == "gemini-embedding-2"
+    assert settings.effective_embedding_dimensions == 768
     assert settings.gemini_allow_paid_models is False
     assert settings.log_level == "DEBUG"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("env_var", "bad_value", "error_pattern"),
+    [
+        ("GEMINI_GENERATION_MODEL", "gemini-3.5-flash-lite", "política única"),
+        ("GEMINI_GENERATION_MODEL", "gemini-3.8-flash", "política única"),
+        ("GEMINI_GENERATION_MODEL", "gemini-4-neon", "política única"),
+        ("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001", "política única"),
+        ("GEMINI_EMBEDDING_DIMENSIONS", "256", "768"),
+        ("GEMINI_EMBEDDING_DIMENSIONS", "1536", "768"),
+        ("GEMINI_ALLOW_PAID_MODELS", "true", "GEMINI_ALLOW_PAID_MODELS=true"),
+    ],
+)
+def test_single_gemini_policy_rejects_unauthorized_env_values(
+    monkeypatch: pytest.MonkeyPatch,
+    env_var: str,
+    bad_value: str,
+    error_pattern: str,
+) -> None:
+    for var in (
+        "GEMINI_GENERATION_MODEL",
+        "GEMINI_CHAT_MODEL",
+        "GEMINI_EMBEDDING_MODEL",
+        "GEMINI_EMBEDDING_DIMENSIONS",
+        "GEMINI_ALLOW_PAID_MODELS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv(env_var, bad_value)
+
+    with pytest.raises(ValidationError, match=error_pattern):
+        AppSettings(_env_file=None)  # type: ignore[call-arg]
 
 
 @pytest.mark.unit
