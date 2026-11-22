@@ -2,27 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Protocol
 
 
-@dataclass(frozen=True, slots=True)
-class LLMGenerationResult:
-    """Resultado de geração de explicação complementar pelo modelo de linguagem."""
-
-    text: str
-    model_name: str
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-
-
 class LLMPort(Protocol):
-    """Interface abstrata para o provedor de LLM (implementado na Etapa 3 via google-genai)."""
+    """Interface desacoplada para geração de explicações fundamentadas (Google Gemini)."""
 
-    def generate_explanation(
+    @property
+    def model_name(self) -> str:
+        """Identificador do modelo generativo ativo."""
+
+    def generate_text(
         self,
         *,
-        system_prompt: str,
+        system_instruction: str,
         user_prompt: str,
-    ) -> LLMGenerationResult:
-        """Gera explicação técnica estritamente fundamentada nas evidências fornecidas."""
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> str:
+        """Gera explicação textual a partir de instruções de sistema e prompt do usuário."""

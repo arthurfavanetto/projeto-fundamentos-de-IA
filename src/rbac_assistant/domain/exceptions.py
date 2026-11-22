@@ -58,3 +58,24 @@ class UnvalidatedPageBlockedError(DomainError):
 
 class StorageConnectionError(DomainError):
     """Sinaliza indisponibilidade de comunicação com um repositório externo (ex.: ChromaDB)."""
+
+
+class EmbeddingCompatibilityError(DomainError):
+    """Sinaliza incompatibilidade de modelo ou dimensão de embeddings em coleção vetorial."""
+
+
+class IndexingError(DomainError):
+    """Sinaliza erro operacional durante chunking ou indexação vetorial/lexical."""
+
+
+class LLMServiceError(DomainError):
+    """Sinaliza falha na comunicação ou resposta inválida do serviço de IA generativa."""
+
+
+class LLMRateLimitError(LLMServiceError):
+    """Sinaliza atingimento de limite de taxa ou cota (HTTP 429) no serviço de IA."""
+
+
+class LLMTimeoutError(LLMServiceError):
+    """Sinaliza expiração de tempo limite (timeout) ao chamar o serviço de IA."""
+

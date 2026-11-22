@@ -7,10 +7,27 @@ from typing import Protocol
 
 
 class EmbeddingPort(Protocol):
-    """Interface abstrata para geração de vetores de embedding (implementado na Etapa 3)."""
+    """Interface desacoplada para geração de vetores de embeddings (documentos e consultas)."""
 
-    def embed_texts(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
-        """Gera vetores numéricos para um lote de textos."""
+    @property
+    def model_name(self) -> str:
+        """Identificador do modelo de embeddings ativo."""
 
-    def embed_query(self, query: str) -> tuple[float, ...]:
-        """Gera vetor numérico para uma consulta de busca semântica."""
+    @property
+    def dimensions(self) -> int:
+        """Dimensionalidade vetorial esperada dos embeddings gerados."""
+
+    @property
+    def instruction_strategy_version(self) -> str:
+        """Versão da estratégia de instrução/formatação usada para gerar os embeddings."""
+
+    def embed_documents(
+        self,
+        texts: Sequence[str],
+        *,
+        titles: Sequence[str | None] | None = None,
+    ) -> list[tuple[float, ...]]:
+        """Gera exatamente um vetor independente por chunk de documento, preservando a ordem."""
+
+    def embed_query(self, text: str) -> tuple[float, ...]:
+        """Gera vetor de embedding otimizado para uma consulta do usuário."""

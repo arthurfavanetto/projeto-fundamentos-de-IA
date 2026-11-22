@@ -146,7 +146,7 @@ sequenceDiagram
     participant SEC as Security Guard & Audit
     participant UC as QueryRegulationUseCase
     participant RET as Hybrid Retriever
-    participant SSOT as Canonical Store (Vol)
+    participant SSOT as SQLite SSOT + FTS5
     participant VDB as ChromaDB
     participant LLM as Google Gemini API
     participant FMT as Response Formatter
@@ -157,29 +157,30 @@ sequenceDiagram
         SEC-->>TG: Bloqueia acesso e registra no Audit Log
         TG-->>U: Mensagem padrão de acesso negado
     else Autorizado
-        SEC->>UC: Encaminha QueryRequestDTO
-        UC->>RET: Resolve intenção e identificadores normativos
-        alt Consulta Direta por Seção (ex: "43.3" ou "43.9(a)")
-            RET->>SSOT: Busca determinística exata por regulation + amendment + section
-            SSOT-->>RET: Retorna unidade normativa completa e validada
+        SEC->>UC: Encaminha consulta ao NormativeChatService
+        UC->>RET: Resolve referências estruturais e executa busca híbrida (RRF)
+        alt Consulta Direta por Seção (ex: "RBAC 43.3" ou "43.9(a)")
+            RET->>SSOT: Busca estrutural exata + FTS5 em catalog.sqlite3
+            SSOT-->>RET: Retorna unidade normativa e valida páginas ao vivo
         else Pergunta Aberta / Temática
-            RET->>VDB: Busca semântica filtrada por regulamento/emenda vigente
+            RET->>SSOT: Busca lexical SQLite FTS5 (BM25)
+            RET->>VDB: Busca semântica filtrada (ChromaDB)
             VDB-->>RET: Retorna top-k chunks + metadados de seção
-            RET->>SSOT: Recupera texto literal completo das seções correspondentes
-            SSOT-->>RET: Retorna texto oficial integral sem cortes
+            RET->>SSOT: Hidrata texto original integral e estados de revisão
+            SSOT-->>RET: Retorna evidências hidratadas (aprovadas / preliminares / bloqueadas)
         end
 
-        alt Nenhuma Evidência Encontrada
-            RET-->>UC: Lista de evidências vazia
-            UC-->>FMT: Sinaliza ausência de fundamentação
-            FMT-->>TG: Informa que o requisito não foi localizado na base indexada
+        alt Nenhuma Evidência Utilizável Encontrada
+            RET-->>UC: Lista de evidências vazia ou apenas bloqueadas
+            UC-->>FMT: Sinaliza ausência de fundamentação segura
+            FMT-->>TG: Informa ausência de base validada (sem alucinação)
             TG-->>U: Resposta transparente sem alucinação
-        else Evidências Encontradas
-            RET-->>UC: Evidências canônicas + metadados de citação
-            UC->>LLM: Envia pergunta + trechos canônicos com prompt restritivo
+        else Evidências Utilizáveis Encontradas
+            RET-->>UC: Evidências hidratadas do SQLite + metadados de citação
+            UC->>LLM: Envia pergunta + evidências protegidas pelo PromptGuard
             LLM-->>UC: Retorna apenas a explicação complementar estruturada
-            UC->>FMT: Combina Transcrição Literal (SSOT) + Fundamentação + Explicação (LLM)
-            FMT->>TG: Divide em partes <= 4096 chars (se necessário)
+            UC->>FMT: Combina Texto Normativo (SSOT) + Explicação (IA) + Referência + Observação
+            FMT->>TG: Divide em partes <= 4096 chars (se necessário, Etapa 4)
             TG-->>U: Entrega resposta formatada e rastreável
         end
         UC->>SEC: Registra consulta, seções citadas, latência e tokens no Audit Log
@@ -188,24 +189,20 @@ sequenceDiagram
 
 ### Estrutura Obrigatória de Saída
 
-Toda resposta normativa separa rigorosamente transcrição literal, metadados de rastreabilidade e explicação gerada por IA:
+Toda resposta normativa separa rigorosamente transcrição literal (SSOT SQLite), explicação gerada por IA, referências rastreáveis e observações de governança (ver Seção 2 do [`README.md`](../../README.md#2-arquitetura-de-dados-sqlite-e-fontes-de-verdade)):
 
 ```text
-CONSULTA: RBAC 43 — Seção 43.3
+=== TEXTO NORMATIVO (LITERAL VALIDADO — SQLite SSOT) ===
+[Transcrição literal recuperada exclusivamente de original_text no SQLite em páginas aprovadas.]
 
-TEXTO OFICIAL:
-[Transcrição literal recuperada diretamente do Canonical Store (SSOT).]
+=== EXPLICAÇÃO (GERADA POR IA) ===
+[Interpretação técnica elaborada pelo Google Gemini estritamente baseada nas evidências acima.]
 
-FUNDAMENTAÇÃO:
-• Regulamento: RBAC 43 — Manutenção, Manutenção Preventiva, Reconstrução e Alteração
-• Emenda: [Número exato da emenda indexada] (Situação: Vigente)
-• Seção / Dispositivo: 43.3 [Parágrafo/Inciso aplicável]
-• Página Impressa (ANAC): [Número da página oficial]
-• Página Física (PDF): [Número da página no arquivo PDF]
-• Validação da Extração: [Nativa Digital — Validada]
+=== REFERÊNCIA ===
+- ANAC RBAC 43 (Emenda XX | vigência: current) — Seção 43.3 — PDF p. [...] | Impressa: [...] — [Aprovado para transcrição literal]
 
-EXPLICAÇÃO:
-[Interpretação técnica elaborada pelo Google Gemini estritamente baseada no TEXTO OFICIAL acima.]
+=== OBSERVAÇÃO ===
+- [Avisos de revisão preliminar, bloqueio OCR/reprovação, vigência ou degradação, quando aplicável.]
 ```
 
 ---
@@ -213,10 +210,10 @@ EXPLICAÇÃO:
 ## 5. Estratégia Gemini, Telegram e Docker
 
 ### Google Gemini (`google-genai`)
-- Utiliza exclusivamente o SDK oficial `google-genai`.
-- Modelos configuráveis via `.env` (`GEMINI_GENERATION_MODEL` e `GEMINI_EMBEDDING_MODEL`), validados na conta antes do deploy.
-- Utiliza API Key dedicada do Google AI Studio / Google Cloud (assinatura pessoal Google AI Pro não fornece cota de API Python).
-- Em caso de indisponibilidade da API Gemini, o sistema aplica *graceful degradation*, entregando `TEXTO OFICIAL` e `FUNDAMENTAÇÃO` recuperados localmente.
+- Utiliza exclusivamente o SDK oficial `google-genai==3.6.1`.
+- Aplica **política única de modelos em runtime** via `.env` (`GEMINI_GENERATION_MODEL=gemini-4-hydrogen`, `GEMINI_EMBEDDING_MODEL=gemini-embedding-2`, `GEMINI_EMBEDDING_DIMENSIONS=768`, `GEMINI_ALLOW_PAID_MODELS=false`), com validação estrita em `AppSettings` e `GeminiClientAdapter` e **sem fallback silencioso** (ver ADR-08).
+- Utiliza API Key dedicada da Gemini Developer API (Google AI Studio) separada da assinatura pessoal Google AI Pro usada no Antigravity para desenvolvimento; ausência de cobrança depende também de manter o projeto Google sem Cloud Billing vinculado.
+- Em caso de indisponibilidade da API Gemini, o sistema aplica *graceful degradation*, entregando `TEXTO NORMATIVO` e `REFERÊNCIA` recuperados localmente do SQLite.
 
 ### Telegram (Long Polling)
 - Comunicação exclusivamente de saída (*outbound HTTPS*), sem abertura de portas ou webhooks.

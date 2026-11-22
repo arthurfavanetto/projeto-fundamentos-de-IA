@@ -1,0 +1,686 @@
+{
+  "dataset_name": "rbac_synthetic_controlled_eval_v2",
+  "disclaimer": "Dataset 100% sintético/fictício (40 consultas: todas as 36 originais preservadas + 4 casos adicionais de comparação multidocumento, referência incompleta, artigo isolado e normalização Emenda 005). NÃO substitui avaliação futura com o PDF oficial real do RBAC 43 nem representa benchmark do Gemini Embedding 2 quando executado com o embedder determinístico local.",
+  "cases": [
+    {
+      "case_id": "Q01",
+      "category": "exact_section_ref",
+      "structural_subset": "explicit_structural_ref",
+      "query": "RBAC 43.3",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.3",
+          "normative_unit_id": "eval_rbac_43_v05_u_2_43.3",
+          "expected_pdf_pages": [2, 3],
+          "expected_text_snippets": ["Pessoas autorizadas a executar manutenção", "organização de manutenção certificada"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q02",
+      "category": "exact_section_ref",
+      "structural_subset": "explicit_structural_ref",
+      "query": "O que diz o RBAC 145.109?",
+      "expected_targets": [
+        {
+          "regulation_number": "145",
+          "amendment_number": "06",
+          "section_number": "145.109",
+          "normative_unit_id": "eval_rbac_145_v06_u_3_145.109",
+          "expected_pdf_pages": [3],
+          "expected_text_snippets": ["ferramentas calibradas", "dados técnicos atualizados"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "145",
+      "expected_amendment": "06"
+    },
+    {
+      "case_id": "Q03",
+      "category": "paragraph_alinea_ref",
+      "structural_subset": "article_alinea_item_only",
+      "query": "Consulte o parágrafo RBAC 43.9(a)",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.9",
+          "paragraph_number": "(a)",
+          "alinea": "(a)",
+          "normative_unit_id": "eval_rbac_43_v05_u_4_43.9",
+          "expected_pdf_pages": [4],
+          "expected_text_snippets": ["(a) Cada pessoa que executa manutenção deve registrar na caderneta de manutenção"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q04",
+      "category": "item_subitem_ref",
+      "structural_subset": "article_alinea_item_only",
+      "query": "Qual a exigência do RBAC 43.9(a)(1)(i)?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.9",
+          "paragraph_number": "(a)",
+          "item_number": "(1)",
+          "subitem_number": "(i)",
+          "normative_unit_id": "eval_rbac_43_v05_u_4_43.9",
+          "expected_pdf_pages": [4],
+          "expected_text_snippets": ["(a)(1)(i) Data de conclusão do serviço, nome completo, assinatura e número da licença"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q05",
+      "category": "item_subitem_ref",
+      "structural_subset": "article_alinea_item_only",
+      "query": "O que prevê a seção 43.3(a)(1)?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.3",
+          "paragraph_number": "(a)",
+          "item_number": "(1)",
+          "normative_unit_id": "eval_rbac_43_v05_u_2_43.3",
+          "expected_pdf_pages": [2, 3],
+          "expected_text_snippets": ["(a)(1) O mecânico de manutenção aeronáutica habilitado pode executar manutenção"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q06",
+      "category": "exact_section_ref",
+      "structural_subset": "article_alinea_item_only",
+      "query": "O que estabelece o Apêndice A do RBAC 43?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "Apêndice A",
+          "normative_unit_id": "eval_rbac_43_v05_u_8_Apêndice_A",
+          "expected_pdf_pages": [8],
+          "expected_text_snippets": ["grande reparo", "manutenção preventiva"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q07",
+      "category": "multi_document",
+      "structural_subset": "article_alinea_item_only",
+      "query": "Qual o conteúdo do Art. 1º da Resolução 700?",
+      "expected_targets": [
+        {
+          "regulation_number": "700",
+          "amendment_number": "00",
+          "section_number": "Art. 1º",
+          "normative_unit_id": "eval_res_700_v00_u_1_Art._1º",
+          "expected_pdf_pages": [1],
+          "expected_text_snippets": ["Art. 1º Fica aprovada a Emenda 05 ao RBAC 43 sintético"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "700",
+      "expected_amendment": "00"
+    },
+    {
+      "case_id": "Q08",
+      "category": "natural_language",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Quem está autorizado a executar manutenção em aeronaves civis?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.3",
+          "expected_pdf_pages": [2, 3],
+          "expected_text_snippets": ["mecânico de manutenção aeronáutica habilitado"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q09",
+      "category": "natural_language",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Quem pode aprovar o retorno ao serviço de uma aeronave após manutenção?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.7",
+          "expected_pdf_pages": [3],
+          "expected_text_snippets": ["aprovar o retorno ao serviço de aeronave após manutenção"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q10",
+      "category": "natural_language",
+      "structural_subset": "incomplete_ref",
+      "query": "Quando entra em vigor a Resolução 700?",
+      "expected_targets": [
+        {
+          "regulation_number": "700",
+          "amendment_number": "00",
+          "section_number": "Art. 2º",
+          "expected_pdf_pages": [1],
+          "expected_text_snippets": ["entra em vigor trinta dias após sua publicação oficial"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "expected_regulation": "700",
+      "expected_amendment": "00"
+    },
+    {
+      "case_id": "Q11",
+      "category": "paraphrase_no_literal_terms",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Preciso saber qual profissional pode liberar o avião para voar de novo depois de um serviço",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.7",
+          "expected_pdf_pages": [3],
+          "expected_text_snippets": ["aprovar o retorno ao serviço"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q12",
+      "category": "paraphrase_no_literal_terms",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Trocar bateria ou pneu conta como serviço simples na classificação?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "Apêndice A",
+          "paragraph_number": "(c)",
+          "expected_pdf_pages": [8],
+          "expected_text_snippets": ["troca de pneus", "substituição simples de baterias"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q13",
+      "category": "paraphrase_no_literal_terms",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Quais são os poderes de uma oficina homologada para liberar componentes?",
+      "expected_targets": [
+        {
+          "regulation_number": "145",
+          "amendment_number": "06",
+          "section_number": "145.201",
+          "expected_pdf_pages": [4],
+          "expected_text_snippets": ["prerrogativas para aprovar o retorno ao serviço de componentes"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q14",
+      "category": "synonym_semantic",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Qual anotação e rubrica devo lançar na caderneta de bordo ao finalizar o serviço?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.9",
+          "expected_pdf_pages": [4],
+          "expected_text_snippets": ["caderneta de manutenção", "assinatura e número da licença"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q15",
+      "category": "synonym_semantic",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Qual o período de arquivamento e retenção de arquivos na oficina homologada?",
+      "expected_targets": [
+        {
+          "regulation_number": "145",
+          "amendment_number": "06",
+          "section_number": "145.219",
+          "expected_pdf_pages": [5],
+          "expected_text_snippets": ["arquivamento seguro pelo prazo mínimo de cinco anos"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q16",
+      "category": "synonym_semantic",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Quais instrumentos aferidos e ferramental são exigidos no hangar homologado?",
+      "expected_targets": [
+        {
+          "regulation_number": "145",
+          "amendment_number": "06",
+          "section_number": "145.109",
+          "expected_pdf_pages": [3],
+          "expected_text_snippets": ["ferramentas calibradas", "hangar"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q17",
+      "category": "lexical_specific",
+      "structural_subset": "natural_language_no_ref",
+      "query": "exclusão de aeronaves experimentais aplicabilidade",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.1",
+          "expected_pdf_pages": [2],
+          "expected_text_snippets": ["exclusão de aeronaves experimentais"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q18",
+      "category": "lexical_specific",
+      "structural_subset": "incomplete_ref",
+      "query": "SEGVOO 001 Emenda 04",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "04",
+          "section_number": "43.3",
+          "expected_pdf_pages": [2],
+          "expected_text_snippets": ["SEGVOO 001"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "expected_regulation": "43",
+      "expected_amendment": "04",
+      "only_current_version": false
+    },
+    {
+      "case_id": "Q19",
+      "category": "semantic_conceptual",
+      "structural_subset": "natural_language_no_ref",
+      "query": "conserto estrutural na fuselagem e célula de aeronave",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "Apêndice A",
+          "paragraph_number": "(a)",
+          "expected_pdf_pages": [8],
+          "expected_text_snippets": ["reparo estrutural na célula ou fuselagem"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q20",
+      "category": "semantic_conceptual",
+      "structural_subset": "natural_language_no_ref",
+      "query": "definições de responsável técnico e artigos aeronáuticos na oficina",
+      "expected_targets": [
+        {
+          "regulation_number": "145",
+          "amendment_number": "06",
+          "section_number": "145.3",
+          "expected_pdf_pages": [2],
+          "expected_text_snippets": ["responsável técnico e artigos aeronáuticos"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q21",
+      "category": "hybrid_lexical_semantic",
+      "structural_subset": "natural_language_no_ref",
+      "query": "registros de manutenção assinatura licença ANAC na caderneta de bordo",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.9",
+          "expected_pdf_pages": [4],
+          "expected_text_snippets": ["caderneta de manutenção", "licença ANAC"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q22",
+      "category": "hybrid_lexical_semantic",
+      "structural_subset": "natural_language_no_ref",
+      "query": "oficina certificada ferramentas calibradas e dados técnicos atualizados",
+      "expected_targets": [
+        {
+          "regulation_number": "145",
+          "amendment_number": "06",
+          "section_number": "145.109",
+          "expected_pdf_pages": [3],
+          "expected_text_snippets": ["ferramentas calibradas", "dados técnicos atualizados"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q23",
+      "category": "explicit_regulation_filter",
+      "structural_subset": "incomplete_ref",
+      "query": "No RBAC 145, quais são as regras sobre registros de manutenção?",
+      "expected_targets": [
+        {
+          "regulation_number": "145",
+          "amendment_number": "06",
+          "section_number": "145.219",
+          "expected_pdf_pages": [5],
+          "expected_text_snippets": ["registros de manutenção em arquivamento seguro"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "expected_regulation": "145",
+      "expected_amendment": "06"
+    },
+    {
+      "case_id": "Q24",
+      "category": "explicit_regulation_filter",
+      "structural_subset": "incomplete_ref",
+      "query": "No RBAC 43, o que deve constar nos registros de manutenção?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.9",
+          "expected_pdf_pages": [4],
+          "expected_text_snippets": ["caderneta de manutenção", "Descrição detalhada"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q25",
+      "category": "explicit_amendment_filter",
+      "structural_subset": "explicit_structural_ref",
+      "query": "O que previa o RBAC 43.3 na Emenda 04?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "04",
+          "section_number": "43.3",
+          "expected_pdf_pages": [2],
+          "expected_text_snippets": ["Emenda 04", "SEGVOO 001"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "04"
+    },
+    {
+      "case_id": "Q26",
+      "category": "explicit_amendment_filter",
+      "structural_subset": "explicit_structural_ref",
+      "query": "Qual a regra do RBAC 43.3 na Emenda 5?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.3",
+          "expected_pdf_pages": [2, 3],
+          "expected_text_snippets": ["mecânico de manutenção aeronáutica habilitado"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q27",
+      "category": "version_ambiguity",
+      "structural_subset": "ambiguous_section_or_version",
+      "query": "Qual a regra da seção 88.5?",
+      "expected_targets": [],
+      "expected_behavior": "version_ambiguity",
+      "expected_regulation": "88"
+    },
+    {
+      "case_id": "Q28",
+      "category": "version_ambiguity",
+      "structural_subset": "ambiguous_section_or_version",
+      "query": "RBAC 88.5",
+      "expected_targets": [],
+      "expected_behavior": "version_ambiguity",
+      "expected_regulation": "88",
+      "only_current_version": false
+    },
+    {
+      "case_id": "Q29",
+      "category": "multi_document",
+      "structural_subset": "incomplete_ref",
+      "query": "O que diz a seção 145.3?",
+      "expected_targets": [
+        {
+          "regulation_number": "145",
+          "amendment_number": "06",
+          "section_number": "145.3",
+          "expected_pdf_pages": [2],
+          "expected_text_snippets": ["Definições", "responsável técnico"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "145",
+      "expected_amendment": "06"
+    },
+    {
+      "case_id": "Q30",
+      "category": "multi_page_section",
+      "structural_subset": "explicit_structural_ref",
+      "query": "Qual o texto completo do RBAC 43.3 incluindo organização de manutenção certificada?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.3",
+          "normative_unit_id": "eval_rbac_43_v05_u_2_43.3",
+          "expected_pdf_pages": [2, 3],
+          "expected_text_snippets": ["(a)(1) O mecânico", "(b) Uma organização de manutenção certificada"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q31",
+      "category": "out_of_domain",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Qual a receita culinária de bolo de cenoura com cobertura de chocolate?",
+      "expected_targets": [],
+      "expected_behavior": "abstain_no_evidence"
+    },
+    {
+      "case_id": "Q32",
+      "category": "out_of_domain",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Como declarar imposto de renda sobre criptomoedas na bolsa de valores?",
+      "expected_targets": [],
+      "expected_behavior": "abstain_no_evidence"
+    },
+    {
+      "case_id": "Q33",
+      "category": "insufficient_evidence",
+      "structural_subset": "incomplete_ref",
+      "query": "Qual o limite de ruído para foguetes orbitais no RBAC 999?",
+      "expected_targets": [],
+      "expected_behavior": "abstain_no_evidence",
+      "expected_regulation": "999"
+    },
+    {
+      "case_id": "Q34",
+      "category": "governance_native_unreviewed",
+      "structural_subset": "explicit_structural_ref",
+      "query": "O que diz o RBAC 43.11 sobre inspeção de 100 horas?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.11",
+          "expected_pdf_pages": [5],
+          "expected_text_snippets": ["inspeção de 100 horas"]
+        }
+      ],
+      "expected_behavior": "preliminary_location_no_llm",
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q35",
+      "category": "governance_ocr_pending",
+      "structural_subset": "explicit_structural_ref",
+      "query": "O que determina o RBAC 43.13 sobre métodos e técnicas de manutenção?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.13",
+          "expected_pdf_pages": [6]
+        }
+      ],
+      "expected_behavior": "blocked_ocr_no_llm",
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q36",
+      "category": "governance_rejected_page",
+      "structural_subset": "explicit_structural_ref",
+      "query": "Qual a regra do RBAC 43.15 para inspeção em helicópteros?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.15",
+          "expected_pdf_pages": [7]
+        }
+      ],
+      "expected_behavior": "blocked_rejected_no_llm",
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q37",
+      "category": "multi_document",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Compare as regras de retorno ao serviço no RBAC 43 e no RBAC 145",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.7",
+          "expected_pdf_pages": [3],
+          "expected_text_snippets": ["aprovar o retorno ao serviço"]
+        },
+        {
+          "regulation_number": "145",
+          "amendment_number": "06",
+          "section_number": "145.201",
+          "expected_pdf_pages": [4],
+          "expected_text_snippets": ["retorno ao serviço de componentes"]
+        }
+      ],
+      "expected_behavior": "validated_answer"
+    },
+    {
+      "case_id": "Q38",
+      "category": "exact_section_ref",
+      "structural_subset": "incomplete_ref",
+      "query": "O que prevê a seção 43.7?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.7",
+          "expected_pdf_pages": [3],
+          "expected_text_snippets": ["aprovar o retorno ao serviço"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "Q39",
+      "category": "multi_document",
+      "structural_subset": "article_alinea_item_only",
+      "query": "O que dispõe o Art. 2º?",
+      "expected_targets": [
+        {
+          "regulation_number": "700",
+          "amendment_number": "00",
+          "section_number": "Art. 2º",
+          "expected_pdf_pages": [1],
+          "expected_text_snippets": ["entra em vigor trinta dias"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true
+    },
+    {
+      "case_id": "Q40",
+      "category": "explicit_amendment_filter",
+      "structural_subset": "incomplete_ref",
+      "query": "Quais as regras de manutenção de aeronaves experimentais do RBAC 43 na Emenda 005?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.1",
+          "expected_pdf_pages": [2],
+          "expected_text_snippets": ["aeronaves experimentais"]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    }
+  ]
+}

@@ -14,7 +14,6 @@ storage:
   raw_pdfs_subdir: "raw_pdfs"
   extracted_subdir: "extracted"
   reviews_subdir: "reviews"
-  canonical_store_subdir: "canonical_store"
   audit_logs_dir: "/app/logs"
   sqlite_busy_timeout_ms: 5000
 
@@ -36,17 +35,46 @@ vector_db:
   pinned_version: "1.5.9"
   heartbeat_path: "/api/v2/heartbeat"
   request_timeout_seconds: 5.0
+  # Coleção versionada dedicada ao Gemini Embedding 2 (768d, estratégia assimétrica v1)
+  collection_name: "regulatory_chunks_ge2_768_v1"
+  test_collection_prefix: "test_"
+
+gemini:
+  timeout_seconds: 30.0
+  max_retries: 3
+  retry_min_wait_seconds: 0.5
+  retry_max_wait_seconds: 8.0
+  temperature: 0.1
+  max_output_tokens: 2048
+  # Política única de embeddings (Free Tier Standard textual; 768d obrigatório; limite 8.192 tokens)
+  embedding_dimensions: 768
+  embedding_instruction_version: "ge2_asymmetric_v1"
+  embedding_max_input_tokens: 8192
+  embedding_batch_size: 32
+  prompts_dir: "config/prompts"
+  # Política única de modelos em runtime (Free Tier Standard, sem fallback silencioso)
+  allowed_free_tier_generation_models:
+    - "gemini-4-hydrogen"
+  allowed_free_tier_embedding_models:
+    - "gemini-embedding-2"
 
 chunking:
-  # Preserva seções completas dentro da janela alvo; divide por parágrafos quando exceder
+  # Preserva seções completas dentro da janela alvo (folga ampla abaixo dos 8.192 tokens do GE2)
   max_chunk_tokens: 1200
   overlap_tokens: 0
   preserve_hierarchy: true
 
 retrieval:
   semantic_top_k: 5
+  lexical_top_k: 5
+  final_top_k: 5
+  rrf_k: 60
+  # Threshold inicial/provisório para distância de cosseno no ChromaDB (`hnsw:space: cosine`).
+  # Deverá ser calibrado com benchmark real após ingestão do PDF oficial do RBAC 43.
+  max_vector_distance: 0.85
   only_current_amendment_by_default: true
   reconstruct_full_section_from_ssot: true
+  allow_preliminary_native_search: true
 
 telegram:
   mode: "long_polling"

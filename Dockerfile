@@ -36,6 +36,7 @@ COPY --from=builder --chown=10001:10001 /app/.venv /app/.venv
 COPY --chown=10001:10001 src ./src
 COPY --chown=10001:10001 config/settings.yaml ./config/settings.yaml
 COPY --chown=10001:10001 config/regulations_catalog.yaml ./config/regulations_catalog.yaml
+COPY --chown=10001:10001 config/prompts ./config/prompts
 COPY --chown=10001:10001 scripts ./scripts
 
 USER 10001:10001

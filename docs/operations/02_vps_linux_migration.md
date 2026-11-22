@@ -25,8 +25,8 @@ sudo ufw enable
 
 ### Passo 1 — Gerar Backup no PC Central Windows
 Executar o utilitário `scripts/backup_volumes.py` (implementado na Etapa 5) para gerar snapshots compactados (`.tar.gz`) dos volumes:
-- `regulatory_documents` *(crítico — contém PDFs oficiais e Canonical Store SSOT)*
-- `chroma_data` *(reconstruível, mas agiliza o boot)*
+- `regulatory_documents` *(crítico — contém PDFs oficiais originais e o banco SQLite operacional `/app/data/documents/catalog.sqlite3`, conforme Seção 2 do `README.md`)*
+- `chroma_data` *(índice vetorial derivado, reconstruível a partir do SQLite)*
 - `audit_logs` *(histórico de auditoria)*
 
 ### Passo 2 — Clonar o Repositório na VPS

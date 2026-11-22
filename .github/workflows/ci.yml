@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           version: "0.13.8"
           enable-cache: true
@@ -44,7 +44,7 @@ jobs:
     needs: [quality-and-tests]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Validate docker-compose.yml syntax
         run: docker compose config --quiet
@@ -127,6 +127,8 @@ jobs:
             sleep 2
           done
           docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase verify
+          docker compose exec -T rbac-bot python scripts/index_document.py --status
+          docker compose exec -T rbac-bot python -c "import sqlite3; c=sqlite3.connect('/app/data/documents/catalog.sqlite3'); assert c.execute(\"SELECT name FROM sqlite_master WHERE name='normative_chunks_fts'\").fetchone() is not None; print('[OK] SQLite FTS5 virtual table verified inside rbac-bot container.')"
           docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase cleanup
 
       - name: Dump container logs on failure

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from collections.abc import Iterator, Sequence
@@ -18,6 +19,11 @@ from rbac_assistant.domain.entities.normative_unit import (
     NormativeTable,
     NormativeUnitType,
     StructureStatus,
+)
+from rbac_assistant.domain.entities.rag import (
+    IndexRegistryEntry,
+    NormativeChunk,
+    SearchFilter,
 )
 from rbac_assistant.domain.entities.regulatory_document import (
     DocumentStatus,
@@ -37,6 +43,131 @@ from rbac_assistant.domain.exceptions import DocumentNotFoundError
 from rbac_assistant.domain.ports.validation_port import ParsedUnitRecord
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+
+_PT_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a",
+        "ao",
+        "aos",
+        "as",
+        "com",
+        "como",
+        "da",
+        "das",
+        "de",
+        "do",
+        "dos",
+        "e",
+        "em",
+        "na",
+        "nas",
+        "no",
+        "nos",
+        "o",
+        "os",
+        "ou",
+        "para",
+        "pela",
+        "pelas",
+        "pelo",
+        "pelos",
+        "por",
+        "qual",
+        "quais",
+        "que",
+        "quem",
+        "se",
+        "sobre",
+        "um",
+        "uma",
+        "uns",
+        "umas",
+        "onde",
+        "quando",
+        "diz",
+        "fala",
+        "esta",
+        "está",
+        "sao",
+        "são",
+        "isso",
+        "esse",
+        "essa",
+        "este",
+        "neste",
+        "nesta",
+        "seu",
+        "sua",
+        "mais",
+        "muito",
+        "pode",
+        "podem",
+        "deve",
+        "devem",
+        "devo",
+        "preciso",
+        "saber",
+        "depois",
+        "antes",
+        "após",
+        "apos",
+        "cada",
+        "todo",
+        "toda",
+        "todos",
+        "todas",
+        "outro",
+        "outra",
+        "também",
+        "tambem",
+        "ainda",
+        "apenas",
+        "somente",
+        "entre",
+        "até",
+        "ate",
+        "ser",
+        "estar",
+        "ter",
+        "foi",
+        "seja",
+        "tem",
+        "têm",
+        "novo",
+        "nova",
+    }
+)
+# Termos estruturais/boilerplate presentes em cabeçalhos de quase todos os chunks;
+# omitidos da busca lexical FTS5 apenas quando existem termos específicos na consulta.
+_FTS_GENERIC_HEADER_TERMS: frozenset[str] = frozenset(
+    {
+        "rbac",
+        "anac",
+        "seção",
+        "secao",
+        "emenda",
+        "emd",
+        "resolução",
+        "resolucao",
+        "portaria",
+        "parágrafo",
+        "paragrafo",
+        "alínea",
+        "alinea",
+        "inciso",
+        "item",
+        "art",
+        "artigo",
+        "consulte",
+        "prevê",
+        "preve",
+        "dispõe",
+        "dispoe",
+    }
+)
+_FTS_TOKEN_RE = re.compile(r"[0-9A-Za-zÀ-ÖØ-öø-ÿ]+(?:[.\-/][0-9A-Za-zÀ-ÖØ-öø-ÿ]+)*")
+_FTS_ARTICLE_PHRASE_RE = re.compile(r"\b(?:Art\.?|Artigo)\s*(\d+)[º°]?", re.IGNORECASE)
+_FTS_APPENDIX_PHRASE_RE = re.compile(r"\b(Ap[êe]ndice\s+[A-Z0-9]+)\b", re.IGNORECASE)
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -181,6 +312,16 @@ class SqliteDocumentRepository:
                         "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?);",
                         (version_name, datetime.now(UTC).isoformat()),
                     )
+
+    def list_applied_migrations(self) -> list[str]:
+        """Lista as versões de migração aplicadas em ordem crescente."""
+        with self._connect() as conn:
+            if not self._table_exists(conn, "schema_migrations"):
+                return []
+            rows = conn.execute(
+                "SELECT version FROM schema_migrations ORDER BY version ASC;"
+            ).fetchall()
+        return [str(row["version"]) for row in rows]
 
     @staticmethod
     def _split_sql_statements(script: str) -> list[str]:
@@ -398,6 +539,16 @@ class SqliteDocumentRepository:
             ).fetchall()
         return [self._row_to_version(row) for row in rows]
 
+    def list_all_versions(self) -> list[DocumentVersion]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM document_versions
+                ORDER BY document_id ASC, COALESCE(effective_date, '') DESC, amendment_number DESC;
+                """
+            ).fetchall()
+        return [self._row_to_version(row) for row in rows]
+
     def get_current_version(self, document_id: str) -> DocumentVersion | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -570,7 +721,12 @@ class SqliteDocumentRepository:
                 ),
             )
 
-            # Remove unidades e tabelas antigas da versão antes de reinserir
+            # Remove unidades, tabelas e entradas FTS5 antigas da versão antes de reinserir
+            if self._table_exists(conn, "normative_chunks_fts"):
+                conn.execute(
+                    "DELETE FROM normative_chunks_fts WHERE version_id = ?;",
+                    (version.version_id,),
+                )
             conn.execute("DELETE FROM normative_units WHERE version_id = ?;", (version.version_id,))
             conn.execute(
                 "DELETE FROM normative_tables WHERE version_id = ?;", (version.version_id,)
@@ -958,6 +1114,11 @@ class SqliteDocumentRepository:
                     "UPDATE normative_units SET validation_status = ? WHERE unit_id = ?;",
                     (agg.value, unit_id),
                 )
+                if self._table_exists(conn, "normative_chunks"):
+                    conn.execute(
+                        "UPDATE normative_chunks SET validation_status = ? WHERE unit_id = ?;",
+                        (agg.value, unit_id),
+                    )
 
         updated = self.get_page(page_id)
         assert updated is not None
@@ -1129,6 +1290,601 @@ class SqliteDocumentRepository:
             )
             for r in rows
         ]
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?;",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _row_to_chunk(row: sqlite3.Row) -> NormativeChunk:
+        pdf_pages = tuple(int(p) for p in json.loads(row["pdf_pages_json"] or "[]"))
+        printed_pages = tuple(str(p) for p in json.loads(row["printed_pages_json"] or "[]"))
+        return NormativeChunk(
+            chunk_id=str(row["chunk_id"]),
+            document_id=str(row["document_id"]),
+            version_id=str(row["version_id"]),
+            unit_id=str(row["unit_id"]),
+            authority=str(row["authority"]),
+            document_type=str(row["document_type"]),
+            regulation_number=str(row["regulation_number"]),
+            amendment_number=str(row["amendment_number"]),
+            version_status=str(row["version_status"]),
+            section_number=str(row["section_number"]),
+            subsection_number=str(row["subsection_number"]),
+            paragraph_number=str(row["paragraph_number"]),
+            item_number=str(row["item_number"]),
+            title=str(row["title"]),
+            subpart=str(row["subpart"]),
+            start_page=int(row["start_page"]),
+            end_page=int(row["end_page"]),
+            pdf_pages=pdf_pages,
+            printed_pages=printed_pages,
+            chunk_index=int(row["chunk_index"]),
+            original_text=str(row["original_text"]),
+            search_text=str(row["search_text"]),
+            source_hash=str(row["source_hash"]),
+            content_hash=str(row["content_hash"]),
+            validation_status=str(row["validation_status"]),
+            embedding_model=str(row["embedding_model"]),
+            embedding_dimension=int(row["embedding_dimension"]),
+        )
+
+    @staticmethod
+    def _build_chunk_filter_clauses(
+        filters: SearchFilter | None,
+        *,
+        alias: str = "nc",
+    ) -> tuple[list[str], list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if filters is None:
+            return clauses, params
+
+        if filters.document_id:
+            clauses.append(f"{alias}.document_id = ?")
+            params.append(filters.document_id)
+        if filters.authority:
+            clauses.append(f"LOWER({alias}.authority) = LOWER(?)")
+            params.append(filters.authority)
+        if filters.document_type is not None:
+            clauses.append(f"{alias}.document_type = ?")
+            params.append(filters.document_type.value)
+        if filters.regulation_number:
+            clauses.append(f"LOWER({alias}.regulation_number) = LOWER(?)")
+            params.append(filters.regulation_number.strip())
+        if filters.version_id:
+            clauses.append(f"{alias}.version_id = ?")
+            params.append(filters.version_id)
+        if filters.amendment_number:
+            amd_clean = filters.amendment_number.strip()
+            if amd_clean.isdigit():
+                amd_norm = str(int(amd_clean))
+                clauses.append(
+                    f"(LOWER({alias}.amendment_number) = LOWER(?) "
+                    f"OR (LENGTH(LTRIM({alias}.amendment_number, '0')) > 0 "
+                    f"AND LTRIM({alias}.amendment_number, '0') = ?) "
+                    f"OR (LTRIM({alias}.amendment_number, '0') = '' AND ? = '0'))"
+                )
+                params.extend([amd_clean, amd_norm, amd_norm])
+            else:
+                clauses.append(f"LOWER({alias}.amendment_number) = LOWER(?)")
+                params.append(amd_clean)
+        elif filters.version_status is not None:
+            clauses.append(f"{alias}.version_status = ?")
+            params.append(filters.version_status.value)
+        elif filters.only_current_version and not filters.version_id:
+            clauses.append(f"{alias}.version_status = ?")
+            params.append(VersionStatus.CURRENT.value)
+        if filters.only_approved_literal:
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM normative_unit_pages nup "
+                f"WHERE nup.unit_id = {alias}.unit_id) "
+                f"AND NOT EXISTS ("
+                f"SELECT 1 FROM normative_unit_pages nup "
+                f"JOIN regulatory_pages rp ON rp.page_id = nup.page_id "
+                f"WHERE nup.unit_id = {alias}.unit_id "
+                f"AND rp.validation_status != ?)"
+            )
+            params.append(PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION.value)
+        return clauses, params
+
+    @staticmethod
+    def _extract_fts5_terms(
+        query: str,
+        *,
+        filters: SearchFilter | None = None,
+    ) -> list[str]:
+        """Extrai termos/frases FTS5 preservando expressões estruturais e removendo ruído."""
+        grouped_exprs: list[str] = []
+        phrases: list[str] = []
+        residual = query
+
+        # 1. Preserva frases estruturais ("Art. 1º"/"Art. 1" e "Apêndice A") sem perder 1-char
+        for match in _FTS_ARTICLE_PHRASE_RE.finditer(query):
+            num = match.group(1)
+            grouped_exprs.append(f'("Art {num}º" OR "Art {num}")')
+        residual = _FTS_ARTICLE_PHRASE_RE.sub(" ", residual)
+
+        for match in _FTS_APPENDIX_PHRASE_RE.finditer(residual):
+            phrases.append(re.sub(r"\s+", " ", match.group(1)).strip())
+        residual = _FTS_APPENDIX_PHRASE_RE.sub(" ", residual)
+
+        # 2. Tokens já cobertos por filtros SQL explícitos (regulamento / emenda)
+        already_filtered_nums: set[str] = set()
+        if filters is not None:
+            if filters.regulation_number:
+                reg = filters.regulation_number.strip().lower()
+                already_filtered_nums.add(reg)
+            if filters.amendment_number:
+                amd = filters.amendment_number.strip().lower()
+                already_filtered_nums.add(amd)
+                if amd.isdigit():
+                    already_filtered_nums.add(str(int(amd)))
+                    already_filtered_nums.add(f"{int(amd):02d}")
+
+        raw_tokens = _FTS_TOKEN_RE.findall(residual)
+        meaningful = [
+            tok for tok in raw_tokens if len(tok) > 1 and tok.lower() not in _PT_STOPWORDS
+        ]
+        specific = [
+            tok
+            for tok in meaningful
+            if tok.lower() not in _FTS_GENERIC_HEADER_TERMS
+            and tok.lower() not in already_filtered_nums
+        ]
+
+        selected_plain: list[str] = (
+            [*phrases, *specific]
+            if (grouped_exprs or phrases or specific)
+            else (meaningful or raw_tokens)
+        )
+
+        deduped: list[str] = list(dict.fromkeys(grouped_exprs))
+        seen: set[str] = set()
+        for term in selected_plain:
+            key = term.lower()
+            if key and key not in seen:
+                seen.add(key)
+                escaped = term.replace('"', '""')
+                deduped.append(f'"{escaped}"')
+        return deduped
+
+    @classmethod
+    def _build_fts5_match_query(
+        cls,
+        query: str,
+        *,
+        filters: SearchFilter | None = None,
+    ) -> str:
+        terms = cls._extract_fts5_terms(query, filters=filters)
+        return " OR ".join(terms) if terms else ""
+
+    def save_chunks(
+        self,
+        *,
+        version_id: str,
+        chunks: Sequence[NormativeChunk],
+    ) -> list[str]:
+        """Persiste chunks de forma idempotente, sincroniza FTS5 e retorna IDs removidos."""
+        now_iso = datetime.now(UTC).isoformat()
+        with self._connect() as conn, self._transaction(conn):
+            existing_ids = [
+                str(r["chunk_id"])
+                for r in conn.execute(
+                    "SELECT chunk_id FROM normative_chunks WHERE version_id = ?;",
+                    (version_id,),
+                ).fetchall()
+            ]
+            new_ids = {c.chunk_id for c in chunks}
+            removed_ids = [cid for cid in existing_ids if cid not in new_ids]
+
+            conn.execute("DELETE FROM normative_chunks_fts WHERE version_id = ?;", (version_id,))
+            conn.execute("DELETE FROM normative_chunks WHERE version_id = ?;", (version_id,))
+
+            for chunk in chunks:
+                conn.execute(
+                    """
+                    INSERT INTO normative_chunks (
+                        chunk_id, document_id, version_id, unit_id, authority, document_type,
+                        regulation_number, amendment_number, version_status, section_number,
+                        subsection_number, paragraph_number, item_number, title, subpart,
+                        start_page, end_page, pdf_pages_json, printed_pages_json, chunk_index,
+                        original_text, search_text, source_hash, content_hash, validation_status,
+                        embedding_model, embedding_dimension, indexed_at
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?
+                    );
+                    """,
+                    (
+                        chunk.chunk_id,
+                        chunk.document_id,
+                        chunk.version_id,
+                        chunk.unit_id,
+                        chunk.authority,
+                        chunk.document_type,
+                        chunk.regulation_number,
+                        chunk.amendment_number,
+                        chunk.version_status,
+                        chunk.section_number,
+                        chunk.subsection_number,
+                        chunk.paragraph_number,
+                        chunk.item_number,
+                        chunk.title,
+                        chunk.subpart,
+                        chunk.start_page,
+                        chunk.end_page,
+                        json.dumps(list(chunk.pdf_pages)),
+                        json.dumps(list(chunk.printed_pages), ensure_ascii=False),
+                        chunk.chunk_index,
+                        chunk.original_text,
+                        chunk.search_text,
+                        chunk.source_hash,
+                        chunk.content_hash,
+                        chunk.validation_status,
+                        chunk.embedding_model,
+                        chunk.embedding_dimension,
+                        now_iso,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO normative_chunks_fts (
+                        chunk_id, document_id, version_id, regulation_number, amendment_number,
+                        section_number, subsection_number, paragraph_number, item_number, title,
+                        search_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        chunk.chunk_id,
+                        chunk.document_id,
+                        chunk.version_id,
+                        chunk.regulation_number,
+                        chunk.amendment_number,
+                        chunk.section_number,
+                        chunk.subsection_number,
+                        chunk.paragraph_number,
+                        chunk.item_number,
+                        chunk.title,
+                        chunk.search_text,
+                    ),
+                )
+
+        return removed_ids
+
+    def list_chunks(self, version_id: str) -> list[NormativeChunk]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM normative_chunks
+                WHERE version_id = ?
+                ORDER BY start_page ASC, section_number ASC, chunk_index ASC, chunk_id ASC;
+                """,
+                (version_id,),
+            ).fetchall()
+        return [self._row_to_chunk(row) for row in rows]
+
+    def get_chunks_by_ids(self, chunk_ids: Sequence[str]) -> list[NormativeChunk]:
+        if not chunk_ids:
+            return []
+        placeholders = ",".join("?" for _ in chunk_ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM normative_chunks WHERE chunk_id IN ({placeholders});",
+                list(chunk_ids),
+            ).fetchall()
+        by_id = {str(r["chunk_id"]): self._row_to_chunk(r) for r in rows}
+        return [by_id[cid] for cid in chunk_ids if cid in by_id]
+
+    def count_chunks(self, version_id: str | None = None) -> int:
+        with self._connect() as conn:
+            if version_id:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM normative_chunks WHERE version_id = ?;",
+                    (version_id,),
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT COUNT(*) AS cnt FROM normative_chunks;").fetchone()
+        return int(row["cnt"]) if row is not None else 0
+
+    def find_chunks_by_structure(
+        self,
+        *,
+        section_number: str,
+        regulation_number: str | None = None,
+        paragraph_number: str | None = None,
+        item_number: str | None = None,
+        subitem_number: str | None = None,
+        filters: SearchFilter | None = None,
+        limit: int = 10,
+    ) -> list[NormativeChunk]:
+        clauses, params = self._build_chunk_filter_clauses(filters, alias="nc")
+        clauses.append("LOWER(nc.section_number) = LOWER(?)")
+        params.append(section_number.strip())
+
+        if regulation_number and (not filters or not filters.regulation_number):
+            clauses.append("LOWER(nc.regulation_number) = LOWER(?)")
+            params.append(regulation_number.strip())
+        if paragraph_number:
+            clauses.append(
+                "(LOWER(nc.paragraph_number) = LOWER(?) OR nc.paragraph_number = '')"
+            )
+            params.append(paragraph_number.strip())
+        if item_number:
+            clauses.append("(LOWER(nc.item_number) = LOWER(?) OR nc.item_number = '')")
+            params.append(item_number.strip())
+
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT nc.*
+                FROM normative_chunks nc
+                {where_sql}
+                ORDER BY
+                    CASE WHEN LOWER(nc.paragraph_number) = LOWER(?) THEN 0 ELSE 1 END,
+                    CASE WHEN nc.paragraph_number = '' THEN 0 ELSE 1 END,
+                    nc.chunk_index ASC
+                LIMIT ?;
+                """,
+                [*params, (paragraph_number or "").strip(), max(limit, 10)],
+            ).fetchall()
+
+        chunks = [self._row_to_chunk(row) for row in rows]
+        if (paragraph_number or item_number or subitem_number) and len(chunks) > 1:
+            composite_marker = "".join(
+                part.lower() for part in (paragraph_number, item_number, subitem_number) if part
+            )
+            chunks.sort(
+                key=lambda c: (
+                    0 if (composite_marker and composite_marker in c.original_text.lower()) else 1,
+                    c.chunk_index,
+                )
+            )
+        return chunks[:limit]
+
+    def _run_fts5_query(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        match_expr: str,
+        filter_clauses: Sequence[str],
+        filter_params: Sequence[Any],
+        limit: int,
+    ) -> list[tuple[str, float]]:
+        clauses = ["normative_chunks_fts MATCH ?", *filter_clauses]
+        params: list[Any] = [match_expr, *filter_params, limit]
+        where_sql = " AND ".join(clauses)
+        rows = conn.execute(
+            f"""
+            SELECT
+                nc.chunk_id,
+                bm25(
+                    normative_chunks_fts,
+                    0.0, 0.0, 0.0, 3.0, 1.0, 6.0, 3.0, 2.0, 2.0, 4.0, 1.0
+                ) AS rank_score
+            FROM normative_chunks_fts
+            JOIN normative_chunks nc ON nc.chunk_id = normative_chunks_fts.chunk_id
+            WHERE {where_sql}
+            ORDER BY rank_score ASC, nc.chunk_id ASC
+            LIMIT ?;
+            """,
+            params,
+        ).fetchall()
+        # No SQLite FTS5, bm25() retorna valores negativos mais baixos para melhores resultados;
+        # convertemos para escore positivo decrescente para maior clareza.
+        return [(str(r["chunk_id"]), float(-r["rank_score"])) for r in rows]
+
+    def search_chunks_fts(
+        self,
+        *,
+        query: str,
+        filters: SearchFilter | None = None,
+        limit: int = 10,
+    ) -> list[tuple[str, float]]:
+        terms = self._extract_fts5_terms(query, filters=filters)
+        if not terms:
+            return []
+
+        filter_clauses, filter_params = self._build_chunk_filter_clauses(filters, alias="nc")
+        with self._connect() as conn:
+            strict_hits: list[tuple[str, float]] = []
+            # Estágio 1 (alta precisão): quando há 2..5 termos específicos, tenta conjunção AND
+            if 2 <= len(terms) <= 5:
+                strict_hits = self._run_fts5_query(
+                    conn,
+                    match_expr=" AND ".join(terms),
+                    filter_clauses=filter_clauses,
+                    filter_params=filter_params,
+                    limit=limit,
+                )
+
+            broad_hits = self._run_fts5_query(
+                conn,
+                match_expr=" OR ".join(terms),
+                filter_clauses=filter_clauses,
+                filter_params=filter_params,
+                limit=limit,
+            )
+
+        # No SQLite FTS5, termos presentes em >= 50% do corpus recebem IDF limitado a 1e-6
+        # (gerando escore ~1e-6 sem poder discriminativo). Filtramos abaixo de 1e-3 sempre que
+        # existirem candidatos com BM25 discriminativo real.
+        min_informative_bm25 = 1e-3
+        positive_strict = [(cid, sc) for cid, sc in strict_hits if sc > min_informative_bm25]
+        positive_broad = [(cid, sc) for cid, sc in broad_hits if sc > min_informative_bm25]
+
+        if positive_strict:
+            merged: list[tuple[str, float]] = list(positive_strict)
+            seen = {cid for cid, _ in merged}
+            top_strict = merged[0][1]
+            # Complementa com candidatos OR apenas se tiverem relevância lexical comparável
+            for cid, sc in positive_broad:
+                if cid in seen:
+                    continue
+                if sc >= 0.35 * top_strict:
+                    merged.append((cid, sc))
+                    seen.add(cid)
+                if len(merged) >= limit:
+                    break
+            return merged[:limit]
+
+        if positive_broad:
+            return positive_broad[:limit]
+
+        # Fallback para bancos minúsculos onde o único termo buscado ocorre em 100% dos chunks
+        return (strict_hits or broad_hits)[:limit]
+
+    def rebuild_fts_index(self, *, version_id: str | None = None) -> int:
+        """Reconstrói atomicamente o índice derivado FTS5 a partir dos chunks do SQLite."""
+        with self._connect() as conn, self._transaction(conn):
+            if version_id:
+                conn.execute(
+                    "DELETE FROM normative_chunks_fts WHERE version_id = ?;",
+                    (version_id,),
+                )
+                rows = conn.execute(
+                    """
+                    SELECT
+                        chunk_id, document_id, version_id, regulation_number, amendment_number,
+                        section_number, subsection_number, paragraph_number, item_number,
+                        title, search_text
+                    FROM normative_chunks
+                    WHERE version_id = ?
+                    ORDER BY chunk_id ASC;
+                    """,
+                    (version_id,),
+                ).fetchall()
+            else:
+                conn.execute("DELETE FROM normative_chunks_fts;")
+                rows = conn.execute(
+                    """
+                    SELECT
+                        chunk_id, document_id, version_id, regulation_number, amendment_number,
+                        section_number, subsection_number, paragraph_number, item_number,
+                        title, search_text
+                    FROM normative_chunks
+                    ORDER BY chunk_id ASC;
+                    """
+                ).fetchall()
+
+            for r in rows:
+                conn.execute(
+                    """
+                    INSERT INTO normative_chunks_fts (
+                        chunk_id, document_id, version_id, regulation_number, amendment_number,
+                        section_number, subsection_number, paragraph_number, item_number, title,
+                        search_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        str(r["chunk_id"]),
+                        str(r["document_id"]),
+                        str(r["version_id"]),
+                        str(r["regulation_number"]),
+                        str(r["amendment_number"]),
+                        str(r["section_number"]),
+                        str(r["subsection_number"]),
+                        str(r["paragraph_number"]),
+                        str(r["item_number"]),
+                        str(r["title"]),
+                        str(r["search_text"]),
+                    ),
+                )
+        return len(rows)
+
+    def upsert_index_registry(self, entry: IndexRegistryEntry) -> None:
+        with self._connect() as conn, self._transaction(conn):
+            conn.execute(
+                """
+                INSERT INTO vector_index_registry (
+                    collection_name, version_id, document_id, source_hash,
+                    embedding_model, embedding_dimension, chunk_count, indexed_at,
+                    instruction_strategy_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(collection_name, version_id) DO UPDATE SET
+                    document_id = excluded.document_id,
+                    source_hash = excluded.source_hash,
+                    embedding_model = excluded.embedding_model,
+                    embedding_dimension = excluded.embedding_dimension,
+                    chunk_count = excluded.chunk_count,
+                    indexed_at = excluded.indexed_at,
+                    instruction_strategy_version = excluded.instruction_strategy_version;
+                """,
+                (
+                    entry.collection_name,
+                    entry.version_id,
+                    entry.document_id,
+                    entry.source_hash,
+                    entry.embedding_model,
+                    entry.embedding_dimension,
+                    entry.chunk_count,
+                    entry.indexed_at.isoformat(),
+                    entry.instruction_strategy_version,
+                ),
+            )
+
+    def list_index_registry(
+        self,
+        *,
+        collection_name: str | None = None,
+    ) -> list[IndexRegistryEntry]:
+        with self._connect() as conn:
+            if collection_name:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM vector_index_registry
+                    WHERE collection_name = ?
+                    ORDER BY document_id ASC, version_id ASC;
+                    """,
+                    (collection_name,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM vector_index_registry
+                    ORDER BY collection_name ASC, document_id ASC, version_id ASC;
+                    """
+                ).fetchall()
+        return [
+            IndexRegistryEntry(
+                collection_name=str(r["collection_name"]),
+                version_id=str(r["version_id"]),
+                document_id=str(r["document_id"]),
+                source_hash=str(r["source_hash"]),
+                embedding_model=str(r["embedding_model"]),
+                embedding_dimension=int(r["embedding_dimension"]),
+                chunk_count=int(r["chunk_count"]),
+                indexed_at=datetime.fromisoformat(r["indexed_at"]),
+                instruction_strategy_version=str(r["instruction_strategy_version"] or ""),
+            )
+            for r in rows
+        ]
+
+    def delete_index_registry(
+        self,
+        *,
+        collection_name: str,
+        version_id: str | None = None,
+    ) -> None:
+        with self._connect() as conn, self._transaction(conn):
+            if version_id:
+                conn.execute(
+                    """
+                    DELETE FROM vector_index_registry
+                    WHERE collection_name = ? AND version_id = ?;
+                    """,
+                    (collection_name, version_id),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM vector_index_registry WHERE collection_name = ?;",
+                    (collection_name,),
+                )
 
     def checkpoint_wal(self) -> None:
         """Executa checkpoint WAL (TRUNCATE) antes de operações de backup."""

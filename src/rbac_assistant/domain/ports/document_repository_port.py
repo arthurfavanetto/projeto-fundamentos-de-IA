@@ -11,6 +11,11 @@ from rbac_assistant.domain.entities.normative_unit import (
     NormativeReference,
     NormativeTable,
 )
+from rbac_assistant.domain.entities.rag import (
+    IndexRegistryEntry,
+    NormativeChunk,
+    SearchFilter,
+)
 from rbac_assistant.domain.entities.regulatory_document import (
     DocumentType,
     RegulatoryDocument,
@@ -29,6 +34,9 @@ class DocumentRepositoryPort(Protocol):
 
     def initialize(self) -> None:
         """Aplica migrações versionadas de esquema de forma idempotente."""
+
+    def list_applied_migrations(self) -> list[str]:
+        """Lista as versões de migração já aplicadas em `schema_migrations`."""
 
     def upsert_document(self, document: RegulatoryDocument) -> RegulatoryDocument:
         """Cadastra ou atualiza um documento regulatório no catálogo."""
@@ -62,6 +70,9 @@ class DocumentRepositoryPort(Protocol):
 
     def list_versions(self, document_id: str) -> list[DocumentVersion]:
         """Lista todas as versões (vigentes, históricas, propostas) de um documento."""
+
+    def list_all_versions(self) -> list[DocumentVersion]:
+        """Lista todas as versões ingeridas em todo o catálogo."""
 
     def get_current_version(self, document_id: str) -> DocumentVersion | None:
         """Retorna a versão marcada como `current` (vigente) de um documento."""
@@ -132,6 +143,66 @@ class DocumentRepositoryPort(Protocol):
 
     def list_references(self, unit_id: str) -> list[NormativeReference]:
         """Lista referências cruzadas vinculadas a uma unidade normativa."""
+
+    def save_chunks(
+        self,
+        *,
+        version_id: str,
+        chunks: Sequence[NormativeChunk],
+    ) -> list[str]:
+        """Persiste chunks de uma versão, sincroniza FTS5 e retorna chunk_ids obsoletos."""
+
+    def list_chunks(self, version_id: str) -> list[NormativeChunk]:
+        """Lista todos os chunks estruturais de uma versão em ordem determinística."""
+
+    def get_chunks_by_ids(self, chunk_ids: Sequence[str]) -> list[NormativeChunk]:
+        """Recupera chunks estruturais diretamente pelos seus `chunk_id`s."""
+
+    def count_chunks(self, version_id: str | None = None) -> int:
+        """Conta chunks persistidos (de uma versão específica ou do banco inteiro)."""
+
+    def find_chunks_by_structure(
+        self,
+        *,
+        section_number: str,
+        regulation_number: str | None = None,
+        paragraph_number: str | None = None,
+        item_number: str | None = None,
+        subitem_number: str | None = None,
+        filters: SearchFilter | None = None,
+        limit: int = 10,
+    ) -> list[NormativeChunk]:
+        """Busca exata determinística por referência estrutural (ex.: RBAC 43.3, 43.9(a)(1)(i))."""
+
+    def search_chunks_fts(
+        self,
+        *,
+        query: str,
+        filters: SearchFilter | None = None,
+        limit: int = 10,
+    ) -> list[tuple[str, float]]:
+        """Executa busca textual FTS5 (BM25, tolerante a acentos) retornando (chunk_id, score)."""
+
+    def rebuild_fts_index(self, *, version_id: str | None = None) -> int:
+        """Reconstrói o índice derivado FTS5 a partir dos chunks persistidos no SQLite."""
+
+    def upsert_index_registry(self, entry: IndexRegistryEntry) -> None:
+        """Registra/atualiza o estado de indexação vetorial de uma versão em uma coleção."""
+
+    def list_index_registry(
+        self,
+        *,
+        collection_name: str | None = None,
+    ) -> list[IndexRegistryEntry]:
+        """Lista os registros de versões indexadas (opcionalmente filtrados por coleção)."""
+
+    def delete_index_registry(
+        self,
+        *,
+        collection_name: str,
+        version_id: str | None = None,
+    ) -> None:
+        """Remove registro(s) de indexação de uma coleção (ex.: após rebuild)."""
 
     def checkpoint_wal(self) -> None:
         """Executa checkpoint WAL explícito para consistência antes de backups."""

@@ -71,7 +71,7 @@ Todos os chunks persistidos no ChromaDB e referenciados no índice canônico dev
 
 ## 4. Chunking Estrutural Hierárquico
 
-- **Seções dentro da janela alvo (até `max_chunk_tokens`, padrão 1.200):** mantidas íntegras em um único chunk.
-- **Seções extensas (ex.: `43.3`, `43.13`, Apêndices):** divididas exclusivamente nas fronteiras naturais de parágrafos `(a)`, `(b)`, nunca no meio de um inciso ou frase.
-- **Cabeçalho contextual no vetor:** cada chunk indexado no ChromaDB recebe prefixo contextual (ex.: `[RBAC 43 | Emenda XX | Seção 43.3 — ...]`) para melhorar a recuperação semântica, enquanto o **Canonical Store (SSOT)** armazena o texto literal puro.
-- **Reconstrução integral:** ao recuperar qualquer chunk de uma seção via busca semântica, o `ContextAssembler` carrega a seção completa do SSOT para evitar omissão de exceções contidas em outros parágrafos.
+- **Seções dentro da janela alvo (até `max_chunk_tokens`, padrão 1.200 — folga ampla abaixo dos 8.192 tokens do `gemini-embedding-2`):** mantidas íntegras em um único chunk.
+- **Seções extensas (ex.: `43.3`, `43.13`, Apêndices):** divididas nas fronteiras naturais de linhas/parágrafos sem quebrar a rastreabilidade de página e seção.
+- **Representação auxiliar para busca e embeddings:** o prefixo assimétrico do `gemini-embedding-2` (`title: ... | text: ...`) é aplicado apenas de forma efêmera na vetorização; o banco **SQLite** (`/app/data/documents/catalog.sqlite3`) preserva `original_text` puro separado de `normalized_text` (ver Seção 2 do [`README.md`](../../README.md#2-arquitetura-de-dados-sqlite-e-fontes-de-verdade)).
+- **Reconstrução integral:** ao recuperar qualquer chunk via busca híbrida (FTS5 + ChromaDB + RRF), o `HybridNormativeRetriever` hidrata a seção completa a partir do SQLite e valida ao vivo todas as páginas abrangidas.
