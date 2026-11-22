@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import pytest
@@ -325,7 +327,7 @@ class _InMemoryChromaCollection:
             if where is not None and not self._matches_where(payload["metadata"], where):
                 continue
             emb = payload["embedding"]
-            dot = sum(a * b for a, b in zip(q, emb, strict=True))
+            dot = math.sumprod(q, emb)
             distance = 1.0 - dot
             scored.append((distance, rec_id))
         scored.sort(key=lambda pair: (pair[0], pair[1]))
@@ -459,7 +461,12 @@ def test_sqlite_canonical_path_matches_docker_volume_and_ci_uses_node24_actions(
     from rbac_assistant.config.settings import load_settings
 
     settings = load_settings(repo_root / "config" / "settings.yaml")
-    assert str(settings.storage.sqlite_path) == "/app/data/documents/catalog.sqlite3"
+    expected_container_path = PurePosixPath("/app/data/documents/catalog.sqlite3")
+    assert settings.storage.canonical_container_sqlite_path == expected_container_path
+    assert str(settings.storage.canonical_container_sqlite_path) == (
+        "/app/data/documents/catalog.sqlite3"
+    )
+    assert settings.storage.sqlite_path.as_posix() == "/app/data/documents/catalog.sqlite3"
     assert settings.vector_db.collection_name == "regulatory_chunks_ge2_768_v1"
 
     compose_text = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
@@ -475,3 +482,42 @@ def test_sqlite_canonical_path_matches_docker_volume_and_ci_uses_node24_actions(
     assert "quality-and-tests:" in ci_text
     assert "docker-smoke-test:" in ci_text
     assert "normative_chunks_fts" in ci_text
+
+
+@pytest.mark.unit
+def test_sqlite_storage_path_distinguishes_docker_posix_from_windows_and_linux_host_paths() -> (
+    None
+):
+    """Comprova portabilidade entre caminho POSIX do contêiner Docker e paths locais do host."""
+    from rbac_assistant.config.settings import StorageConfig
+
+    # 1. Caminho padrão do contêiner Docker Linux (/app/data/documents/catalog.sqlite3)
+    docker_storage = StorageConfig()
+    assert docker_storage.canonical_container_sqlite_path == PurePosixPath(
+        "/app/data/documents/catalog.sqlite3"
+    )
+    assert docker_storage.sqlite_path.as_posix() == "/app/data/documents/catalog.sqlite3"
+
+    # 2. Simula caminho Windows parsed de YAML (`/app/data/documents` vira `\app\data\documents`)
+    win_container_path = PureWindowsPath(r"\app\data\documents") / "catalog.sqlite3"
+    assert str(win_container_path) == r"\app\data\documents\catalog.sqlite3"
+    assert PurePosixPath(win_container_path.as_posix()) == PurePosixPath(
+        "/app/data/documents/catalog.sqlite3"
+    )
+
+    # 3. Caminho local de host Windows preserva letra de unidade e separadores Windows
+    win_host_path = PureWindowsPath(r"C:\Projetos\projeto-fundamentos-de-IA\data\documents") / (
+        "catalog.sqlite3"
+    )
+    assert str(win_host_path) == (
+        r"C:\Projetos\projeto-fundamentos-de-IA\data\documents\catalog.sqlite3"
+    )
+    assert win_host_path.as_posix() == (
+        "C:/Projetos/projeto-fundamentos-de-IA/data/documents/catalog.sqlite3"
+    )
+
+    # 4. Caminho local Linux/override preserva Path nativo sem forçar /app
+    linux_host_storage = StorageConfig(documents_dir=Path("/tmp/rbac_local_test/documents"))
+    assert linux_host_storage.sqlite_path.as_posix() == (
+        "/tmp/rbac_local_test/documents/catalog.sqlite3"
+    )

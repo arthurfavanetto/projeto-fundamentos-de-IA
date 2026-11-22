@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 import yaml
@@ -25,8 +25,13 @@ class StorageConfig(BaseModel):
 
     @property
     def sqlite_path(self) -> Path:
-        """Caminho completo do banco SQLite do catálogo e unidades normativas."""
+        """Caminho nativo do host/SO para o banco SQLite do catálogo e unidades normativas."""
         return self.documents_dir / self.sqlite_filename
+
+    @property
+    def canonical_container_sqlite_path(self) -> PurePosixPath:
+        """Caminho POSIX canônico do SQLite dentro do contêiner Docker Linux."""
+        return PurePosixPath(self.documents_dir.as_posix()) / self.sqlite_filename
 
     @property
     def raw_pdfs_dir(self) -> Path:

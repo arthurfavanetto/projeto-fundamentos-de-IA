@@ -35,6 +35,7 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
+from rbac_assistant.config.logging_config import configure_cli_logging
 from rbac_assistant.config.settings import load_settings
 from rbac_assistant.domain.ports.rag_ports import EmbeddingPort
 from rbac_assistant.infrastructure.llm.gemini_client import (
@@ -317,19 +318,22 @@ def _run_benchmark_for_backend(
             contextlib.redirect_stdout(sys.stderr),
             tempfile.TemporaryDirectory(prefix="rbac_rag_eval_") as tmp_dir,
         ):
-            _, _, _, factory = build_synthetic_eval_environment(
+            repo, _, _, factory = build_synthetic_eval_environment(
                 Path(tmp_dir),
                 embedding_port=embedder,
                 collection_name=collection,
             )
-            return evaluator.run_full_benchmark(
-                dataset_name="rbac_synthetic_controlled_eval_v2",
-                embedding_backend=backend,
-                cases=cases,
-                retriever_factory=factory,
-                default_threshold=threshold,
-                include_ablations=include_ablations,
-            )
+            try:
+                return evaluator.run_full_benchmark(
+                    dataset_name="rbac_synthetic_controlled_eval_v2",
+                    embedding_backend=backend,
+                    cases=cases,
+                    retriever_factory=factory,
+                    default_threshold=threshold,
+                    include_ablations=include_ablations,
+                )
+            finally:
+                repo.close()
     finally:
         if client is not None:
             client.close()
@@ -398,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    configure_cli_logging(log_level="WARNING", redact_secrets=True)
 
     if args.embedding_backend == "compare":
         det_report = _run_benchmark_for_backend(

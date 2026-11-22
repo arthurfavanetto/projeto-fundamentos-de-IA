@@ -8,11 +8,25 @@ from typing import Any
 
 import pytest
 
+from rbac_assistant.config.settings import AppSettings
 from rbac_assistant.domain.entities.normative_unit import (
     ExtractionMethod,
     PageExtractionMetadata,
     ValidationStatus,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tests_from_host_dotenv_and_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Impede que testes leiam `.env` local do desenvolvedor ou façam chamadas reais à API.
+
+    Em hosts (como Windows 11 local) onde `.env` já contém `GEMINI_API_KEY`, `AppSettings`
+    carregaria credenciais reais durante `pytest`, disparando conexões externas indevidas ao
+    ChromaDB/Gemini. Em produção fora do `pytest`, `.env` continua ativo normalmente.
+    """
+    monkeypatch.setitem(AppSettings.model_config, "env_file", None)
+    for secret_var in ("GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN"):
+        monkeypatch.delenv(secret_var, raising=False)
 
 
 class InMemoryChromaCollection:
