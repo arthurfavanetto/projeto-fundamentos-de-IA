@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 import warnings
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 import yaml
 from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
 class StorageConfig(BaseModel):
@@ -25,8 +25,13 @@ class StorageConfig(BaseModel):
 
     @property
     def sqlite_path(self) -> Path:
-        """Caminho completo do banco SQLite do catálogo e unidades normativas."""
+        """Caminho nativo do host/SO para o banco SQLite do catálogo e unidades normativas."""
         return self.documents_dir / self.sqlite_filename
+
+    @property
+    def canonical_container_sqlite_path(self) -> PurePosixPath:
+        """Caminho POSIX canônico do SQLite dentro do contêiner Docker Linux."""
+        return PurePosixPath(self.documents_dir.as_posix()) / self.sqlite_filename
 
     @property
     def raw_pdfs_dir(self) -> Path:
@@ -212,6 +217,26 @@ class AppSettings(BaseSettings):
         extra="ignore",
         case_sensitive=False,
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Omite leitura implícita de `.env` quando `RBAC_DISABLE_DOTENV=1` está ativo."""
+        del settings_cls
+        disable_dotenv = os.environ.get("RBAC_DISABLE_DOTENV", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if disable_dotenv:
+            return (init_settings, env_settings, file_secret_settings)
+        return (init_settings, env_settings, dotenv_settings, file_secret_settings)
 
     environment: Literal["local", "production", "test"] = "local"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"

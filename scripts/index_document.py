@@ -20,6 +20,7 @@ from typing import Any
 
 from rbac_assistant.application.services.catalog_service import CatalogService
 from rbac_assistant.application.services.indexing_service import IndexingService
+from rbac_assistant.config.logging_config import configure_cli_logging
 from rbac_assistant.config.settings import AppSettings, load_settings
 from rbac_assistant.domain.ports.rag_ports import EmbeddingPort
 from rbac_assistant.infrastructure.llm.gemini_client import (
@@ -167,6 +168,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("A reconstrução completa da coleção exige --confirm explícito.")
 
     settings = load_settings()
+    configure_cli_logging(
+        log_level=settings.log_level,
+        redact_secrets=settings.security.audit.redact_secrets,
+    )
     require_api_key = bool(args.document_id or args.rebuild_collection)
     service, gemini_client = _build_indexing_service(
         settings=settings,

@@ -217,6 +217,9 @@ class DeterministicEvalSemanticEmbedder:
 
     def __init__(self, *, dimensions: int = 768) -> None:
         self._dimensions = dimensions
+        self._token_hash_cache: dict[str, tuple[int, float]] = {}
+        self._concept_hash_cache: dict[str, tuple[int, float]] = {}
+        self._query_cache: dict[str, tuple[float, ...]] = {}
 
     @property
     def model_name(self) -> str:
@@ -236,21 +239,35 @@ class DeterministicEvalSemanticEmbedder:
             tok for tok in re.findall(r"[a-z0-9]+", ascii_text) if tok not in self._STOPWORDS
         ]
         vec = [0.0] * self._dimensions
+        tok_cache = self._token_hash_cache
+        concept_cache = self._concept_hash_cache
+        dims = self._dimensions
         for tok in tokens:
-            tok_digest = hashlib.sha256(f"tok:{tok}".encode()).digest()
-            tok_idx = int.from_bytes(tok_digest[:2], "big") % self._dimensions
-            tok_sign = 1.0 if (tok_digest[2] & 1) == 0 else -1.0
-            vec[tok_idx] += tok_sign
+            tok_entry = tok_cache.get(tok)
+            if tok_entry is None:
+                tok_digest = hashlib.sha256(f"tok:{tok}".encode()).digest()
+                tok_entry = (
+                    int.from_bytes(tok_digest[:2], "big") % dims,
+                    1.0 if (tok_digest[2] & 1) == 0 else -1.0,
+                )
+                tok_cache[tok] = tok_entry
+            vec[tok_entry[0]] += tok_entry[1]
             mapped = self._CONCEPT_MAP.get(tok)
             if mapped is not None:
                 concept_name, weight = mapped
-                c_digest = hashlib.sha256(f"concept:{concept_name}".encode()).digest()
-                c_idx = int.from_bytes(c_digest[:2], "big") % self._dimensions
-                c_sign = 1.0 if (c_digest[2] & 1) == 0 else -1.0
-                vec[c_idx] += c_sign * weight
+                c_entry = concept_cache.get(concept_name)
+                if c_entry is None:
+                    c_digest = hashlib.sha256(f"concept:{concept_name}".encode()).digest()
+                    c_entry = (
+                        int.from_bytes(c_digest[:2], "big") % dims,
+                        1.0 if (c_digest[2] & 1) == 0 else -1.0,
+                    )
+                    concept_cache[concept_name] = c_entry
+                vec[c_entry[0]] += c_entry[1] * weight
 
-        norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-        return tuple(v / norm for v in vec)
+        norm = math.sqrt(math.sumprod(vec, vec)) or 1.0
+        inv_norm = 1.0 / norm
+        return tuple(v * inv_norm for v in vec)
 
     def embed_documents(
         self,
@@ -269,7 +286,12 @@ class DeterministicEvalSemanticEmbedder:
         return [self._encode(item) for item in combined]
 
     def embed_query(self, text: str) -> tuple[float, ...]:
-        return self._encode(text)
+        cached = self._query_cache.get(text)
+        if cached is not None:
+            return cached
+        vector = self._encode(text)
+        self._query_cache[text] = vector
+        return vector
 
 
 def load_eval_dataset(path: Path = EVAL_DATASET_PATH) -> tuple[EvaluationCase, ...]:
@@ -394,6 +416,7 @@ def build_synthetic_eval_environment(
     *,
     embedding_port: EmbeddingPort | None = None,
     collection_name: str = "eval_synthetic_ge2_768_v1",
+    use_in_memory_db: bool = True,
 ) -> tuple[
     SqliteDocumentRepository,
     ChromaVectorStore,
@@ -401,7 +424,8 @@ def build_synthetic_eval_environment(
     Callable[..., HybridNormativeRetriever],
 ]:
     """Constrói base SQLite + ChromaDB em memória com 4 documentos sintéticos controlados."""
-    repo = SqliteDocumentRepository(tmp_path / "eval_catalog.sqlite3")
+    db_path = Path(":memory:") if use_in_memory_db else (tmp_path / "eval_catalog.sqlite3")
+    repo = SqliteDocumentRepository(db_path, reuse_connection=True)
     repo.initialize()
     catalog = CatalogService(repo)
     validation = ValidationService(policy=ValidationPolicy.REVIEW_ON_DEMAND)

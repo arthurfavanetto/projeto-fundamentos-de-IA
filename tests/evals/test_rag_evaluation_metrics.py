@@ -15,6 +15,7 @@ Verifica critérios metodológicos, de recuperação, granularidade normativa e 
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -37,15 +38,26 @@ def test_synthetic_rag_evaluation_passes_all_quality_granularity_and_governance_
     cases = load_eval_dataset()
     assert len(cases) >= 40
 
-    _, _, _, factory = build_synthetic_eval_environment(tmp_path)
-    evaluator = RagEvaluator()
-    report = evaluator.run_full_benchmark(
-        dataset_name="rbac_synthetic_controlled_eval_v2",
-        embedding_backend="deterministic",
-        cases=cases,
-        retriever_factory=factory,
-        default_threshold=0.85,
-        include_ablations=True,
+    started_at = time.perf_counter()
+    repo, _, _, factory = build_synthetic_eval_environment(tmp_path)
+    try:
+        evaluator = RagEvaluator()
+        report = evaluator.run_full_benchmark(
+            dataset_name="rbac_synthetic_controlled_eval_v2",
+            embedding_backend="deterministic",
+            cases=cases,
+            retriever_factory=factory,
+            default_threshold=0.85,
+            include_ablations=True,
+        )
+    finally:
+        repo.close()
+    elapsed_seconds = time.perf_counter() - started_at
+
+    # Regressão de performance: benchmark completo offline não deve travar nem levar minutos
+    # (limite conservador de 30s para tolerar overhead de pytest-cov em CI/Windows)
+    assert elapsed_seconds < 30.0, (
+        f"Avaliação sintética completa demorou {elapsed_seconds:.2f}s (limite: 30.0s)."
     )
 
     by_mode = {m.mode: m for m in report.mode_metrics}
@@ -139,6 +151,7 @@ def test_citation_validator_five_dimension_suite_passes_standalone() -> None:
 def test_evaluate_rag_cli_outputs_valid_json_table_and_blocks_real_backend_without_key(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     rc_table = eval_cli.main(["--per-query"])
     assert rc_table == 0
@@ -152,14 +165,18 @@ def test_evaluate_rag_cli_outputs_valid_json_table_and_blocks_real_backend_witho
 
     rc_json = eval_cli.main(["--json"])
     assert rc_json == 0
-    payload = json.loads(capsys.readouterr().out)
+    captured_json = capsys.readouterr()
+    payload = json.loads(captured_json.out)
     assert payload["total_queries"] >= 40
     assert payload["embedding_backend"] == "deterministic"
     assert len(payload["mode_metrics"]) == 4
     assert len(payload["ablation_results"]) >= 6
     assert len(payload["threshold_sweep"]) >= 5
 
-    # Sem GEMINI_API_KEY, o modo manual real falha de forma segura (sem chamada externa)
+    # Mesmo que exista um `.env` local no host contendo GEMINI_API_KEY (ex.: Windows local),
+    # o isolamento da suíte impede vazamento de credencial e chamadas reais à API Gemini.
+    (tmp_path / ".env").write_text("GEMINI_API_KEY=AIzaFakeShouldNeverBeReadInTests\n", "utf-8")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(ValueError, match="GEMINI_API_KEY"):
         eval_cli.main(["--embedding-backend", "gemini-embedding-2"])

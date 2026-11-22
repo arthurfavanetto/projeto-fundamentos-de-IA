@@ -11,6 +11,7 @@ from pathlib import Path
 from rbac_assistant.application.services.catalog_service import CatalogService
 from rbac_assistant.application.services.validation_service import ValidationService
 from rbac_assistant.application.use_cases.get_normative_section import GetNormativeSectionUseCase
+from rbac_assistant.config.logging_config import configure_cli_logging
 from rbac_assistant.config.settings import load_settings
 from rbac_assistant.domain.entities.regulatory_document import ValidationPolicy
 from rbac_assistant.infrastructure.storage.sqlite_document_repository import (
@@ -34,6 +35,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     settings = load_settings()
+    configure_cli_logging(
+        log_level=settings.log_level,
+        redact_secrets=settings.security.audit.redact_secrets,
+    )
     base_dir = args.documents_dir or settings.storage.documents_dir
     repository = SqliteDocumentRepository(
         base_dir / settings.storage.sqlite_filename,

@@ -26,6 +26,7 @@ Recursos implementados:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -183,6 +184,15 @@ class GeminiClientAdapter:
 
     def _get_client(self) -> Any:
         if self._client is None:
+            if os.environ.get("RBAC_BLOCK_REAL_GEMINI_API", "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+            }:
+                raise RuntimeError(
+                    "Chamada real à Gemini API bloqueada (RBAC_BLOCK_REAL_GEMINI_API=1). "
+                    "Em testes automatizados, injete um `sdk_client` simulado."
+                )
             timeout_ms = max(1000, int(self._timeout_seconds * 1000))
             http_options = genai_types.HttpOptions(timeout=timeout_ms)
             self._client = genai.Client(

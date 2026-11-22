@@ -1097,3 +1097,131 @@ def test_chroma_amendment_number_key_prevents_top_k_eviction_across_competing_am
         assert all("_emd_05_" in vh.chunk_id for vh in res.diagnostics.vector_hits)
 
 
+@pytest.mark.integration
+def test_cli_json_stdout_pure_warnings_on_stderr_chroma_fallback_and_dotenv_isolation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Valida CLI `--json` puro em stdout, warnings em stderr e fallback com Chroma offline.
+
+    Reproduz o cenário ocorrido no Windows quando o vetor falha (`StorageConnectionError`):
+    - stdout em `--json` deve conter exclusivamente um documento JSON válido;
+    - `hybrid_vector_search_degraded` deve ir para stderr (não suprimido, não em stdout);
+    - fallback governado para SQLite FTS5 deve permanecer auditável em `observations`;
+    - modos texto e `--debug` continuam íntegros;
+    - um `.env` local presente no diretório de trabalho não vaza `GEMINI_API_KEY` para a CLI.
+    """
+    repo, catalog, ingestion, validate_uc, vector_store, _ = _build_env(tmp_path)
+    version_id = _ingest_synthetic_rbac(ingestion, tmp_path)
+    validate_uc.execute(
+        PageReviewRequestDTO(
+            document_id="synth_rbac_43",
+            version_id=version_id,
+            reviewer="cli_json_reviewer",
+            decision=ReviewDecision.APPROVE,
+            confirmed=True,
+            page_numbers=(2, 3),
+        )
+    )
+    embedder = _DeterministicSemanticEmbedder()
+    IndexingService(
+        repository=repo,
+        catalog_service=catalog,
+        chunker=StructuralNormativeChunker(),
+        vector_store=vector_store,
+        embedding_port=embedder,
+        default_collection_name="test_cli_degraded",
+    ).index_document(document_id="synth_rbac_43")
+
+    docs_dir = tmp_path / "documents"
+
+    # 1. Simula ChromaDB indisponível com embedder ativo: força `hybrid_vector_search_degraded`
+    class _OfflineChromaStore:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def ensure_collection_compatible(self, **_kwargs: object) -> object:
+            raise StorageConnectionError("ChromaDB simulado indisponível em chromadb:8000")
+
+    class _FakeCliGeminiClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaFakeKeyOnlyForOfflineChromaFallbackTest")
+    monkeypatch.setattr(query_cli, "ChromaVectorStore", _OfflineChromaStore)
+    monkeypatch.setattr(query_cli, "GeminiClientAdapter", _FakeCliGeminiClient)
+    monkeypatch.setattr(query_cli, "GeminiEmbeddingAdapter", lambda _client: embedder)
+    capsys.readouterr()
+
+    # 1a. Modo --json com falha vetorial: stdout = JSON puro; stderr = warning preservado
+    rc_json = query_cli.main(
+        [
+            "--question",
+            "RBAC 43.3",
+            "--no-llm",
+            "--json",
+            "--documents-dir",
+            str(docs_dir),
+            "--collection",
+            "test_cli_degraded",
+        ]
+    )
+    assert rc_json == 0
+    captured_json = capsys.readouterr()
+    assert "hybrid_vector_search_degraded" not in captured_json.out
+    assert "hybrid_vector_search_degraded" in captured_json.err
+    payload = json.loads(captured_json.out)
+    assert payload["found"] is True
+    assert payload["is_literal_validated"] is True
+    assert payload["used_fallback_without_llm"] is True
+    assert any("Busca vetorial indisponível" in obs for obs in payload["observations"])
+
+    # 1b. Modo texto + --debug sob a mesma degradação vetorial: mantém saída legível e aviso
+    rc_debug = query_cli.main(
+        [
+            "--question",
+            "RBAC 43.3",
+            "--no-llm",
+            "--debug",
+            "--documents-dir",
+            str(docs_dir),
+            "--collection",
+            "test_cli_degraded",
+        ]
+    )
+    assert rc_debug == 0
+    captured_debug = capsys.readouterr()
+    assert "=== TEXTO NORMATIVO" in captured_debug.out
+    assert "=== DIAGNÓSTICO DO PIPELINE RAG (--debug) ===" in captured_debug.out
+    assert "hybrid_vector_search_degraded" not in captured_debug.out
+    assert "hybrid_vector_search_degraded" in captured_debug.err
+
+    # 2. Isolamento de `.env`: mesmo com `.env` contendo chave no cwd, CLI sem env var não a lê
+    (tmp_path / ".env").write_text("GEMINI_API_KEY=AIzaFakeDotEnvLeakTest123456\n", "utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    rc_isolated = query_cli.main(
+        [
+            "--question",
+            "RBAC 43.3",
+            "--no-llm",
+            "--json",
+            "--documents-dir",
+            str(docs_dir),
+            "--collection",
+            "test_cli_degraded",
+        ]
+    )
+    assert rc_isolated == 0
+    captured_iso = capsys.readouterr()
+    assert "hybrid_vector_search_degraded" not in captured_iso.err
+    isolated_payload = json.loads(captured_iso.out)
+    assert isolated_payload["found"] is True
+    assert isolated_payload["is_literal_validated"] is True
+
+
+
