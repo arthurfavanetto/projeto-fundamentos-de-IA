@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import structlog
 
 from rbac_assistant.application.services.validation_service import ValidationService
+from rbac_assistant.domain.entities.document_version import DocumentVersion
 from rbac_assistant.domain.entities.normative_unit import StructureStatus
 from rbac_assistant.domain.entities.rag import (
     EvidenceDecisionDiagnostic,
@@ -39,10 +40,11 @@ from rbac_assistant.domain.entities.rag import (
 )
 from rbac_assistant.domain.entities.regulatory_document import (
     DocumentType,
+    RegulatoryDocument,
     ValidationPolicy,
     VersionStatus,
 )
-from rbac_assistant.domain.entities.regulatory_page import PageValidationStatus
+from rbac_assistant.domain.entities.regulatory_page import PageValidationStatus, RegulatoryPage
 from rbac_assistant.domain.exceptions import (
     EmbeddingCompatibilityError,
     LLMServiceError,
@@ -454,6 +456,11 @@ class HybridNormativeRetriever:
         blocked_evidences: list[FusedEvidence] = []
         evidence_decisions: list[EvidenceDecisionDiagnostic] = []
         seen_sections: set[tuple[str, str]] = set()
+        # Cache efêmero restrito a uma única chamada `retrieve()` para eliminar consultas N+1
+        # repetidas ao SQLite (sem estado persistente entre consultas distintas).
+        docs_cache: dict[str, RegulatoryDocument | None] = {}
+        versions_cache: dict[str, DocumentVersion | None] = {}
+        pages_cache: dict[tuple[str, tuple[int, ...]], list[RegulatoryPage]] = {}
 
         for acc in fused:
             hydrated_chunk = chunks_by_id.get(acc.chunk_id)
@@ -477,7 +484,13 @@ class HybridNormativeRetriever:
                 )
                 continue
 
-            evidence = self._hydrate_evidence_from_ssot(chunk=hydrated_chunk, acc=acc)
+            evidence = self._hydrate_evidence_from_ssot(
+                chunk=hydrated_chunk,
+                acc=acc,
+                docs_cache=docs_cache,
+                versions_cache=versions_cache,
+                pages_cache=pages_cache,
+            )
             if evidence is None:
                 continue
             if not self._matches_post_hydration_filters(evidence, effective_filters):
@@ -849,10 +862,25 @@ class HybridNormativeRetriever:
         *,
         chunk: NormativeChunk,
         acc: _RrfAccumulator,
+        docs_cache: dict[str, RegulatoryDocument | None] | None = None,
+        versions_cache: dict[str, DocumentVersion | None] | None = None,
+        pages_cache: dict[tuple[str, tuple[int, ...]], list[RegulatoryPage]] | None = None,
     ) -> FusedEvidence | None:
         """Recupera texto literal e status ao vivo das páginas diretamente do SQLite (SSOT)."""
-        document = self._repository.get_document(chunk.document_id)
-        version = self._repository.get_version(chunk.version_id)
+        if docs_cache is not None and chunk.document_id in docs_cache:
+            document = docs_cache[chunk.document_id]
+        else:
+            document = self._repository.get_document(chunk.document_id)
+            if docs_cache is not None:
+                docs_cache[chunk.document_id] = document
+
+        if versions_cache is not None and chunk.version_id in versions_cache:
+            version = versions_cache[chunk.version_id]
+        else:
+            version = self._repository.get_version(chunk.version_id)
+            if versions_cache is not None:
+                versions_cache[chunk.version_id] = version
+
         if document is None or version is None:
             return None
 
@@ -881,7 +909,14 @@ class HybridNormativeRetriever:
             structure_status = StructureStatus.PARSED
             title = chunk.title
 
-        pages = self._repository.get_pages(version.version_id, page_numbers=page_numbers)
+        page_key = (version.version_id, tuple(page_numbers))
+        if pages_cache is not None and page_key in pages_cache:
+            pages = pages_cache[page_key]
+        else:
+            pages = self._repository.get_pages(version.version_id, page_numbers=page_numbers)
+            if pages_cache is not None:
+                pages_cache[page_key] = pages
+
         assessment = self._validation_service.evaluate_section(
             section_number=chunk.section_number,
             pages=pages,

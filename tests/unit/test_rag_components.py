@@ -521,3 +521,52 @@ def test_sqlite_storage_path_distinguishes_docker_posix_from_windows_and_linux_h
     assert linux_host_storage.sqlite_path.as_posix() == (
         "/tmp/rbac_local_test/documents/catalog.sqlite3"
     )
+
+
+@pytest.mark.unit
+def test_sqlite_in_memory_repository_and_retriever_per_request_ssot_dedup(
+    tmp_path: Path,
+) -> None:
+    """Valida SQLite `:memory:` sem arquivos em disco e ausência de N+1 na mesma chamada."""
+    from rbac_assistant.infrastructure.storage.sqlite_document_repository import (
+        SqliteDocumentRepository,
+    )
+    from tests.evals.synthetic_rag_eval_fixture import build_synthetic_eval_environment
+
+    # 1. Context manager com `:memory:` aplica migrações e não cria arquivos em tmp_path
+    with SqliteDocumentRepository(Path(":memory:")) as mem_repo:
+        mem_repo.initialize()
+        assert mem_repo.count_chunks() == 0
+        assert mem_repo.get_document("inexistente") is None
+    assert list(tmp_path.iterdir()) == []
+
+    # 2. Dentro de uma única chamada `retrieve()`, `get_document` não repete leituras por chunk
+    repo, _vs, _emb, factory = build_synthetic_eval_environment(tmp_path, use_in_memory_db=True)
+    try:
+        assert list(tmp_path.iterdir()) == []
+        retriever = factory("lexical_fts5_only", 0.85)
+        get_doc_calls = 0
+        orig_get_doc = repo.get_document
+
+        def _counting_get_doc(document_id: str) -> Any:
+            nonlocal get_doc_calls
+            get_doc_calls += 1
+            return orig_get_doc(document_id)
+
+        repo.get_document = _counting_get_doc  # type: ignore[method-assign]
+        res1 = retriever.retrieve(query="manutenção aeronáutica inspeção aeronave", top_k=5)
+        assert len(res1.evidences) >= 2
+        unique_docs_1 = {ev.document_id for ev in res1.evidences} | {
+            ev.document_id for ev in res1.blocked_evidences
+        }
+        # No máximo 1 chamada get_document por documento único hidratado nessa requisição
+        assert get_doc_calls <= len(unique_docs_1) + 1
+
+        # Chamada subsequente realiza nova leitura ao vivo do SSOT (zero cache global)
+        calls_before_second = get_doc_calls
+        res2 = retriever.retrieve(query="manutenção aeronáutica inspeção aeronave", top_k=5)
+        assert len(res2.evidences) == len(res1.evidences)
+        assert get_doc_calls > calls_before_second
+    finally:
+        repo.close()
+

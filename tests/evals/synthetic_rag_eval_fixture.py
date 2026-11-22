@@ -219,6 +219,7 @@ class DeterministicEvalSemanticEmbedder:
         self._dimensions = dimensions
         self._token_hash_cache: dict[str, tuple[int, float]] = {}
         self._concept_hash_cache: dict[str, tuple[int, float]] = {}
+        self._query_cache: dict[str, tuple[float, ...]] = {}
 
     @property
     def model_name(self) -> str:
@@ -285,7 +286,12 @@ class DeterministicEvalSemanticEmbedder:
         return [self._encode(item) for item in combined]
 
     def embed_query(self, text: str) -> tuple[float, ...]:
-        return self._encode(text)
+        cached = self._query_cache.get(text)
+        if cached is not None:
+            return cached
+        vector = self._encode(text)
+        self._query_cache[text] = vector
+        return vector
 
 
 def load_eval_dataset(path: Path = EVAL_DATASET_PATH) -> tuple[EvaluationCase, ...]:
@@ -410,6 +416,7 @@ def build_synthetic_eval_environment(
     *,
     embedding_port: EmbeddingPort | None = None,
     collection_name: str = "eval_synthetic_ge2_768_v1",
+    use_in_memory_db: bool = True,
 ) -> tuple[
     SqliteDocumentRepository,
     ChromaVectorStore,
@@ -417,7 +424,8 @@ def build_synthetic_eval_environment(
     Callable[..., HybridNormativeRetriever],
 ]:
     """Constrói base SQLite + ChromaDB em memória com 4 documentos sintéticos controlados."""
-    repo = SqliteDocumentRepository(tmp_path / "eval_catalog.sqlite3", reuse_connection=True)
+    db_path = Path(":memory:") if use_in_memory_db else (tmp_path / "eval_catalog.sqlite3")
+    repo = SqliteDocumentRepository(db_path, reuse_connection=True)
     repo.initialize()
     catalog = CatalogService(repo)
     validation = ValidationService(policy=ValidationPolicy.REVIEW_ON_DEMAND)

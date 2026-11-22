@@ -257,10 +257,12 @@ class SqliteDocumentRepository:
         reuse_connection: bool = False,
     ) -> None:
         self._db_path = db_path
+        self._is_memory = str(db_path) == ":memory:"
         self._busy_timeout_ms = busy_timeout_ms
-        self._reuse_connection = reuse_connection
+        # Bancos `:memory:` exigem reutilização da mesma conexão durante o ciclo de vida do repo
+        self._reuse_connection = True if self._is_memory else reuse_connection
         self._shared_conn: sqlite3.Connection | None = None
-        self._parent_ensured = False
+        self._parent_ensured = self._is_memory
 
     @property
     def db_path(self) -> Path:
@@ -282,14 +284,16 @@ class SqliteDocumentRepository:
         if not self._parent_ensured:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._parent_ensured = True
+        conn_target: str | Path = ":memory:" if self._is_memory else self._db_path
         conn = sqlite3.connect(
-            self._db_path,
+            conn_target,
             timeout=self._busy_timeout_ms / 1000.0,
             isolation_level=None,
         )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA synchronous = FULL;")
+        if not self._is_memory:
+            conn.execute("PRAGMA synchronous = FULL;")
         conn.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms};")
         return conn
 
@@ -318,9 +322,10 @@ class SqliteDocumentRepository:
             raise
 
     def initialize(self) -> None:
-        """Aplica WAL persistente e todas as migrações SQL pendentes de forma idempotente."""
+        """Aplica WAL persistente (em disco) e todas as migrações SQL pendentes."""
         with self._connect() as conn:
-            conn.execute("PRAGMA journal_mode = WAL;")
+            if not self._is_memory:
+                conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schema_migrations (

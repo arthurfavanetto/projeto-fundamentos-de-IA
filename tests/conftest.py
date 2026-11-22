@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 
 from rbac_assistant.config.settings import AppSettings
 from rbac_assistant.domain.entities.normative_unit import (
@@ -17,8 +19,10 @@ from rbac_assistant.domain.entities.normative_unit import (
 
 
 @pytest.fixture(autouse=True)
-def _isolate_tests_from_host_dotenv_and_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Impede que testes leiam `.env` local do desenvolvedor ou façam chamadas reais à API.
+def _isolate_tests_from_host_dotenv_and_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Impede vazamento de `.env` local e estado de logging entre testes/workers xdist.
 
     Em hosts (como Windows 11 local) onde `.env` já contém `GEMINI_API_KEY`, `AppSettings`
     carregaria credenciais reais durante `pytest`, disparando conexões externas indevidas ao
@@ -27,6 +31,10 @@ def _isolate_tests_from_host_dotenv_and_secrets(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setitem(AppSettings.model_config, "env_file", None)
     for secret_var in ("GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN"):
         monkeypatch.delenv(secret_var, raising=False)
+    try:
+        yield
+    finally:
+        structlog.reset_defaults()
 
 
 class InMemoryChromaCollection:
