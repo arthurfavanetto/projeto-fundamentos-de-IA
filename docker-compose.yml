@@ -32,6 +32,11 @@ services:
         limits:
           cpus: "1.0"
           memory: 1536M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   rbac-bot:
     build:
@@ -65,6 +70,13 @@ services:
         limits:
           cpus: "1.0"
           memory: 1024M
+    # Rotaciona apenas logs operacionais stdout/stderr do contêiner; AuditPort permanece
+    # contrato (Protocol) sem gravador JSONL em /app/logs e revisões humanas ficam no SQLite.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 networks:
   rbac_internal_net:
