@@ -1,14 +1,15 @@
 # Guia Seguro de Setup, Reconstrução e Operação Docker
 
-Este documento consolida a configuração real de [`Dockerfile`](../Dockerfile), [`docker/chromadb.Dockerfile`](../docker/chromadb.Dockerfile), [`docker-compose.yml`](../docker-compose.yml) e [`.dockerignore`](../.dockerignore), incluindo o procedimento seguro de liberação pós-incidente WSL/VHDX e a lista de comandos estritamente proibidos.
+Este documento consolida a configuração real de [`Dockerfile`](../Dockerfile), [`docker/chromadb.Dockerfile`](../docker/chromadb.Dockerfile), [`docker-compose.yml`](../docker-compose.yml) e [`.dockerignore`](../.dockerignore), incluindo rotação de logs operacionais, auditoria persistente em `/app/logs`, montagem somente leitura de `config/access_control.yaml`, backup verificável e procedimentos proibidos.
 
 ---
 
 ## 1. Pré-requisitos
 
 - **Windows 11 64-bit** com **WSL2** habilitado e **Docker Desktop** (backend WSL2) — ou host Linux com Docker Engine + Docker Compose v2.
-- **Python 3.12** e **`uv`** (para execução local de testes e linters fora do contêiner).
-- Arquivo `.env` local na raiz do repositório (criado a partir de [`.env.example`](../.env.example), **nunca versionado no Git**).
+- **Python 3.12** e **`uv`** (para execução local de testes, linters e verificação de backups fora do contêiner).
+- Arquivo `.env` local na raiz do repositório (a partir de [`.env.example`](../.env.example), **nunca versionado no Git**).
+- Arquivo `config/access_control.yaml` local (a partir de [`config/access_control.example.yaml`](../config/access_control.example.yaml), **nunca versionado no Git**) com os Telegram User IDs numéricos autorizados.
 
 ### Configuração obrigatória do `.env` (política única Gemini Free Tier)
 ```env
@@ -22,189 +23,119 @@ ENVIRONMENT=local
 LOG_LEVEL=INFO
 ```
 - Mantenha `GEMINI_API_KEY` e `TELEGRAM_BOT_TOKEN` preenchidos apenas no `.env` local.
-- **Nunca** defina `RBAC_DISABLE_DOTENV=1` nem `RBAC_BLOCK_REAL_GEMINI_API=1` no `.env` de produção (são travas exclusivas de `tests/conftest.py`).
+- **Nunca** defina `RBAC_DISABLE_DOTENV=1`, `RBAC_BLOCK_REAL_GEMINI_API=1` ou `RBAC_BLOCK_REAL_TELEGRAM_API=1` no `.env` operacional (são travas exclusivas de `tests/conftest.py`).
 - Mantenha o projeto Google da `GEMINI_API_KEY` **sem Cloud Billing vinculado**.
 
 ---
 
 ## 2. Pré-condição Obrigatória no Windows — Verificação de VHDX / WSL
 
-> **NÃO inicie o Docker Desktop enquanto a cópia forense `F:\DockerRecovery\docker_data_working.vhdx` permanecer montada ou anexada como `/dev/sdd` no WSL.**
+> **NÃO inicie o Docker Desktop enquanto a cópia forense `F:\DockerRecovery\docker_data_working.vhdx` (UUID `f56ccfa7-68c4-4c65-b5a6-33667a8c7998`) permanecer montada ou anexada no WSL.**
 
-Execute no PowerShell (como Administrador) somente quando você decidir liberar o disco de investigação:
+Execute no PowerShell (como Administrador):
 
 ```powershell
-# 1. Conferir se existe ponto de montagem ou disco anexado no Ubuntu-24.04 (somente leitura)
-wsl -d Ubuntu-24.04 -- lsblk -o NAME,SIZE,RO,MOUNTPOINT,FSTYPE
-wsl -d Ubuntu-24.04 -- findmnt | Select-String "sdd|DockerRecovery"
+# 1. Conferir se o UUID f56ccfa7-68c4-4c65-b5a6-33667a8c7998 ainda aparece no Ubuntu-24.04
+wsl -d Ubuntu-24.04 -- lsblk -o NAME,UUID,SIZE,RO,MOUNTPOINT,FSTYPE
 
-# 2. Somente com sua autorização explícita, se /dev/sdd ainda estiver montado/anexado:
-# wsl -d Ubuntu-24.04 -u root -- umount /mnt/<ponto_de_montagem_se_houver>
-# wsl --unmount \\.\PHYSICALDRIVE<N>   # ou: wsl --unmount "F:\DockerRecovery\docker_data_working.vhdx"
+# 2. Somente se o UUID aparecer na saída acima:
+#    a) Se houver ponto de montagem ativo: wsl -d Ubuntu-24.04 -u root -- umount "<MOUNTPOINT>"
+#    b) Desanexar ESPECIFICAMENTE a cópia de trabalho (NUNCA `wsl --unmount` sem caminho!):
+#       wsl --unmount "F:\DockerRecovery\docker_data_working.vhdx"
 ```
 
-- **Nunca** exclua, mova, renomeie ou execute `fsck`/`e2fsck`/`mkfs` sobre:
-  - `C:\Users\Desktop\AppData\Local\Docker\wsl\disk\docker_data.vhdx`
-  - `D:\DockerRecovery\docker_data_recovery_2026-11-22.vhdx`
-  - `F:\DockerRecovery\docker_data_working.vhdx`
-- **Nunca** execute `wsl --unregister Ubuntu-24.04`.
+- **Nunca** exclua, mova, renomeie ou execute `fsck`/`e2fsck`/`mkfs` sobre `C:\Users\Desktop\AppData\Local\Docker\wsl\disk\docker_data.vhdx`, `D:\DockerRecovery\docker_data_recovery_2026-11-22.vhdx` ou `F:\DockerRecovery\docker_data_working.vhdx`.
+- **Nunca** execute `wsl --unregister Ubuntu-24.04` nem `wsl --shutdown` para liberar o disco.
 
 ---
 
 ## 3. Arquitetura Real do Docker Compose (`docker-compose.yml`)
 
-| Serviço | Container | Imagem / Build | Usuário | Redes | Volumes | Limites | Healthcheck |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `chromadb` | `rbac-chromadb` | `docker/chromadb.Dockerfile` (`chromadb/chroma:1.5.9`) | `10001:10001` (non-root) | `rbac_internal_net` (`internal: true`) | `chroma_data:/data` | `1.0 CPU / 1536M` | `GET /api/v2/heartbeat` (porta `8000`, `expose` apenas, sem `ports:` no host) |
-| `rbac-bot` | `rbac-bot` | `Dockerfile` (`python:3.12-slim-bookworm` + `uv 0.13.8`) | `10001:10001` (non-root) | `rbac_internal_net` + `rbac_egress_net` | `regulatory_documents:/app/data/documents`, `audit_logs:/app/logs` | `1.0 CPU / 1024M` | `python -m rbac_assistant.healthcheck` |
+| Serviço | Container | Imagem / Build | Usuário | Redes | Volumes / Mounts | Rotação Logs Docker | Limites | Healthcheck |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `chromadb` | `rbac-chromadb` | `docker/chromadb.Dockerfile` (`chromadb/chroma:1.5.9`) | `10001:10001` | `rbac_internal_net` (`internal: true`) | `chroma_data:/data` | `json-file` (`10m` x `5`) | `1.0 CPU / 1536M` | `GET /api/v2/heartbeat` (porta `8000` interna, sem `ports:`) |
+| `rbac-bot` | `rbac-bot` | `Dockerfile` (`python:3.12-slim-bookworm` + `uv 0.13.8`) | `10001:10001` | `rbac_internal_net` + `rbac_egress_net` | `regulatory_documents:/app/data/documents`, `audit_logs:/app/logs`, `./config:/app/config:ro` | `json-file` (`10m` x `5`) | `1.0 CPU / 1024M` | `python -m rbac_assistant.healthcheck` |
 
 - **Política de reinício:** `restart: unless-stopped` em ambos os serviços.
 - **Endurecimento:** `cap_drop: [ALL]` e `security_opt: [no-new-privileges:true]` em ambos os serviços.
-- **Comando do `rbac-bot`:** `python -m rbac_assistant.main` (atualmente executa a fundação Etapa 1 — `CheckSystemStatusUseCase` + espera de sinal `SIGTERM`/`SIGINT`; ainda não inicia o bot Telegram).
-- **Volumes de outros projetos a preservar:** `n8n_data`, `ollama`, `open-webui` (não compartilhados com este Compose).
+- **Comando do `rbac-bot`:** `python -m rbac_assistant.main` (Composition Root completo com auditoria JSONL em `/app/logs`, SQLite SSOT, ChromaDB, RAG e Bot Telegram em Long Polling — opera automaticamente em modo standby seguro quando `TELEGRAM_BOT_TOKEN` está ausente/placeholder).
+- **Volumes de outros projetos a preservar:** `n8n_data`, `ollama`, `open-webui`.
 
 ---
 
-## 4. Comandos Seguros de Inicialização, Diagnóstico e Operação
+## 4. Comandos Seguros de Inicialização, Diagnóstico e Persistência (PowerShell)
 
-### 4.1. Inspeção prévia (antes de subir)
+### 4.1. Inspeção prévia e subida
 ```powershell
-cd C:\Projetos\projeto-fundamentos-de-IA
+Set-Location "C:\Projetos\projeto-fundamentos-de-IA"
 docker --version
 docker compose version
 docker volume ls
-docker system df
 docker compose config --quiet
-docker compose config --services
-```
-
-Confirme em `docker volume ls` que `n8n_data`, `ollama` e `open-webui` permanecem preservados e que os volumes `projeto-fundamentos-de-ia_*` serão criados como volumes **novos e vazios** (se surgirem volumes desconhecidos com dados não identificados, interrompa e inspecione antes de continuar).
-
-### 4.2. Build e inicialização segura
-```powershell
 docker compose up -d --build
 docker compose ps -a
 ```
 
-### 4.3. Healthchecks, logs e verificação não-root
+### 4.2. Healthchecks, usuário não-root e rotação de logs efetiva
 ```powershell
 docker compose exec -T rbac-bot python -m rbac_assistant.healthcheck
 docker compose exec -T rbac-bot id
 docker compose exec -T chromadb id
-docker compose logs --tail=50 rbac-bot
-docker compose logs --tail=50 chromadb
+docker inspect --format "{{.Name}} -> {{json .HostConfig.LogConfig}}" rbac-bot rbac-chromadb
+docker compose logs --timestamps --tail=50 rbac-bot
+docker compose logs --timestamps --tail=50 chromadb
 ```
 
-### 4.4. Verificar presença de credenciais no contêiner (sem revelar valores)
+### 4.3. Verificação de persistência (ChromaDB, SQLite e Auditoria JSONL pós-restart)
 ```powershell
-@'
-import os
-from rbac_assistant.config.settings import load_settings
-s = load_settings()
-print("TELEGRAM_BOT_TOKEN configurado no container:", bool(os.getenv("TELEGRAM_BOT_TOKEN", "").strip()))
-print("GEMINI_API_KEY presente:", s.gemini_api_key is not None and bool(s.gemini_api_key.get_secret_value().strip()))
-print("Modelos:", s.gemini_generation_model, "|", s.gemini_embedding_model, s.effective_embedding_dimensions)
-print("Allow paid models:", s.gemini_allow_paid_models)
-'@ | docker compose exec -T rbac-bot python -
-```
-
-### 4.5. Verificação segura de persistência (usando os scripts oficiais)
-```powershell
-# ChromaDB (escreve registro de teste, reinicia chromadb, verifica e remove apenas o registro de teste)
+# 1. ChromaDB
 docker compose exec -T rbac-bot python scripts/verify_chroma_persistence.py --phase write
 docker compose restart chromadb
-# Aguardar rbac-chromadb retornar healthy em `docker compose ps`
+Start-Sleep -Seconds 15
 docker compose exec -T rbac-bot python scripts/verify_chroma_persistence.py --phase verify
 docker compose exec -T rbac-bot python scripts/verify_chroma_persistence.py --phase cleanup
 
-# SQLite + arquivos em /app/data/documents (valida escrita, restart e remove apenas artefato de teste)
+# 2. SQLite + PDF + Revisão + Auditoria JSONL (/app/logs)
 docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase write
+docker compose exec -T rbac-bot python scripts/verify_audit_persistence.py --phase write
 docker compose restart rbac-bot
+Start-Sleep -Seconds 10
 docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase verify
+docker compose exec -T rbac-bot python scripts/verify_audit_persistence.py --phase verify
 docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase cleanup
+docker compose exec -T rbac-bot python scripts/verify_audit_persistence.py --phase cleanup
 ```
 
-### 4.6. Parada e reinicialização seguras (preservando 100% dos volumes)
+### 4.4. Parada e reinicialização seguras (preservando 100% dos volumes)
 ```powershell
-# Parar sem remover volumes ou containers:
 docker compose stop
-
-# Retomar containers parados:
 docker compose start
-
-# Reiniciar um serviço específico:
 docker compose restart rbac-bot
 ```
 
 ---
 
-## 5. Logs, Auditoria e Rotação (Estado Real Auditado)
+## 5. Logs Operacionais vs. Auditoria Persistente (Estado Real Atualizado)
 
-### 5.1. O que está implementado hoje no código
-- **Logs operacionais estruturados (`src/rbac_assistant/config/logging_config.py`):**
-  - Emissão JSON via `structlog` com timestamp ISO-8601 UTC (`TimeStamper(fmt="iso", utc=True)`), nível de severidade (`add_log_level`) e redação determinística de segredos (`secret_redactor.redact_mapping`).
-  - Serviço principal (`python -m rbac_assistant.main`): emite em `stdout` (coletado pelo Docker Engine e consultável via `docker compose logs`).
-  - CLIs (`query_assistant.py`, `index_document.py`, `evaluate_rag.py`, `ingest_regulation.py`, `inspect_document.py`): emitem logs em `stderr` (`configure_cli_logging`), mantendo `stdout` puro para `--json`.
-- **Trilhas de revisão humana de páginas (Etapa 2):** persistidas duravelmente em SQLite (`page_reviews` em `/app/data/documents/catalog.sqlite3`) e arquivos em `/app/data/documents/reviews` dentro do volume `regulatory_documents`.
-
-### 5.2. Lacunas reais identificadas na auditoria (não implementadas ainda)
-- **Volume `/app/logs` (`audit_logs`) e `AuditPort`:** [`src/rbac_assistant/domain/ports/audit_port.py`](../src/rbac_assistant/domain/ports/audit_port.py) define hoje apenas o contrato `Protocol` (`AuditEvent` + `AuditPort.record()`), **sem adaptador concreto gravando arquivos JSONL em `/app/logs`**. Atualmente, `CheckSystemStatusUseCase` apenas verifica que `/app/logs` é gravável (`audit_logs_dir_writable=true`). Não marque a auditoria em arquivo como operacional até que um adaptador real (ex.: `JsonlAuditAdapter`) seja implementado na Etapa 4/5.
-- **Rotação de logs do Docker:** [`docker-compose.yml`](../docker-compose.yml) ainda **não** declara bloco `logging:` explícito; utiliza a retenção padrão do Docker Desktop. Quando autorizado em PR futuro, recomenda-se adicionar em ambos os serviços (`chromadb` e `rbac-bot`):
-  ```yaml
-  logging:
-    driver: json-file
-    options:
-      max-size: "10m"
-      max-file: "5"
-  ```
-
-### 5.3. Consulta e teste controlado dos novos logs operacionais (sem dados sensíveis)
-```powershell
-# Consultar logs por serviço e janela temporal
-docker compose logs --timestamps --since 15m rbac-bot
-docker compose logs --timestamps --since 15m chromadb
-
-# Conferir driver e opções de log efetivos dos containers atuais
-docker inspect --format '{{.Name}} -> {{json .HostConfig.LogConfig}}' rbac-bot rbac-chromadb
-
-# Gerar evento estruturado de teste controlado (sem credenciais) e confirmar redação
-@'
-import structlog
-from rbac_assistant.config.logging_config import configure_logging
-configure_logging(log_level="INFO", redact_secrets=True, stream="stdout")
-log = structlog.get_logger("rbac_assistant.recovery_check")
-log.info("recovery_log_probe", service="rbac-bot", status="ok", fake_token="123456789:AAFakeTokenNeverReal0123456789abcdef")
-'@ | docker compose exec -T rbac-bot python -
-
-# Confirmar retenção dos logs operacionais do container após restart
-docker compose restart rbac-bot
-docker compose logs --timestamps --tail=20 rbac-bot
-```
+1. **Rotação de logs operacionais Docker (ativa desde PR #10):** `docker-compose.yml` configura `logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}` em `chromadb` e `rbac-bot`, validado em CI Docker real.
+2. **Auditoria persistente em `/app/logs` (ativa desde PR #12):** [`JsonlAuditAdapter`](../src/rbac_assistant/infrastructure/audit/jsonl_audit_adapter.py) grava eventos estruturados UTC ISO-8601 em `/app/logs/audit_events.jsonl` com redação obrigatória de segredos, concorrência thread/processo, `fsync`, falha explícita via `AuditWriteError` e rotação independente por tamanho (`10 MB` x `10` arquivos). Detalhes em [`docs/operations/AUDIT_LOGGING.md`](./operations/AUDIT_LOGGING.md).
+3. **Trilhas de revisão humana de páginas:** continuam persistidas em SQLite (`page_reviews`) e `/app/data/documents/reviews/` dentro do volume `regulatory_documents`.
 
 ---
 
-## 6. Backup Seguro dos Volumes Nomeados
+## 6. Backup e Restauração Seguros
 
-Antes de qualquer manutenção relevante, faça backup offline (com `docker compose stop` prévio para consistência do SQLite WAL e do ChromaDB):
+Utilize os scripts verificáveis com timestamp UTC e manifesto SHA-256 documentados em [`docs/operations/BACKUP_AND_RESTORE.md`](./operations/BACKUP_AND_RESTORE.md):
 
 ```powershell
-New-Item -ItemType Directory -Force -Path D:\DockerBackups\rbac-ai-assistant | Out-Null
-$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-
-docker compose stop
-
-docker run --rm -v projeto-fundamentos-de-ia_regulatory_documents:/src:ro -v D:\DockerBackups\rbac-ai-assistant:/dst alpine tar czf "/dst/regulatory_documents_$stamp.tar.gz" -C /src .
-docker run --rm -v projeto-fundamentos-de-ia_chroma_data:/src:ro -v D:\DockerBackups\rbac-ai-assistant:/dst alpine tar czf "/dst/chroma_data_$stamp.tar.gz" -C /src .
-docker run --rm -v projeto-fundamentos-de-ia_audit_logs:/src:ro -v D:\DockerBackups\rbac-ai-assistant:/dst alpine tar czf "/dst/audit_logs_$stamp.tar.gz" -C /src .
-
-docker compose start
+.\scripts\backup_docker_volumes.ps1 -BackupRoot "D:\DockerBackups\rbac-ai-assistant"
 ```
 
 ---
 
 ## 7. Procedimentos Estritamente Proibidos
 
-**NUNCA execute** os comandos abaixo no projeto (risco direto de destruição definitiva dos bancos SQLite, PDFs preservados, trilhas de revisão humana e coleções ChromaDB):
+**NUNCA execute** os comandos abaixo no projeto:
 
 - `docker compose down -v`
 - `docker volume prune`
@@ -212,4 +143,4 @@ docker compose start
 - `docker volume rm ...`
 - `docker rm -v ...`
 - `docker builder prune`
-- Evite usar `docker compose down` como procedimento rotineiro de parada — utilize sempre **`docker compose stop`**.
+- Evite usar `docker compose down` rotineiramente — utilize sempre **`docker compose stop`**.

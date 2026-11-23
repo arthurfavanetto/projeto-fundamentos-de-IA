@@ -1,8 +1,10 @@
 # Estado Atual do Projeto — RBAC AI Assistant
 
-> **Referência de código:** `main` = `d1d6af150b0a20292ae7f91e33da0b91146573ca` (Etapas 0, 1, 2 e 3 integradas; PRs #4 a #9 mergeados).
+> **Referência de código:** Etapas 0, 1, 2, 3, 4 e 5 integradas via PRs #4 a #14 (+ PR #15 de backup/restauração e consolidação documental).
 >
 > **Domínio:** Regulamentos Brasileiros da Aviação Civil (**RBAC — ANAC**; nunca *Role-Based Access Control*).
+>
+> **Regra de veracidade:** este documento distingue rigorosamente o que está **implementado e testado em CI/VM Linux** do que permanece **PENDENTE DE VALIDAÇÃO LOCAL NO WINDOWS 11** ou **dependente de ação humana**.
 
 ---
 
@@ -11,52 +13,64 @@
 ```text
 src/rbac_assistant/
 ├── config/           # AppSettings (Pydantic Settings + YAML + RBAC_DISABLE_DOTENV), logging_config (stdout/stderr)
-├── domain/           # Entidades normativas, exceções de domínio e ports (Protocol) — zero dependências externas
+├── domain/           # Entidades normativas, exceções (incl. AuditWriteError) e ports (Protocol) — zero dependências externas
 ├── application/      # CatalogService, IngestionService, ValidationService, IndexingService, NormativeChatService e use cases
 ├── infrastructure/
+│   ├── audit/        # JsonlAuditAdapter (AuditPort -> /app/logs/audit_events.jsonl, UTC ISO-8601, redação, concorrência, rotação)
 │   ├── llm/          # GeminiClientAdapter + GeminiEmbeddingAdapter (google-genai==3.6.1, política única Free Tier)
 │   ├── pdf/          # PdfPlumberExtractorAdapter, AnacRbacStructureStrategy, GenericStructureStrategy, TextQualityChecker, TesseractOcrAdapter
 │   ├── sources/      # LocalFileSourceAdapter, AnacHttpSourceAdapter
-│   ├── storage/      # SqliteDocumentRepository (SSOT ACID + WAL + FTS5 + suporte :memory:), LocalFileDocumentStore
+│   ├── storage/      # SqliteDocumentRepository (SSOT ACID + WAL + FTS5 + thread-safe), LocalFileDocumentStore, backup_manager (SHA-256)
 │   └── vector_db/    # ChromaVectorStore (ChromaDB 1.5.9, guarda de compatibilidade modelo/dimensão/estratégia)
 ├── rag/
 │   ├── ingestion/    # StructuralNormativeChunker
 │   ├── retrieval/    # SectionResolver, HybridNormativeRetriever (Estrutural + FTS5 + ChromaDB → RRF + Reranker + Poda)
 │   ├── generation/   # PromptTemplateStore, CitationValidator, NormativeResponseFormatter
-│   └── evaluation/   # RagEvaluator (40 consultas sintéticas, 4 modos, 19 categorias, ablações, varredura de limiar)
-├── security/         # PromptGuard (injeção direta/indireta), secret_redactor (mascaramento de tokens/chaves)
+│   └── evaluation/   # RagEvaluator (40 consultas sintéticas) + corpus_evaluator (avaliação oficial RBAC 43 + recomendação de calibração)
+├── security/         # AccessControl (deny_by_default fail-closed), UserRateLimiter, PromptGuard, secret_redactor
 ├── interfaces/
-│   └── telegram/     # Placeholder (__init__.py) — Etapa 4 ainda NÃO implementada
+│   └── telegram/     # TelegramCommandRouter (8 comandos + texto livre), MessageSplitter (4.096 UTF-16 fiel), TelegramBotRunner (Long Polling)
 ├── healthcheck.py    # CLI de healthcheck Docker (ChromaDB heartbeat + escrita nos volumes)
-└── main.py           # Bootstrap da Fundação Etapa 1 (aguarda SIGTERM/SIGINT; ainda NÃO inicia bot Telegram)
+└── main.py           # Composition Root completo (auditoria JSONL, SQLite, ChromaDB, RAG e Bot Telegram com modo standby seguro)
 ```
 
 ---
 
-## 2. Matriz de Componentes (Implementado vs. Preparado vs. Pendente)
+## 2. Matriz Completa de Funcionalidades por Ambiente de Validação
 
-### Implementado e validado por testes automatizados (93 testes, 91% cobertura, CI `45068432151` verde)
-- **Persistência SSOT e Lexical:** `SqliteDocumentRepository` (SQLite 3 WAL/ACID em `/app/data/documents/catalog.sqlite3`, suporte a `:memory:` em testes, migrações `v001`/`v002` com `normative_chunks_fts` FTS5).
-- **Ingestão e Validação Regulatória:** extração nativa `pdfplumber`, dupla paginação (PDF + impressa), parser hierárquico ANAC/genérico, política híbrida `review_on_demand` com bloqueio estrito de OCR não revisado e páginas reprovadas.
-- **Motor Vetorial e Gemini Free Tier:** `ChromaVectorStore` (`chromadb==1.5.9`, coleção `regulatory_chunks_ge2_768_v1`), `GeminiClientAdapter` com política única `gemini-4-hydrogen` + `gemini-embedding-2` (`768d`, `GEMINI_ALLOW_PAID_MODELS=false`, sem fallback silencioso).
-- **RAG Híbrido (4 modos):** `structural_only`, `lexical_fts5_only`, `vector_only` e `hybrid_rrf`, com dedup N+1 por requisição na hidratação SSOT, `DeterministicNormativeReranker`, poda adaptativa e degradação controlada sem Gemini/ChromaDB.
-- **Segurança e Fidelidade:** `PromptGuard`, `CitationValidator` (5 dimensões), `NormativeResponseFormatter` (4 blocos separados: `TEXTO NORMATIVO`, `EXPLICAÇÃO`, `REFERÊNCIA`, `OBSERVAÇÃO`), `secret_redactor`, isolamento `.env` (`RBAC_DISABLE_DOTENV=1`) e bloqueio de chamadas Gemini reais em testes/subprocessos (`RBAC_BLOCK_REAL_GEMINI_API=1`).
-- **Avaliação e Cache de Benchmark:** `scripts/evaluate_rag.py` com `InMemoryQueryEmbeddingCache` (`1.286` → `46` chamadas HTTP simuladas no modo `compare`, zero persistência em disco).
-- **CLIs operacionais:** `scripts/ingest_regulation.py`, `scripts/inspect_document.py`, `scripts/validate_extraction.py`, `scripts/index_document.py`, `scripts/query_assistant.py`, `scripts/evaluate_rag.py`, `scripts/verify_chroma_persistence.py`, `scripts/verify_sqlite_persistence.py`.
-- **Qualidade e Paralelismo:** Ruff, MyPy strict (`82` arquivos) e `pytest-xdist` (`3.8.0`) com cobertura combinada idêntica.
+| Funcionalidade / Módulo | Código | VM Linux (Offline) | GitHub Actions CI | Windows 11 Local | Observação / Pendência Real |
+| --- | :---: | :---: | :---: | :---: | --- |
+| Arquitetura Hexagonal + ADRs 01–08 | **Implementado** | **Testado** | **Testado** | Validado anteriormente (`838b58f`) | Revalidar no Windows após `git pull` |
+| SQLite SSOT + WAL + FTS5 + Thread-Safety | **Implementado** | **Testado** | **Testado** (unit + Docker) | **Pendente** pós-incidente | Recriar volume `regulatory_documents` |
+| Ingestão `pdfplumber` + Revisão Humana (`review_on_demand`) | **Implementado** | **Testado** | **Testado** | **Pendente** (ação humana) | Ingerir `RBAC43EMD05.pdf` e revisar páginas manualmente |
+| ChromaDB 1.5.9 + Política Única Gemini Free Tier (`gemini-4-hydrogen` / `gemini-embedding-2` 768d) | **Implementado** | **Testado** (mocks) | **Testado** (mocks + Docker Chroma) | **Pendente** | Indexação real e consultas Gemini dependem da cota Free Tier local |
+| RAG Híbrido (4 modos, RRF, Reranker, `CitationValidator`, `PromptGuard`) | **Implementado** | **Testado** | **Testado** | **Pendente** | Validar no corpus oficial aprovado do RBAC 43 |
+| Rotação de Logs Operacionais Docker (`json-file`, `10m` x `5`) | **Implementado** (PR #10) | Contrato testado | **Testado em Docker real** | **Pendente** | Validar via `docker inspect` no Docker Desktop Windows |
+| Auditoria Persistente JSONL (`JsonlAuditAdapter` em `/app/logs`) | **Implementado** (PR #12) | **Testado** | **Testado em Docker real pós-restart** | **Pendente** | Validar com `scripts/verify_audit_persistence.py` no Windows |
+| Bot Telegram (`python-telegram-bot==22.8`, Long Polling, 8 comandos + texto livre, `AccessControl` `deny_by_default`, `UserRateLimiter`, `MessageSplitter`) | **Implementado** (PR #13) | **Testado** (mocks) | **Testado** (mocks + Docker `./config:ro` standby) | **Pendente** (ação humana) | Configurar `config/access_control.yaml` local e testar com usuários autorizados reais no Telegram |
+| Avaliação Oficial RBAC 43 + Calibração Reproduzível (`max_vector_distance=0.85` provisório) + Regressão Normativa | **Implementado** (PR #14) | **Testado** | **Testado** | **Pendente** (ação humana) | Executar `--corpus official-approved --embedding-backend gemini-embedding-2` após aprovação humana no Windows |
+| Backup & Restauração Verificável (UTC, SHA-256, SQLite `integrity_check`, scripts `.ps1`) | **Implementado** (PR #15) | **Testado** | **Testado** | **Pendente** | Executar `scripts/backup_docker_volumes.ps1` e drill de restauração no Windows |
 
-### Implementado no código, pendente de revalidação local no Docker Windows pós-incidente
-- Stack Docker Compose (`rbac-chromadb` + `rbac-bot`, UID/GID `10001`, rede interna `rbac_internal_net`, volumes novos `chroma_data`, `regulatory_documents`, `audit_logs`) — validada no CI Linux (`45068432151`), aguardando liberação do disco `/dev/sdd` no WSL e reinicialização do Docker Desktop no Windows.
+---
 
-### Preparado (configuração/arquitetura), mas NÃO implementado
-- **Interface Telegram (Etapa 4):** existem apenas `TelegramConfig`, `AppSettings.telegram_bot_token`, `require_telegram_bot_token()`, mascaramento de tokens em `secret_redactor.py`, template `config/access_control.example.yaml`, ADR-03 e placeholder `src/rbac_assistant/interfaces/telegram/__init__.py`.
-- **Ausentes (Telegram):** biblioteca de bot Telegram em `pyproject.toml`, Long Polling, handlers/comandos (`/start`, `/help`, `/status`, `/rbac`, `/buscar`, `/explicar`, `/documentos`, `/versao`, texto livre), `AccessControl` (`deny_by_default`), `MessageSplitter` (>4.096 chars), montagem de `config/access_control.yaml` em `docker-compose.yml` e integração no `src/rbac_assistant/main.py`.
-- **Auditoria persistente em `/app/logs` (`AuditPort`):** [`src/rbac_assistant/domain/ports/audit_port.py`](../src/rbac_assistant/domain/ports/audit_port.py) é atualmente apenas um contrato `Protocol` sem adaptador concreto gravando JSONL em `/app/logs` (o volume `audit_logs` existe e tem escrita validada no startup/healthcheck; trilhas de revisão humana de páginas já são persistidas em `/app/data/documents/reviews` e SQLite `page_reviews`).
-- **Rotação explícita de logs no Docker Compose:** `docker-compose.yml` ainda não declara `logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}` (usa padrão do Docker Desktop até PR autorizado).
+## 3. Documentação Operacional Específica
 
-### Pendente (operação / próximas etapas)
-1. Liberação específica de `/dev/sdd` no WSL (recuperação forense VHDX encerrada definitivamente) e reconstrução limpa dos 3 volumes Docker novos/vazios no host Windows 11.
-2. Validação local no Windows (Python 3.12 + testes + Docker healthchecks + persistência + logs operacionais).
-3. Ingestão controlada do `RBAC43EMD05.pdf` (`scripts/ingest_regulation.py`), inspeção (`scripts/inspect_document.py`), revisão e aprovação humana explícita (`scripts/validate_extraction.py`) e indexação (`scripts/index_document.py`) com a cota Free Tier disponível.
-4. Implementação completa da **Etapa 4 — Bot Telegram** na branch dedicada `feat/etapa-4-telegram-bot` com testes 100% offline (incluindo adaptador de auditoria em `/app/logs` e rotação de logs no Compose, quando autorizado).
-5. **Etapa 5 — Operação contínua e calibração real:** calibração do limiar provisório `max_vector_distance=0.85` sobre o RBAC 43 real e rotina de backup/restore.
+- **Docker, volumes e logs:** [`docs/DOCKER_SETUP.md`](./DOCKER_SETUP.md)
+- **Auditoria persistente JSONL:** [`docs/operations/AUDIT_LOGGING.md`](./operations/AUDIT_LOGGING.md)
+- **Bot Telegram e controle de acesso:** [`docs/operations/TELEGRAM_SETUP.md`](./operations/TELEGRAM_SETUP.md)
+- **Ingestão do RBAC 43, revisão humana e avaliação/calibração RAG:** [`docs/operations/RAG_EVALUATION_AND_INGESTION.md`](./operations/RAG_EVALUATION_AND_INGESTION.md)
+- **Backup, verificação SHA-256 e restauração:** [`docs/operations/BACKUP_AND_RESTORE.md`](./operations/BACKUP_AND_RESTORE.md)
+- **Recuperação pós-incidente de 22/11/2026:** [`docs/RECOVERY_STATUS.md`](./RECOVERY_STATUS.md)
+
+---
+
+## 4. Critérios Ainda Pendentes para Declarar Operação 100% Concluída no Windows 11
+
+O código-fonte, a arquitetura, a suíte automatizada e os pipelines de CI estão completos no GitHub. Para declarar o sistema **100% operacional em produção local**, ainda dependem exclusivamente de execução no computador Windows 11 do proprietário:
+
+1. Verificação/liberação específica de `F:\DockerRecovery\docker_data_working.vhdx` no WSL (somente se ainda anexado).
+2. Inicialização do Docker Desktop Windows e recriação limpa dos 3 volumes (`chroma_data`, `regulatory_documents`, `audit_logs`) via `docker compose up -d --build`.
+3. Validação local de healthchecks, persistência (ChromaDB, SQLite, auditoria JSONL), rotação `json-file` e presença das credenciais no `.env` (sem exposição).
+4. Execução de `ruff`, `mypy` e `pytest` no Windows 11 sobre a `main` atualizada.
+5. Criação de `config/access_control.yaml` local com Telegram User IDs reais e teste real do Bot Telegram com usuário autorizado e usuário não autorizado.
+6. Ingestão do `RBAC43EMD05.pdf`, revisão e aprovação humana explícita das páginas, indexação Free Tier, avaliação real (`--corpus official-approved`) e primeiro backup verificado (`scripts/backup_docker_volumes.ps1`).
