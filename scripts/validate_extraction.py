@@ -23,6 +23,7 @@ from rbac_assistant.application.use_cases.validate_page import ValidatePageUseCa
 from rbac_assistant.config.settings import load_settings
 from rbac_assistant.domain.entities.regulatory_document import ValidationPolicy
 from rbac_assistant.domain.entities.regulatory_page import ReviewDecision
+from rbac_assistant.infrastructure.audit.jsonl_audit_adapter import JsonlAuditAdapter
 from rbac_assistant.infrastructure.storage.file_document_store import LocalFileDocumentStore
 from rbac_assistant.infrastructure.storage.sqlite_document_repository import (
     SqliteDocumentRepository,
@@ -76,6 +77,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Sobrescreve o diretório do catálogo SQLite.",
     )
+    parser.add_argument(
+        "--audit-logs-dir",
+        type=Path,
+        help="Sobrescreve o diretório de logs JSONL de auditoria.",
+    )
     args = parser.parse_args(argv)
 
     target_pages: list[int] = []
@@ -89,6 +95,11 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = load_settings()
     base_dir = args.documents_dir or settings.storage.documents_dir
+    resolved_audit_dir = args.audit_logs_dir or (
+        args.documents_dir / "audit_logs"
+        if args.documents_dir is not None
+        else settings.storage.audit_logs_dir
+    )
     repository = SqliteDocumentRepository(
         base_dir / settings.storage.sqlite_filename,
         busy_timeout_ms=settings.storage.sqlite_busy_timeout_ms,
@@ -153,11 +164,13 @@ def main(argv: list[str] | None = None) -> int:
             print("Operação cancelada pelo revisor.")
             return 1
 
+    audit_adapter = JsonlAuditAdapter.from_settings(settings, logs_dir=resolved_audit_dir)
     use_case = ValidatePageUseCase(
         repository=repository,
         catalog_service=catalog_service,
         validation_service=validation_service,
         file_store=file_store,
+        audit_port=audit_adapter,
     )
     result = use_case.execute(
         PageReviewRequestDTO(

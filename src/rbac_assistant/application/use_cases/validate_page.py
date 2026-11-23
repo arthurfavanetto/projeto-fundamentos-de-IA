@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from rbac_assistant.application.dto.ingestion_dto import (
     PageReviewRequestDTO,
     PageReviewResultDTO,
@@ -10,6 +12,7 @@ from rbac_assistant.application.services.catalog_service import CatalogService
 from rbac_assistant.application.services.validation_service import ValidationService
 from rbac_assistant.domain.entities.regulatory_page import RegulatoryPage, ValidationRecord
 from rbac_assistant.domain.exceptions import SectionNotFoundError, ValidationPolicyError
+from rbac_assistant.domain.ports.audit_port import AuditEvent, AuditPort
 from rbac_assistant.domain.ports.document_repository_port import DocumentRepositoryPort
 from rbac_assistant.domain.ports.file_store_port import FileStorePort
 
@@ -24,11 +27,13 @@ class ValidatePageUseCase:
         catalog_service: CatalogService,
         validation_service: ValidationService,
         file_store: FileStorePort | None = None,
+        audit_port: AuditPort | None = None,
     ) -> None:
         self._repository = repository
         self._catalog_service = catalog_service
         self._validation_service = validation_service
         self._file_store = file_store
+        self._audit_port = audit_port
 
     def execute(self, request: PageReviewRequestDTO) -> PageReviewResultDTO:
         """Aplica revisão humana explícita às páginas indicadas e exporta registro auditável."""
@@ -106,6 +111,22 @@ class ValidatePageUseCase:
                     },
                 )
                 exported_paths.append(str(review_path))
+
+        if self._audit_port is not None:
+            self._audit_port.record(
+                AuditEvent(
+                    timestamp=datetime.now(UTC),
+                    action="page_review_recorded",
+                    status=request.decision.value,
+                    actor_id=request.reviewer,
+                    details={
+                        "document_id": request.document_id,
+                        "version_id": version.version_id,
+                        "pages_count": len(updated_pages),
+                        "section_number": request.section_number or "",
+                    },
+                )
+            )
 
         return PageReviewResultDTO(
             document_id=request.document_id,

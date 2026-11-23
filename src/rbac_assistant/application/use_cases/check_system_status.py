@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
-from rbac_assistant.domain.exceptions import StorageConnectionError
+from rbac_assistant.domain.exceptions import AuditWriteError, StorageConnectionError
+from rbac_assistant.domain.ports.audit_port import AuditEvent, AuditPort
 from rbac_assistant.domain.ports.vector_store_port import VectorStorePort
 
 
@@ -40,10 +42,12 @@ class CheckSystemStatusUseCase:
         vector_store: VectorStorePort,
         documents_dir: Path,
         audit_logs_dir: Path,
+        audit_port: AuditPort | None = None,
     ) -> None:
         self._vector_store = vector_store
         self._documents_dir = documents_dir
         self._audit_logs_dir = audit_logs_dir
+        self._audit_port = audit_port
 
     def execute(self) -> SystemStatusReport:
         """Executa verificação de saúde e retorna relatório consolidado."""
@@ -69,6 +73,28 @@ class CheckSystemStatusUseCase:
             error = f"Diretório(s) sem permissão de escrita: {', '.join(unwritable)}"
 
         healthy = chroma_healthy and docs_writable and logs_writable
+
+        if self._audit_port is not None and logs_writable:
+            try:
+                self._audit_port.record(
+                    AuditEvent(
+                        timestamp=datetime.now(UTC),
+                        action="system_status_check",
+                        status="healthy" if healthy else "unhealthy",
+                        actor_id="system",
+                        details={
+                            "chroma_healthy": chroma_healthy,
+                            "documents_dir_writable": docs_writable,
+                            "audit_logs_dir_writable": logs_writable,
+                            "has_error": error is not None,
+                        },
+                    )
+                )
+            except AuditWriteError as exc:
+                logs_writable = False
+                healthy = False
+                error = str(exc)
+
         return SystemStatusReport(
             healthy=healthy,
             chroma_healthy=chroma_healthy,

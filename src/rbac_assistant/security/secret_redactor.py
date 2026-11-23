@@ -12,7 +12,7 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Google Gemini / Google Cloud API Keys
     re.compile(r"AIza[0-9A-Za-z\-_]{20,}"),
     # Telegram Bot API Tokens (<numeric_bot_id>:<alphanumeric_hash>)
-    re.compile(r"\b\d{7,12}:[A-Za-z0-9_-]{30,}\b"),
+    re.compile(r"(?<!\d)\d{7,12}:[A-Za-z0-9_-]{30,}\b"),
     # GitHub Classic & Fine-Grained Personal Access Tokens
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),

@@ -87,5 +87,10 @@ security:
     requests_per_minute: 15
     burst_size: 5
   audit:
+    # Auditoria persistente em JSONL no volume /app/logs (independente da rotação json-file do Docker)
     pseudonymize_user_ids: false
     redact_secrets: true
+    filename: "audit_events.jsonl"
+    max_file_size_mb: 10
+    max_rotated_files: 10
+    max_detail_string_length: 300

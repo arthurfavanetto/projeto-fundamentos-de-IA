@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import structlog
 
 from rbac_assistant.domain.entities.rag import (
@@ -15,6 +17,7 @@ from rbac_assistant.domain.exceptions import (
     LLMServiceError,
     LLMTimeoutError,
 )
+from rbac_assistant.domain.ports.audit_port import AuditEvent, AuditPort
 from rbac_assistant.domain.ports.rag_ports import LLMPort
 from rbac_assistant.rag.generation.citation_validator import CitationValidator
 from rbac_assistant.rag.generation.prompt_templates import PromptTemplateStore
@@ -41,6 +44,7 @@ class NormativeChatService:
         prompt_guard: PromptGuard | None = None,
         formatter: NormativeResponseFormatter | None = None,
         citation_validator: CitationValidator | None = None,
+        audit_port: AuditPort | None = None,
     ) -> None:
         self._retriever = retriever
         self._llm = llm
@@ -48,6 +52,42 @@ class NormativeChatService:
         self._prompt_guard = prompt_guard or PromptGuard()
         self._formatter = formatter or NormativeResponseFormatter()
         self._citation_validator = citation_validator or CitationValidator()
+        self._audit_port = audit_port
+
+    def _audit_query(
+        self,
+        *,
+        outcome: str,
+        actor_id: str | None,
+        actor_role: str | None,
+        query_length: int,
+        evidence_count: int = 0,
+        blocked_count: int = 0,
+        used_fallback_without_llm: bool = False,
+        prompt_injection_detected: bool = False,
+        citation_modifications: bool = False,
+        generation_model: str | None = None,
+    ) -> None:
+        if self._audit_port is None:
+            return
+        self._audit_port.record(
+            AuditEvent(
+                timestamp=datetime.now(UTC),
+                action="normative_query",
+                status=outcome,
+                actor_id=actor_id,
+                role=actor_role,
+                details={
+                    "query_length": query_length,
+                    "evidence_count": evidence_count,
+                    "blocked_count": blocked_count,
+                    "used_fallback_without_llm": used_fallback_without_llm,
+                    "prompt_injection_detected": prompt_injection_detected,
+                    "citation_modifications": citation_modifications,
+                    "generation_model": generation_model or "",
+                },
+            )
+        )
 
     def ask(
         self,
@@ -56,17 +96,26 @@ class NormativeChatService:
         filters: SearchFilter | None = None,
         top_k: int | None = None,
         generate_explanation: bool = True,
+        actor_id: str | None = None,
+        actor_role: str | None = None,
     ) -> StructuredNormativeAnswer:
         """Responde uma consulta normativa garantindo fidelidade literal e recusa segura."""
         clean_question = question.strip()
         if not clean_question:
-            return self._formatter.build_answer(
+            answer = self._formatter.build_answer(
                 query=question,
                 usable_evidences=(),
                 blocked_evidences=(),
                 explanation="Informe uma pergunta ou referência normativa para consulta.",
                 extra_observations=("Consulta vazia recebida.",),
             )
+            self._audit_query(
+                outcome="empty_query",
+                actor_id=actor_id,
+                actor_role=actor_role,
+                query_length=0,
+            )
+            return answer
 
         retrieval = self._retriever.retrieve(
             query=clean_question,
@@ -78,7 +127,7 @@ class NormativeChatService:
 
         # Caso 1: Base vazia (nenhum documento indexado)
         if retrieval.index_empty:
-            return self._formatter.build_answer(
+            answer = self._formatter.build_answer(
                 query=clean_question,
                 usable_evidences=(),
                 blocked_evidences=(),
@@ -89,6 +138,13 @@ class NormativeChatService:
                 extra_observations=extra_observations,
                 diagnostics=retrieval.diagnostics,
             )
+            self._audit_query(
+                outcome="refused_empty_index",
+                actor_id=actor_id,
+                actor_role=actor_role,
+                query_length=len(clean_question),
+            )
+            return answer
 
         # Caso 2: Nenhuma evidência utilizável (incluindo cenário onde apenas páginas bloqueadas
         # por OCR pendente ou reprovadas corresponderam à consulta)
@@ -101,13 +157,15 @@ class NormativeChatService:
                     "Por segurança e fidelidade normativa, o assistente não envia essas páginas "
                     "ao modelo generativo nem gera resposta fundamentada até revisão humana."
                 )
+                outcome = "refused_blocked_only"
             else:
                 explanation = (
                     "Não foram encontradas evidências normativas suficientes na base indexada "
                     "para responder à sua pergunta com segurança. Verifique os filtros aplicados "
                     "ou confirme se o regulamento desejado já foi ingerido e indexado."
                 )
-            return self._formatter.build_answer(
+                outcome = "refused_no_evidence"
+            answer = self._formatter.build_answer(
                 query=clean_question,
                 usable_evidences=(),
                 blocked_evidences=retrieval.blocked_evidences,
@@ -115,6 +173,14 @@ class NormativeChatService:
                 extra_observations=extra_observations,
                 diagnostics=retrieval.diagnostics,
             )
+            self._audit_query(
+                outcome=outcome,
+                actor_id=actor_id,
+                actor_role=actor_role,
+                query_length=len(clean_question),
+                blocked_count=len(retrieval.blocked_evidences),
+            )
+            return answer
 
         # Caso 3: Apenas páginas aprovadas para transcrição literal podem fundamentar o LLM!
         validated_evidences: list[FusedEvidence] = [
@@ -137,7 +203,7 @@ class NormativeChatService:
             extra_observations.append(
                 "GOVERNANÇA LLM: Nenhuma evidência não aprovada foi enviada ao modelo generativo."
             )
-            return self._formatter.build_answer(
+            answer = self._formatter.build_answer(
                 query=clean_question,
                 usable_evidences=retrieval.evidences,
                 blocked_evidences=retrieval.blocked_evidences,
@@ -148,6 +214,16 @@ class NormativeChatService:
                 evidences_sent_to_llm=(),
                 diagnostics=retrieval.diagnostics,
             )
+            self._audit_query(
+                outcome="preliminary_only",
+                actor_id=actor_id,
+                actor_role=actor_role,
+                query_length=len(clean_question),
+                evidence_count=len(retrieval.evidences),
+                blocked_count=len(retrieval.blocked_evidences),
+                used_fallback_without_llm=True,
+            )
+            return answer
 
         # Modo somente recuperação (--no-llm ou sem cliente LLM configurado)
         if not generate_explanation or self._llm is None:
@@ -155,7 +231,7 @@ class NormativeChatService:
                 "Modo somente recuperação (geração IA desabilitada nesta execução). "
                 "Consulte o texto normativo e as referências recuperadas diretamente do SQLite."
             )
-            return self._formatter.build_answer(
+            answer = self._formatter.build_answer(
                 query=clean_question,
                 usable_evidences=retrieval.evidences,
                 blocked_evidences=retrieval.blocked_evidences,
@@ -166,6 +242,16 @@ class NormativeChatService:
                 evidences_sent_to_llm=(),
                 diagnostics=retrieval.diagnostics,
             )
+            self._audit_query(
+                outcome="retrieval_only",
+                actor_id=actor_id,
+                actor_role=actor_role,
+                query_length=len(clean_question),
+                evidence_count=len(retrieval.evidences),
+                blocked_count=len(retrieval.blocked_evidences),
+                used_fallback_without_llm=True,
+            )
+            return answer
 
         # Inspeção de Prompt Injection na pergunta e somente nas evidências VALIDADAS
         question_check = self._prompt_guard.inspect_text(clean_question)
@@ -239,7 +325,7 @@ class NormativeChatService:
                     f"recuperadas foram descartadas da explicação IA: {', '.join(discarded)}."
                 )
 
-            return self._formatter.build_answer(
+            answer = self._formatter.build_answer(
                 query=clean_question,
                 usable_evidences=retrieval.evidences,
                 blocked_evidences=retrieval.blocked_evidences,
@@ -252,6 +338,21 @@ class NormativeChatService:
                 discarded_citations=tuple(discarded),
                 diagnostics=retrieval.diagnostics,
             )
+            self._audit_query(
+                outcome="answered",
+                actor_id=actor_id,
+                actor_role=actor_role,
+                query_length=len(clean_question),
+                evidence_count=len(retrieval.evidences),
+                blocked_count=len(retrieval.blocked_evidences),
+                used_fallback_without_llm=False,
+                prompt_injection_detected=(
+                    question_check.injection_detected or injection_in_evidence
+                ),
+                citation_modifications=citation_check.had_modifications,
+                generation_model=self._llm.model_name,
+            )
+            return answer
         except (LLMRateLimitError, LLMTimeoutError, LLMServiceError) as exc:
             safe_err = redact_text(str(exc))
             logger.warning(
@@ -275,7 +376,7 @@ class NormativeChatService:
                 f"Explicação por IA temporariamente indisponível ({reason}). "
                 "Utilize o bloco de texto normativo e as referências oficiais listadas acima."
             )
-            return self._formatter.build_answer(
+            answer = self._formatter.build_answer(
                 query=clean_question,
                 usable_evidences=retrieval.evidences,
                 blocked_evidences=retrieval.blocked_evidences,
@@ -286,3 +387,17 @@ class NormativeChatService:
                 evidences_sent_to_llm=tuple(evidences_sent_labels),
                 diagnostics=retrieval.diagnostics,
             )
+            self._audit_query(
+                outcome="fallback_llm_error",
+                actor_id=actor_id,
+                actor_role=actor_role,
+                query_length=len(clean_question),
+                evidence_count=len(retrieval.evidences),
+                blocked_count=len(retrieval.blocked_evidences),
+                used_fallback_without_llm=True,
+                prompt_injection_detected=(
+                    question_check.injection_detected or injection_in_evidence
+                ),
+                generation_model=self._llm.model_name,
+            )
+            return answer

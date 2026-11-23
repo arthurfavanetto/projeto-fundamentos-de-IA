@@ -26,6 +26,7 @@ from rbac_assistant.domain.entities.regulatory_document import (
     ValidationPolicy,
     VersionStatus,
 )
+from rbac_assistant.infrastructure.audit.jsonl_audit_adapter import JsonlAuditAdapter
 from rbac_assistant.infrastructure.pdf.anac_structure_strategy import AnacRbacStructureStrategy
 from rbac_assistant.infrastructure.pdf.generic_structure_strategy import GenericStructureStrategy
 from rbac_assistant.infrastructure.pdf.ocr_adapter import TesseractOcrAdapter
@@ -59,7 +60,10 @@ def _load_catalog_entry(catalog_yaml: Path, document_id: str) -> dict[str, Any]:
     raise ValueError(f"Documento '{document_id}' não encontrado em {catalog_yaml}.")
 
 
-def build_ingestion_use_case(documents_dir: Path | None = None) -> IngestDocumentUseCase:
+def build_ingestion_use_case(
+    documents_dir: Path | None = None,
+    audit_logs_dir: Path | None = None,
+) -> IngestDocumentUseCase:
     """Monta o caso de uso de ingestão com adaptadores concretos."""
     settings = load_settings()
     configure_cli_logging(
@@ -67,6 +71,11 @@ def build_ingestion_use_case(documents_dir: Path | None = None) -> IngestDocumen
         redact_secrets=settings.security.audit.redact_secrets,
     )
     base_dir = documents_dir or settings.storage.documents_dir
+    resolved_audit_dir = audit_logs_dir or (
+        documents_dir / "audit_logs"
+        if documents_dir is not None
+        else settings.storage.audit_logs_dir
+    )
     sqlite_path = base_dir / settings.storage.sqlite_filename
 
     repository = SqliteDocumentRepository(
@@ -83,6 +92,8 @@ def build_ingestion_use_case(documents_dir: Path | None = None) -> IngestDocumen
     )
     file_store.ensure_directories()
 
+    audit_adapter = JsonlAuditAdapter.from_settings(settings, logs_dir=resolved_audit_dir)
+
     validation_service = ValidationService(
         policy=ValidationPolicy(settings.extraction.validation_policy)
     )
@@ -96,6 +107,7 @@ def build_ingestion_use_case(documents_dir: Path | None = None) -> IngestDocumen
         local_source=LocalFileSourceAdapter(max_pdf_size_mb=settings.extraction.max_pdf_size_mb),
         http_source=AnacHttpSourceAdapter(max_pdf_size_mb=settings.extraction.max_pdf_size_mb),
         ocr_adapter=TesseractOcrAdapter(),
+        audit_port=audit_adapter,
         min_native_chars=settings.extraction.min_native_chars_per_page,
         max_pdf_pages=settings.extraction.max_pdf_pages,
         ocr_language=settings.extraction.ocr_language,
@@ -127,6 +139,11 @@ def main(argv: list[str] | None = None) -> int:
         "--documents-dir",
         type=Path,
         help="Sobrescreve o diretório de dados (padrão: config/settings.yaml).",
+    )
+    parser.add_argument(
+        "--audit-logs-dir",
+        type=Path,
+        help="Sobrescreve o diretório de logs JSONL de auditoria.",
     )
     parser.add_argument("--force", action="store_true", help="Força reprocessamento controlado.")
     parser.add_argument(
@@ -189,7 +206,10 @@ def main(argv: list[str] | None = None) -> int:
         document_description=str(entry.get("document_description", "")).strip(),
     )
 
-    use_case = build_ingestion_use_case(documents_dir=args.documents_dir)
+    use_case = build_ingestion_use_case(
+        documents_dir=args.documents_dir,
+        audit_logs_dir=args.audit_logs_dir,
+    )
     result = use_case.execute(
         IngestionRequestDTO(
             document=dto,

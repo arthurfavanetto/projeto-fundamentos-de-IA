@@ -115,9 +115,10 @@ jobs:
           docker compose exec -T rbac-bot python scripts/verify_chroma_persistence.py --phase verify
           docker compose exec -T rbac-bot python scripts/verify_chroma_persistence.py --phase cleanup
 
-      - name: Verify SQLite, raw PDF and review persistence across rbac-bot restart
+      - name: Verify SQLite, raw PDF, review and JSONL audit persistence across rbac-bot restart
         run: |
           docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase write
+          docker compose exec -T rbac-bot python scripts/verify_audit_persistence.py --phase write
           docker compose restart rbac-bot
           for i in $(seq 1 30); do
             status=$(docker inspect --format='{{.State.Health.Status}}' rbac-bot)
@@ -127,9 +128,12 @@ jobs:
             sleep 2
           done
           docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase verify
+          docker compose exec -T rbac-bot python scripts/verify_audit_persistence.py --phase verify
           docker compose exec -T rbac-bot python scripts/index_document.py --status
           docker compose exec -T rbac-bot python -c "import sqlite3; c=sqlite3.connect('/app/data/documents/catalog.sqlite3'); assert c.execute(\"SELECT name FROM sqlite_master WHERE name='normative_chunks_fts'\").fetchone() is not None; print('[OK] SQLite FTS5 virtual table verified inside rbac-bot container.')"
+          docker compose exec -T rbac-bot python -c "from pathlib import Path; p=Path('/app/logs/audit_events.jsonl'); assert p.is_file() and p.stat().st_size > 0; print('[OK] Production audit_events.jsonl verified inside /app/logs.')"
           docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase cleanup
+          docker compose exec -T rbac-bot python scripts/verify_audit_persistence.py --phase cleanup
 
       - name: Dump container logs on failure
         if: failure()

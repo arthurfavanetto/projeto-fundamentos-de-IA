@@ -235,6 +235,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--collection", help="Sobrescreve o nome da coleção no ChromaDB.")
     parser.add_argument("--documents-dir", type=Path, help="Sobrescreve o diretório de dados.")
+    parser.add_argument(
+        "--audit-logs-dir",
+        type=Path,
+        help="Sobrescreve o diretório de logs JSONL de auditoria.",
+    )
     args = parser.parse_args(argv)
 
     settings = load_settings()
@@ -243,6 +248,11 @@ def main(argv: list[str] | None = None) -> int:
         redact_secrets=settings.security.audit.redact_secrets,
     )
     base_dir = args.documents_dir or settings.storage.documents_dir
+    resolved_audit_dir = args.audit_logs_dir or (
+        args.documents_dir / "audit_logs"
+        if args.documents_dir is not None
+        else settings.storage.audit_logs_dir
+    )
     repository = SqliteDocumentRepository(
         base_dir / settings.storage.sqlite_filename,
         busy_timeout_ms=settings.storage.sqlite_busy_timeout_ms,
@@ -287,10 +297,15 @@ def main(argv: list[str] | None = None) -> int:
         if not args.no_llm:
             llm_port = gemini_client
     elif not args.no_llm:
+        repository.close()
         parser.error(
             "GEMINI_API_KEY não configurada no ambiente. Configure .env ou utilize --no-llm "
             "para testar a recuperação lexical/estrutural sem chamadas externas."
         )
+
+    from rbac_assistant.infrastructure.audit.jsonl_audit_adapter import JsonlAuditAdapter
+
+    audit_adapter = JsonlAuditAdapter.from_settings(settings, logs_dir=resolved_audit_dir)
 
     retriever = HybridNormativeRetriever(
         repository=repository,
@@ -309,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         retriever=retriever,
         llm=llm_port,
         prompt_store=PromptTemplateStore(settings.gemini.prompts_dir),
+        audit_port=audit_adapter,
     )
 
     search_filter = SearchFilter(
@@ -328,6 +344,7 @@ def main(argv: list[str] | None = None) -> int:
             filters=search_filter,
             top_k=args.top_k,
             generate_explanation=not args.no_llm,
+            actor_id="cli",
         )
         if args.json:
             payload: dict[str, Any] = {
@@ -358,6 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if gemini_client is not None:
             gemini_client.close()
+        repository.close()
 
 
 if __name__ == "__main__":
