@@ -69,3 +69,23 @@ docker compose exec -T rbac-bot python scripts/evaluate_rag.py --corpus official
 ```
 
 O comando **não** altera `config/settings.yaml` automaticamente. Caso a recomendação comprove ganho de Precision/MRR preservando `100%` de recusa segura e `0` violações de governança no RBAC 43 real, registre a justificativa em ADR/PR antes de alterar `retrieval.max_vector_distance` (atualmente mantido em **`0.85` provisório**).
+
+---
+
+## 3. Escopo Normativo Estrito e Controles Anti-Alucinação na Operação Pública
+
+Embora a interface Telegram opere em **modo público** para consultas em conversas privadas (`public_access: true`, `default_role: USER`), o conhecimento respondido pelo motor RAG permanece estritamente limitado ao corpus normativo aprovado e indexado:
+
+1. **Recuperação restrita a páginas aprovadas (`retrieval.telegram_only_approved_literal: true`):**
+   - Toda consulta recebida pelo `TelegramCommandRouter` envia `SearchFilter(only_current_version=True, only_approved_literal=True, include_preliminary_native=False)` ao `HybridNormativeRetriever`.
+   - Os três sinais de busca (**estrutural exato**, **lexical FTS5** e **vetorial ChromaDB**) excluem páginas pendentes de revisão, preliminares não revisadas, OCR não revisado e páginas reprovadas.
+2. **Proibição de busca externa e de preenchimento por conhecimento geral:**
+   - Não existe fallback de busca na internet nem consulta externa.
+   - Sem evidência aprovada suficiente (incluindo perguntas fora do escopo documental), o `NormativeChatService` devolve recusa fundamentada **antes** de chamar o Gemini (`llm.calls == 0`).
+3. **Separação estrita SSOT vs. explicação IA e validação determinística:**
+   - O bloco `TEXTO NORMATIVO (LITERAL VALIDADO — SQLite SSOT)` é entregue diretamente do SQLite sem reescrita pelo modelo.
+   - O `CitationValidator` audita `[EV-N]`, seções, artigos e páginas produzidos na explicação IA e descarta referências não confirmadas nas evidências recuperadas.
+   - O `PromptGuard` trata perguntas e evidências como dados não confiáveis (detectando *prompt injection*, exfiltração de prompts/variáveis/credenciais, escalada de privilégio e quebra de escopo), e o `secret_redactor` sanitiza saídas antes da entrega.
+4. **Rastreabilidade e transparência técnica:**
+   - Cada evidência preserva documento, autoridade, emenda, seção e páginas (PDF/impressa).
+   - Esses controles verificáveis (cobertos por `tests/evals/test_regulatory_fidelity_regression.py`) minimizam e detectam respostas sem fundamento — sem reivindicar garantia matemática absoluta contra alucinação, privilegiando sempre a recusa fundamentada quando houver dúvida ou ausência de evidência.

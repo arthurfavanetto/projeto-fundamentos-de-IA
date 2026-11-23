@@ -20,8 +20,11 @@ _INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "system_prompt_exfiltration",
         re.compile(
-            r"(reveal|show|print|exiba|mostre|revele)\s+(your\s+|the\s+|o\s+)?(system\s+prompt"
-            r"|prompt\s+de\s+sistema|instru[çc][õo]es\s+internas|api\s*key|gemini_api_key)",
+            r"(reveal|show|print|dump|exiba|mostre|revele|liste)\s+(your\s+|the\s+|o\s+|as\s+|os\s+)?"
+            r"(system\s+prompt|prompt\s+de\s+sistema|instru[çc][õo]es\s+internas"
+            r"|api\s*key|gemini_api_key|telegram_bot_token|access_control"
+            r"|vari[áa]veis\s+de\s+ambiente|environment\s+variables|env\s+vars"
+            r"|configura[çc][õo]es?\s+internas?|\.env\b)",
             re.IGNORECASE,
         ),
     ),
@@ -30,6 +33,24 @@ _INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(
             r"(you\s+are\s+now\s+|act\s+as\s+|voc[êe]\s+agora\s+[ée]\s+|"
             r"finja\s+ser\s+|desconsidere\s+as\s+regras)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "privilege_escalation",
+        re.compile(
+            r"(me\s+torne\s+admin|promov[ae]\s+(me\s+)?a\s+admin|conceda\s+privil[ée]gios?"
+            r"|modo\s+administrador|grant\s+admin|make\s+me\s+admin|override\s+role"
+            r"|elevar\s+privil[ée]gio|ativar\s+perfil\s+admin)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "scope_override",
+        re.compile(
+            r"(pesquise\s+na\s+internet|use\s+a\s+internet|search\s+the\s+(web|internet)"
+            r"|use\s+(seu\s+)?conhecimento\s+geral|use\s+general\s+knowledge"
+            r"|responda\s+mesmo\s+sem\s+evid[êe]ncia|invente\s+(um\s+)?artigo)",
             re.IGNORECASE,
         ),
     ),

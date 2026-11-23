@@ -75,6 +75,8 @@ retrieval:
   only_current_amendment_by_default: true
   reconstruct_full_section_from_ssot: true
   allow_preliminary_native_search: true
+  # Interface pública do Telegram restringe a recuperação exclusivamente a páginas aprovadas
+  telegram_only_approved_literal: true
 
 telegram:
   mode: "long_polling"
@@ -82,18 +84,25 @@ telegram:
   max_input_length: 1000
   polling_timeout_seconds: 30
   max_concurrent_updates_per_user: 1
+  max_global_concurrent_updates: 8
+  command_timeout_seconds: 45.0
   duplicate_update_cache_size: 512
   startup_retry_max_attempts: 5
   startup_retry_base_delay_seconds: 2.0
+  # Escopo inicial: somente conversas privadas individuais (grupos desabilitados por padrão)
+  allow_group_chats: false
 
 security:
-  deny_by_default: true
+  public_access: true
+  default_role: "USER"
+  deny_by_default: false
   rate_limit:
     requests_per_minute: 15
     burst_size: 5
+    global_requests_per_minute: 60
   audit:
     # Auditoria persistente em JSONL no volume /app/logs (independente da rotação json-file do Docker)
-    pseudonymize_user_ids: false
+    pseudonymize_user_ids: true
     redact_secrets: true
     filename: "audit_events.jsonl"
     max_file_size_mb: 10

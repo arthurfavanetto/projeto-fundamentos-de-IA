@@ -1,12 +1,17 @@
 """Roteador de comandos e texto livre do Bot Telegram integrado à Clean Architecture.
 
 Regras:
-- Aplica `AccessControl` (`deny_by_default`) em TODOS os comandos e mensagens de texto livre.
-- Nunca duplica regras de negócio regulatórias: delega exclusivamente aos serviços
-  existentes (`CheckSystemStatusUseCase`, `CatalogService`, `IndexingService`,
-  `NormativeChatService`).
-- Protege contra mensagens excessivamente longas, updates duplicados, abuso (`UserRateLimiter`)
-  e concorrência descontrolada por usuário.
+- Aplica `AccessControl` determinístico (modo público `USER` com privilégios `ADMIN` restritos
+  aos administradores cadastrados, ou modo restrito quando `public_access: false`) em TODOS os
+  comandos e mensagens de texto livre.
+- Restringe por padrão a recuperação normativa na interface Telegram exclusivamente a documentos
+  e páginas aprovados e indexados (`only_approved_literal=True`).
+- Separa rigorosamente respostas públicas (`/status`, `/documentos`, `/versao`) de diagnósticos
+  administrativos (`ADMIN`), sem vazar caminhos internos, credenciais ou dados de outros usuários.
+- Implementa `/id` retornando exclusivamente o Telegram User ID numérico do próprio solicitante.
+- Protege a operação pública contra abuso com limite de entrada, rate limit por usuário e global,
+  limite global de concorrência, timeout de chamadas e deduplicação de updates — sem memória
+  conversacional cruzada entre usuários.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ logger = structlog.get_logger(__name__)
 SUPPORTED_COMMANDS: tuple[str, ...] = (
     "/start",
     "/help",
+    "/id",
     "/status",
     "/rbac",
     "/buscar",
@@ -44,6 +50,8 @@ SUPPORTED_COMMANDS: tuple[str, ...] = (
     "/documentos",
     "/versao",
 )
+
+_MAX_TRACKED_USER_SEMAPHORES = 2048
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,8 +96,11 @@ class TelegramCommandRouter:
         audit_port: AuditPort | None = None,
         max_input_length: int = 1000,
         max_concurrent_updates_per_user: int = 1,
+        max_global_concurrent_updates: int = 8,
+        command_timeout_seconds: float = 45.0,
         duplicate_update_cache_size: int = 512,
-        allow_preliminary_native_search: bool = True,
+        only_approved_literal: bool = True,
+        allow_preliminary_native_search: bool = False,
     ) -> None:
         self._access_control = access_control
         self._rate_limiter = rate_limiter
@@ -102,11 +113,17 @@ class TelegramCommandRouter:
         self._audit_port = audit_port
         self._max_input_length = max_input_length
         self._max_concurrent_updates_per_user = max_concurrent_updates_per_user
+        self._max_global_concurrent_updates = max(1, max_global_concurrent_updates)
+        self._command_timeout_seconds = max(1.0, float(command_timeout_seconds))
         self._duplicate_update_cache_size = duplicate_update_cache_size
-        self._allow_preliminary_native_search = allow_preliminary_native_search
+        self._only_approved_literal = only_approved_literal
+        self._allow_preliminary_native_search = (
+            False if only_approved_literal else allow_preliminary_native_search
+        )
 
         self._seen_updates: OrderedDict[int, None] = OrderedDict()
-        self._user_semaphores: dict[int, asyncio.Semaphore] = {}
+        self._global_semaphore = asyncio.Semaphore(self._max_global_concurrent_updates)
+        self._user_semaphores: OrderedDict[int, asyncio.Semaphore] = OrderedDict()
 
     def _is_duplicate_update(self, update_id: int | None) -> bool:
         if update_id is None:
@@ -120,9 +137,16 @@ class TelegramCommandRouter:
 
     def _get_user_semaphore(self, user_id: int) -> asyncio.Semaphore:
         sem = self._user_semaphores.get(user_id)
-        if sem is None:
-            sem = asyncio.Semaphore(self._max_concurrent_updates_per_user)
-            self._user_semaphores[user_id] = sem
+        if sem is not None:
+            self._user_semaphores.move_to_end(user_id)
+            return sem
+        if len(self._user_semaphores) >= _MAX_TRACKED_USER_SEMAPHORES:
+            for stale_uid, stale_sem in list(self._user_semaphores.items()):
+                if not stale_sem.locked():
+                    del self._user_semaphores[stale_uid]
+                    break
+        sem = asyncio.Semaphore(self._max_concurrent_updates_per_user)
+        self._user_semaphores[user_id] = sem
         return sem
 
     def _record_audit(
@@ -163,34 +187,51 @@ class TelegramCommandRouter:
     def _default_search_filter(self) -> SearchFilter:
         return SearchFilter(
             only_current_version=True,
+            only_approved_literal=self._only_approved_literal,
             include_preliminary_native=self._allow_preliminary_native_search,
         )
 
     def _handle_start(self, role: OperatorRole) -> str:
+        mode_note = (
+            "Modo de acesso: público em conversas privadas (perfil padrão USER)."
+            if self._access_control.public_access
+            else "Modo de acesso: restrito a operadores autorizados."
+        )
         return (
             "RBAC AI Assistant — Assistente Normativo de Aviação Civil (ANAC)\n"
-            f"Perfil ativo: {role.value}\n\n"
-            "Este assistente consulta regulamentos oficiais da ANAC armazenados localmente "
-            "(SQLite SSOT + FTS5 + ChromaDB), separando estritamente:\n"
-            "- TEXTO NORMATIVO (literal do SQLite em páginas aprovadas)\n"
+            f"Perfil ativo: {role.value}\n"
+            f"{mode_note}\n\n"
+            "Este assistente responde exclusivamente com base nos regulamentos oficiais da ANAC "
+            "efetivamente aprovados e indexados na base local, separando estritamente:\n"
+            "- TEXTO NORMATIVO (literal validado, sem reescrita)\n"
             "- EXPLICAÇÃO (gerada por IA apenas sobre evidências aprovadas)\n"
             "- REFERÊNCIA (documento, emenda, seção e páginas PDF/impressa)\n\n"
-            "Envie /help para ver todos os comandos ou faça uma pergunta em texto livre."
+            "Perguntas fora do escopo documental ou sem evidência suficiente recebem recusa "
+            "fundamentada, sem pesquisa na internet nem uso de conhecimento geral.\n"
+            "Envie /help para ver todos os comandos ou faça sua pergunta em texto livre."
         )
 
     def _handle_help(self) -> str:
         return (
-            "Comandos disponíveis do RBAC AI Assistant:\n\n"
-            "/start — Apresentação e perfil autorizado\n"
+            "Comandos disponíveis do RBAC AI Assistant (conversas privadas):\n\n"
+            "/start — Apresentação, escopo normativo e perfil ativo\n"
             "/help — Lista de comandos e instruções de uso\n"
-            "/status — Saúde do sistema (ChromaDB, volumes e índices)\n"
+            "/id — Exibe exclusivamente o seu próprio Telegram User ID numérico\n"
+            "/status — Disponibilidade do assistente e base normativa\n"
             "/rbac <seção> — Consulta normativa direta sem reescrita IA (ex.: /rbac 43.3)\n"
-            "/buscar <termo> — Busca híbrida (estrutural + FTS5 + vetorial) sem geração IA\n"
+            "/buscar <termo> — Busca híbrida (estrutural + lexical + vetorial) sem geração IA\n"
             "/explicar <seção ou pergunta> — Texto normativo literal + explicação fundamentada IA\n"
-            "/documentos — Lista regulamentos cadastrados e status de indexação\n"
+            "/documentos — Lista regulamentos disponíveis na base\n"
             "/versao — Versão do assistente, política Gemini e emendas vigentes na base\n\n"
-            "Texto livre: envie uma pergunta direta sobre regulamentos da ANAC "
-            "(equivalente ao fluxo completo de consulta normativa com citações)."
+            "Texto livre: envie uma pergunta em linguagem natural sobre regulamentos da ANAC. "
+            "As respostas utilizam exclusivamente documentos aprovados e indexados."
+        )
+
+    def _handle_id(self, user_id: int) -> str:
+        """Retorna exclusivamente o Telegram User ID numérico do próprio solicitante."""
+        return (
+            f"Seu Telegram User ID numérico: {user_id}\n\n"
+            "Este identificador é exibido exclusivamente para você nesta conversa privada."
         )
 
     def _handle_status(self, role: OperatorRole) -> str:
@@ -198,25 +239,30 @@ class TelegramCommandRouter:
         index_report = self._indexing_service.get_index_status()
         overall = "SAUDÁVEL" if status_report.healthy else "DEGRADADO"
 
+        # Formato público sanitizado (sem caminhos internos, heartbeats, coleção ou credenciais)
         lines = [
             f"=== STATUS DO SISTEMA: {overall} ===",
-            f"Ambiente: {self._runtime_info.environment}",
-            f"ChromaDB: {'OK' if status_report.chroma_healthy else 'INDISPONÍVEL'}",
             f"Documentos cadastrados: {index_report.total_documents}",
             (
                 f"Versões indexadas: {index_report.indexed_versions_count}/"
                 f"{index_report.total_versions}"
             ),
-            f"Chunks SQLite (FTS5): {index_report.total_sqlite_chunks}",
-            f"Vetores ChromaDB: {index_report.chroma_vector_count}",
             f"Geração IA configurada: {'sim' if self._runtime_info.llm_configured else 'não'}",
+            "Escopo normativo: apenas documentos ANAC aprovados e indexados",
         ]
         if role == OperatorRole.ADMIN:
+            access_mode = "público (USER)" if self._access_control.public_access else "restrito"
             lines.extend(
                 [
                     "",
                     "--- Diagnóstico ADMIN ---",
+                    f"Ambiente: {self._runtime_info.environment}",
+                    f"Política de acesso: {access_mode}",
+                    f"Administradores configurados: {self._access_control.admin_count}",
+                    f"ChromaDB: {'OK' if status_report.chroma_healthy else 'INDISPONÍVEL'}",
                     f"ChromaDB heartbeat: {status_report.chroma_heartbeat}",
+                    f"Chunks SQLite (FTS5): {index_report.total_sqlite_chunks}",
+                    f"Vetores ChromaDB: {index_report.chroma_vector_count}",
                     f"Volume documentos gravável: {status_report.documents_dir_writable}",
                     f"Volume auditoria gravável: {status_report.audit_logs_dir_writable}",
                     f"Coleção vetorial: {index_report.collection_name}",
@@ -230,26 +276,31 @@ class TelegramCommandRouter:
                 lines.append(f"Erro reportado: {redact_text(status_report.error)}")
         return "\n".join(lines)
 
-    def _handle_documentos(self) -> str:
+    def _handle_documentos(self, role: OperatorRole) -> str:
         docs = self._catalog_service.search_documents()
         index_report = self._indexing_service.get_index_status()
         indexed_by_doc = {
             v.document_id: v for v in index_report.version_summaries if v.is_indexed
         }
         if not docs:
-            return (
-                "Nenhum documento regulatório está cadastrado no catálogo SQLite no momento.\n"
-                "Execute a ingestão controlada via `scripts/ingest_regulation.py` no servidor."
-            )
+            if role == OperatorRole.ADMIN:
+                return (
+                    "Nenhum documento regulatório está cadastrado no catálogo SQLite no momento.\n"
+                    "Execute a ingestão controlada via `scripts/ingest_regulation.py` no servidor."
+                )
+            return "Nenhum documento regulatório aprovado está disponível na base no momento."
 
-        lines = ["=== DOCUMENTOS REGULATÓRIOS CADASTRADOS ==="]
+        lines = ["=== DOCUMENTOS REGULATÓRIOS DISPONÍVEIS ==="]
         for doc in docs:
             idx_summary = indexed_by_doc.get(doc.document_id)
-            idx_label = (
-                f"indexado ({idx_summary.indexed_chunk_count} chunks)"
-                if idx_summary is not None
-                else "não indexado"
-            )
+            if role == OperatorRole.ADMIN:
+                idx_label = (
+                    f"indexado ({idx_summary.indexed_chunk_count} chunks)"
+                    if idx_summary is not None
+                    else "não indexado"
+                )
+            else:
+                idx_label = "indexado" if idx_summary is not None else "não indexado"
             lines.append(
                 f"- {doc.authority} {doc.document_type.value} {doc.regulation_number} "
                 f"(Emenda {doc.amendment_number} | vigência: {doc.version_status.value}) — "
@@ -257,11 +308,10 @@ class TelegramCommandRouter:
             )
         return "\n".join(lines)
 
-    def _handle_versao(self) -> str:
+    def _handle_versao(self, role: OperatorRole) -> str:
         docs = self._catalog_service.search_documents()
         lines = [
             f"RBAC AI Assistant v{app_version}",
-            f"Ambiente: {self._runtime_info.environment}",
             "Política Gemini (Free Tier Standard):",
             f"- Geração: {self._runtime_info.generation_model}",
             (
@@ -269,12 +319,17 @@ class TelegramCommandRouter:
                 f"({self._runtime_info.embedding_dimensions}d)"
             ),
             f"- Modelos pagos permitidos: {self._runtime_info.allow_paid_models}",
-            f"- Coleção ChromaDB: {self._runtime_info.collection_name}",
-            "",
-            "Versões regulatórias na base:",
         ]
+        if role == OperatorRole.ADMIN:
+            lines.extend(
+                [
+                    f"- Ambiente: {self._runtime_info.environment}",
+                    f"- Coleção ChromaDB: {self._runtime_info.collection_name}",
+                ]
+            )
+        lines.extend(["", "Versões regulatórias na base:"])
         if not docs:
-            lines.append("- Nenhum regulamento ingerido até o momento.")
+            lines.append("- Nenhum regulamento disponível até o momento.")
         else:
             for doc in docs:
                 lines.append(
@@ -338,6 +393,7 @@ class TelegramCommandRouter:
         *,
         command: str,
         args_text: str,
+        user_id: int,
         actor_id: str,
         role: OperatorRole,
     ) -> str:
@@ -345,12 +401,14 @@ class TelegramCommandRouter:
             return self._handle_start(role)
         if command == "/help":
             return self._handle_help()
+        if command == "/id":
+            return self._handle_id(user_id)
         if command == "/status":
             return self._handle_status(role)
         if command == "/documentos":
-            return self._handle_documentos()
+            return self._handle_documentos(role)
         if command == "/versao":
-            return self._handle_versao()
+            return self._handle_versao(role)
         if command == "/rbac":
             return self._handle_rbac(args_text, actor_id=actor_id, role=role)
         if command == "/buscar":
@@ -372,7 +430,7 @@ class TelegramCommandRouter:
         update_id: int | None = None,
         run_sync: Callable[..., object] | None = None,
     ) -> TelegramResponse:
-        """Processa comando ou texto livre com autorização obrigatória, rate limit e paginação."""
+        """Processa comando ou texto livre com autorização, rate limit, timeout e paginação."""
         if self._is_duplicate_update(update_id):
             logger.info("telegram_duplicate_update_ignored", update_id=update_id)
             return TelegramResponse(messages=(), handled=False, duplicate_ignored=True)
@@ -380,7 +438,7 @@ class TelegramCommandRouter:
         raw_text = text or ""
         command, args_text = self._parse_command(raw_text)
 
-        # 1. Controle de acesso determinístico deny_by_default em TODOS os handlers!
+        # 1. Controle de acesso determinístico (modo público USER + ADMIN isolado ou restrito)
         decision = self._access_control.authorize(user_id, command=command)
         if not decision.allowed or decision.user_id is None or decision.role is None:
             return TelegramResponse(
@@ -424,7 +482,7 @@ class TelegramCommandRouter:
                 command=command,
             )
 
-        # 3. Rate limiting por usuário para prevenir abuso
+        # 3. Rate limiting por usuário e global para proteção da operação pública
         rate = self._rate_limiter.check(authorized_uid)
         if not rate.allowed:
             self._record_audit(
@@ -434,6 +492,7 @@ class TelegramCommandRouter:
                 role=authorized_role.value,
                 details={
                     "command": command,
+                    "scope": rate.scope,
                     "retry_after_seconds": rate.retry_after_seconds,
                 },
             )
@@ -446,9 +505,9 @@ class TelegramCommandRouter:
                 command=command,
             )
 
-        # 4. Execução com controle de concorrência por usuário e tratamento seguro de erros
-        semaphore = self._get_user_semaphore(authorized_uid)
-        async with semaphore:
+        # 4. Execução isolada (sem memória cruzada) com concorrência global + por usuário e timeout
+        user_semaphore = self._get_user_semaphore(authorized_uid)
+        async with self._global_semaphore, user_semaphore:
             try:
                 if run_sync is not None:
                     raw_reply = str(
@@ -456,17 +515,22 @@ class TelegramCommandRouter:
                             self._dispatch_sync,
                             command=command,
                             args_text=args_text,
+                            user_id=authorized_uid,
                             actor_id=actor_id,
                             role=authorized_role,
                         )
                     )
                 else:
-                    raw_reply = await asyncio.to_thread(
-                        self._dispatch_sync,
-                        command=command,
-                        args_text=args_text,
-                        actor_id=actor_id,
-                        role=authorized_role,
+                    raw_reply = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._dispatch_sync,
+                            command=command,
+                            args_text=args_text,
+                            user_id=authorized_uid,
+                            actor_id=actor_id,
+                            role=authorized_role,
+                        ),
+                        timeout=self._command_timeout_seconds,
                     )
                 self._record_audit(
                     action="telegram_command_handled",
@@ -477,6 +541,29 @@ class TelegramCommandRouter:
                 )
                 return TelegramResponse(
                     messages=self._splitter.split(raw_reply),
+                    command=command,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "telegram_command_timeout",
+                    command=command,
+                    timeout_seconds=self._command_timeout_seconds,
+                )
+                self._record_audit(
+                    action="telegram_command_handled",
+                    status="timeout",
+                    actor_id=actor_id,
+                    role=authorized_role.value,
+                    details={
+                        "command": command,
+                        "timeout_seconds": self._command_timeout_seconds,
+                    },
+                )
+                return TelegramResponse(
+                    messages=self._splitter.split(
+                        "O tempo limite para processar sua consulta foi excedido. "
+                        "Tente novamente em instantes ou refine sua pergunta."
+                    ),
                     command=command,
                 )
             except DomainError as exc:

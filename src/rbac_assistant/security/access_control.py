@@ -1,11 +1,16 @@
-"""Controle de acesso determinístico `deny_by_default` por Telegram User ID.
+"""Controle de acesso determinístico (modo público configurável + isolamento estrito ADMIN).
 
 Regras de segurança:
-- Política imutável `deny_by_default`: qualquer usuário ausente da allowlist é bloqueado.
-- Ausência de `config/access_control.yaml`, arquivo inválido ou lista vazia bloqueiam
-  100% dos usuários (nunca inventa administradores ou IDs padrão).
+- Com `public_access: true` e `default_role: USER`, qualquer usuário do Telegram com
+  User ID numérico válido recebe automaticamente o perfil `USER`, sem necessidade de
+  cadastro ou whitelist prévia.
+- Apenas IDs explicitamente cadastrados em `roles.admins` recebem perfil `ADMIN`.
+- Usuários públicos JAMAIS recebem privilégios `ADMIN` — nem por ausência de arquivo,
+  nem por arquivo malformado/incompatível, nem por tentativa de definir `default_role: ADMIN`.
+- Com `public_access: false`, o acesso público é explicitamente desabilitado (modo restrito
+  por lista de permissões `roles.admins` / `roles.users`, com bloqueio padrão de desconhecidos).
 - Validação rigorosa de IDs inteiros positivos (rejeita `bool`, strings inválidas, `<= 0`).
-- Registra eventos de bloqueio/permissão via `AuditPort` quando injetado.
+- Registra eventos via `AuditPort` quando injetado, sem expor IDs em logs operacionais públicos.
 """
 
 from __future__ import annotations
@@ -26,11 +31,12 @@ from rbac_assistant.domain.ports.audit_port import AuditEvent, AuditPort
 logger = structlog.get_logger(__name__)
 
 _SAFE_DENIAL_UNCONFIGURED = (
-    "Acesso negado. Este assistente opera em modo restrito (deny-by-default) e não possui "
-    "uma lista operacional de usuários autorizados configurada no servidor."
+    "Acesso negado. O modo de acesso restrito está ativo e não possui uma lista operacional "
+    "de usuários autorizados configurada no servidor."
 )
 _SAFE_DENIAL_UNAUTHORIZED = (
-    "Acesso negado. Seu Telegram User ID não está autorizado a utilizar o RBAC AI Assistant."
+    "Acesso negado. O acesso público está desabilitado e seu Telegram User ID não está "
+    "autorizado a utilizar o RBAC AI Assistant."
 )
 _SAFE_DENIAL_INVALID_ID = (
     "Acesso negado. Não foi possível identificar um Telegram User ID numérico válido."
@@ -91,24 +97,36 @@ def _extract_id_set(raw_items: Any, *, field_name: str) -> tuple[frozenset[int],
     return frozenset(valid), invalid_count
 
 
+def _validate_default_role(raw_role: OperatorRole | str) -> OperatorRole:
+    """Garante deterministicamente que o papel padrão público seja exclusivamente `USER`."""
+    normalized = str(raw_role).strip().upper()
+    if normalized != OperatorRole.USER.value:
+        raise ValueError(
+            "O campo `default_role` só pode ser `USER`; "
+            "privilégios ADMIN nunca podem ser concedidos por padrão."
+        )
+    return OperatorRole.USER
+
+
 class AccessControl:
-    """Guarda determinístico `deny_by_default` para autorização de operadores Telegram."""
+    """Guarda determinístico para acesso público (`USER`) e isolamento estrito `ADMIN`."""
 
     def __init__(
         self,
         *,
         admins: Iterable[int] = (),
         users: Iterable[int] = (),
-        deny_by_default: bool = True,
+        public_access: bool = True,
+        default_role: OperatorRole | str = OperatorRole.USER,
+        deny_by_default: bool | None = None,
         config_loaded: bool = True,
         config_issue: str | None = None,
         audit_port: AuditPort | None = None,
     ) -> None:
-        if not deny_by_default:
-            raise ValueError(
-                "A política de segurança exige `deny_by_default=True`; "
-                "acesso aberto a usuários desconhecidos é proibido."
-            )
+        validated_default_role = _validate_default_role(default_role)
+        effective_public_access = (
+            (not deny_by_default) if deny_by_default is not None else bool(public_access)
+        )
 
         valid_admins: set[int] = set()
         for raw in admins:
@@ -126,7 +144,8 @@ class AccessControl:
 
         self._admins = frozenset(valid_admins)
         self._users = frozenset(valid_users - valid_admins)
-        self._deny_by_default = True
+        self._public_access = effective_public_access
+        self._default_role = validated_default_role
         self._config_loaded = config_loaded
         self._config_issue = config_issue
         self._audit_port = audit_port
@@ -136,23 +155,30 @@ class AccessControl:
         cls,
         yaml_path: Path,
         *,
+        default_public_access: bool = True,
         audit_port: AuditPort | None = None,
     ) -> AccessControl:
-        """Carrega allowlist de `config/access_control.yaml` em modo fail-closed.
+        """Carrega política operacional de `config/access_control.yaml` com isolamento ADMIN.
 
-        Se o arquivo estiver ausente, malformado ou vazio, retorna instância operacional
-        que bloqueia 100% dos usuários (`deny_by_default`) sem inventar IDs.
+        Regras de segurança no carregamento:
+        - Arquivo ausente: nunca inventa administradores (`admins=()`). Mantém `public_access`
+          conforme `default_public_access` (`USER` sem privilégio administrativo).
+        - Arquivo malformado ou raiz inválida: opera em modo fail-closed (`public_access=False`,
+          `admins=()`, `users=()`) — nunca concede `ADMIN` nem abre acesso acidental.
+        - `default_role` diferente de `USER` no YAML: rejeitado e forçado para `USER`.
+        - `policy.public_access: false` (ou legado `deny_by_default: true` sem `public_access`):
+          desabilita explicitamente o acesso público.
         """
         if not yaml_path.is_file():
             logger.warning(
                 "access_control_file_missing",
-                path=str(yaml_path),
-                policy="deny_all_fail_closed",
+                policy="public_user_no_admins" if default_public_access else "restricted_no_admins",
             )
             return cls(
                 admins=(),
                 users=(),
-                deny_by_default=True,
+                public_access=default_public_access,
+                default_role=OperatorRole.USER,
                 config_loaded=False,
                 config_issue="missing_config_file",
                 audit_port=audit_port,
@@ -163,76 +189,109 @@ class AccessControl:
         except (OSError, yaml.YAMLError) as exc:
             logger.error(
                 "access_control_yaml_load_failed",
-                path=str(yaml_path),
                 error_type=type(exc).__name__,
             )
             return cls(
                 admins=(),
                 users=(),
-                deny_by_default=True,
+                public_access=False,
+                default_role=OperatorRole.USER,
                 config_loaded=False,
                 config_issue="invalid_yaml",
                 audit_port=audit_port,
             )
 
         if not isinstance(raw_data, dict):
-            logger.warning("access_control_invalid_root", path=str(yaml_path))
+            logger.warning("access_control_invalid_root")
             return cls(
                 admins=(),
                 users=(),
-                deny_by_default=True,
+                public_access=False,
+                default_role=OperatorRole.USER,
                 config_loaded=False,
                 config_issue="invalid_root_structure",
                 audit_port=audit_port,
             )
 
+        issues: list[str] = []
         policy_section = raw_data.get("policy")
-        if isinstance(policy_section, dict) and policy_section.get("deny_by_default") is False:
-            logger.warning(
-                "access_control_open_policy_rejected",
-                path=str(yaml_path),
-                enforced_policy="deny_by_default",
-            )
+        public_access = default_public_access
+
+        if policy_section is not None and not isinstance(policy_section, dict):
+            logger.warning("access_control_invalid_policy_section")
+            public_access = False
+            issues.append("invalid_policy_section")
+        elif isinstance(policy_section, dict):
+            if "public_access" in policy_section:
+                raw_public = policy_section["public_access"]
+                if isinstance(raw_public, bool):
+                    public_access = raw_public
+                else:
+                    logger.warning("access_control_invalid_public_access_type")
+                    public_access = False
+                    issues.append("invalid_policy_public_access")
+            elif policy_section.get("deny_by_default") is True:
+                public_access = False
+
+            if "default_role" in policy_section:
+                raw_default_role = policy_section["default_role"]
+                if (
+                    not isinstance(raw_default_role, str)
+                    or raw_default_role.strip().upper() != OperatorRole.USER.value
+                ):
+                    logger.warning("access_control_invalid_default_role_rejected")
+                    issues.append("invalid_default_role_forced_to_user")
 
         roles_section = raw_data.get("roles")
-        if not isinstance(roles_section, dict):
-            logger.warning("access_control_roles_missing", path=str(yaml_path))
-            return cls(
-                admins=(),
-                users=(),
-                deny_by_default=True,
-                config_loaded=True,
-                config_issue="empty_roles",
-                audit_port=audit_port,
-            )
+        admins: frozenset[int] = frozenset()
+        users: frozenset[int] = frozenset()
+        bad_admins = 0
+        bad_users = 0
 
-        admins, bad_admins = _extract_id_set(roles_section.get("admins"), field_name="admins")
-        users, bad_users = _extract_id_set(roles_section.get("users"), field_name="users")
+        if roles_section is None:
+            issues.append("empty_roles")
+        elif not isinstance(roles_section, dict):
+            logger.warning("access_control_roles_invalid")
+            issues.append("invalid_roles_section")
+        else:
+            admins, bad_admins = _extract_id_set(roles_section.get("admins"), field_name="admins")
+            users, bad_users = _extract_id_set(roles_section.get("users"), field_name="users")
+            if bad_admins or bad_users:
+                issues.append("partial_invalid_entries_ignored")
+                logger.warning(
+                    "access_control_invalid_entries_ignored",
+                    invalid_admins=bad_admins,
+                    invalid_users=bad_users,
+                )
 
-        issue: str | None = None
-        if not admins and not users:
-            issue = "empty_allowlist"
-            logger.warning("access_control_empty_allowlist", path=str(yaml_path))
-        elif bad_admins or bad_users:
-            issue = "partial_invalid_entries_ignored"
-            logger.warning(
-                "access_control_invalid_entries_ignored",
-                invalid_admins=bad_admins,
-                invalid_users=bad_users,
-            )
+        if not public_access and not admins and not users and not issues:
+            issues.append("empty_allowlist")
+            logger.warning("access_control_empty_allowlist")
 
         return cls(
             admins=admins,
             users=users,
-            deny_by_default=True,
+            public_access=public_access,
+            default_role=OperatorRole.USER,
             config_loaded=True,
-            config_issue=issue,
+            config_issue=issues[0] if issues else None,
             audit_port=audit_port,
         )
 
     @property
+    def public_access(self) -> bool:
+        """Indica se o acesso público automático com perfil `USER` está habilitado."""
+        return self._public_access
+
+    @property
+    def default_role(self) -> OperatorRole:
+        """Perfil atribuído a usuários públicos (sempre `USER`)."""
+        return self._default_role
+
+    @property
     def deny_by_default(self) -> bool:
-        return self._deny_by_default
+        """Compatibilidade: verdadeiro somente quando `public_access` está desabilitado."""
+        return not self._public_access
 
     @property
     def config_loaded(self) -> bool:
@@ -268,6 +327,7 @@ class AccessControl:
                     details={
                         "reason": decision.reason,
                         "command": command,
+                        "public_access": self._public_access,
                         "allowlist_configured": self.is_allowlist_configured,
                     },
                 )
@@ -282,7 +342,7 @@ class AccessControl:
         require_admin: bool = False,
         command: str = "unknown",
     ) -> AccessDecision:
-        """Avalia deterministicamente se o usuário possui acesso autorizado."""
+        """Avalia deterministicamente perfil e autorização de um usuário do Telegram."""
         parsed_id = _parse_valid_user_id(user_id)
         if parsed_id is None:
             decision = AccessDecision(
@@ -295,31 +355,36 @@ class AccessControl:
             self._record_audit(decision=decision, command=command)
             return decision
 
-        if not self.is_allowlist_configured:
-            decision = AccessDecision(
-                allowed=False,
-                user_id=parsed_id,
-                role=None,
-                reason=self._config_issue or "empty_allowlist",
-                safe_message=_SAFE_DENIAL_UNCONFIGURED,
-            )
-            self._record_audit(decision=decision, command=command)
-            return decision
-
         role: OperatorRole | None = None
+        grant_reason = "authorized"
+
         if parsed_id in self._admins:
             role = OperatorRole.ADMIN
+            grant_reason = "authorized_admin"
         elif parsed_id in self._users:
             role = OperatorRole.USER
+            grant_reason = "authorized_user"
+        elif self._public_access:
+            role = self._default_role
+            grant_reason = "public_access_user"
 
         if role is None:
-            decision = AccessDecision(
-                allowed=False,
-                user_id=parsed_id,
-                role=None,
-                reason="user_not_in_allowlist",
-                safe_message=_SAFE_DENIAL_UNAUTHORIZED,
-            )
+            if not self.is_allowlist_configured:
+                decision = AccessDecision(
+                    allowed=False,
+                    user_id=parsed_id,
+                    role=None,
+                    reason=self._config_issue or "empty_allowlist",
+                    safe_message=_SAFE_DENIAL_UNCONFIGURED,
+                )
+            else:
+                decision = AccessDecision(
+                    allowed=False,
+                    user_id=parsed_id,
+                    role=None,
+                    reason="user_not_in_allowlist",
+                    safe_message=_SAFE_DENIAL_UNAUTHORIZED,
+                )
             self._record_audit(decision=decision, command=command)
             return decision
 
@@ -338,7 +403,7 @@ class AccessControl:
             allowed=True,
             user_id=parsed_id,
             role=role,
-            reason="authorized",
+            reason=grant_reason,
             safe_message="",
         )
         self._record_audit(decision=decision, command=command)

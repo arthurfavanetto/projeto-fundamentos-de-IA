@@ -27,13 +27,30 @@ def test_load_settings_from_repository_yaml(
     assert settings.chroma_heartbeat_url == "http://chromadb:8000/api/v2/heartbeat"
     assert settings.extraction.ocr_unreviewed_policy == "block_until_reviewed"
     assert settings.extraction.require_integrity_check_for_native_pages is True
-    assert settings.security.deny_by_default is True
+    assert settings.retrieval.max_vector_distance == 0.85
+    assert settings.retrieval.telegram_only_approved_literal is True
+    assert settings.telegram.allow_group_chats is False
+    assert settings.telegram.max_global_concurrent_updates == 8
+    assert settings.telegram.command_timeout_seconds == 45.0
+    assert settings.security.public_access is True
+    assert settings.security.default_role == "USER"
+    assert settings.security.deny_by_default is False
+    assert settings.security.rate_limit.global_requests_per_minute == 60
+    assert settings.security.audit.pseudonymize_user_ids is True
     assert settings.gemini_generation_model == "gemini-4-hydrogen"
     assert settings.gemini_embedding_model == "gemini-embedding-2"
     assert settings.effective_embedding_dimensions == 768
     assert settings.gemini_allow_paid_models is False
     assert settings.gemini.allowed_free_tier_generation_models == ("gemini-4-hydrogen",)
     assert settings.gemini.allowed_free_tier_embedding_models == ("gemini-embedding-2",)
+
+
+@pytest.mark.unit
+def test_security_config_forbids_admin_default_role() -> None:
+    from rbac_assistant.config.settings import SecurityConfig
+
+    with pytest.raises(ValidationError):
+        SecurityConfig(public_access=True, default_role="ADMIN")  # type: ignore[arg-type]
 
 
 @pytest.mark.unit

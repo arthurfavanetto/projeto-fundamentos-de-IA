@@ -176,6 +176,7 @@ class RetrievalConfig(BaseModel):
     only_current_amendment_by_default: bool = True
     reconstruct_full_section_from_ssot: bool = True
     allow_preliminary_native_search: bool = True
+    telegram_only_approved_literal: bool = True
 
 
 class TelegramConfig(BaseModel):
@@ -186,16 +187,20 @@ class TelegramConfig(BaseModel):
     max_input_length: int = Field(default=1000, ge=64, le=4096)
     polling_timeout_seconds: int = Field(default=30, ge=1, le=120)
     max_concurrent_updates_per_user: int = Field(default=1, ge=1, le=5)
+    max_global_concurrent_updates: int = Field(default=8, ge=1, le=64)
+    command_timeout_seconds: float = Field(default=45.0, gt=1.0, le=300.0)
     duplicate_update_cache_size: int = Field(default=512, ge=32, le=10000)
     startup_retry_max_attempts: int = Field(default=5, ge=1, le=20)
     startup_retry_base_delay_seconds: float = Field(default=2.0, ge=0.1, le=60.0)
+    allow_group_chats: bool = False
 
 
 class RateLimitConfig(BaseModel):
-    """Configuração de rate limiting por usuário."""
+    """Configuração de rate limiting por usuário e limite global para proteção pública."""
 
     requests_per_minute: int = Field(default=15, ge=1)
     burst_size: int = Field(default=5, ge=1)
+    global_requests_per_minute: int = Field(default=60, ge=1)
 
 
 class AuditConfig(BaseModel):
@@ -215,9 +220,11 @@ class AuditConfig(BaseModel):
 
 
 class SecurityConfig(BaseModel):
-    """Política de segurança operacional."""
+    """Política de segurança operacional (acesso público com admins isolados ou restrito)."""
 
-    deny_by_default: bool = True
+    public_access: bool = True
+    default_role: Literal["USER"] = "USER"
+    deny_by_default: bool = False
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
 
