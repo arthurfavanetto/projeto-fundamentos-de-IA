@@ -16,7 +16,8 @@ Em **22/11/2026**, foi executado indevidamente o comando destrutivo `docker comp
 - Docker Desktop foi encerrado após o incidente.
 - Uma cópia de trabalho do VHDX (`F:\DockerRecovery\docker_data_working.vhdx`, tamanho `47.422.898.176` bytes, SHA-256 `7C13330841763A774D7F2C7273877A7AC2DBAA826C9E3019E6010EA0A4F75060`) foi anexada ao `Ubuntu-24.04` WSL em modo somente leitura (`/dev/sdd`, `blockdev --getro /dev/sdd == 1`).
 - O banco `metadata.db` do Docker ainda registrava referência a `regulatory_documents`, mas os diretórios dos três volumes do projeto não apareceram na listagem consultada.
-- **Conclusão operacional:** os volumes antigos **não** foram recuperados. Como a auditoria pré-incidente já confirmara que ainda não havia documentos oficiais RBAC ingeridos nem aprovações humanas registradas nos volumes antigos, a reconstrução com **volumes novos e vazios** não acarreta perda de código nem de base normativa já validada.
+- **Decisão definitiva do proprietário (23/11/2026):** a recuperação forense dos arquivos VHDX foi **encerrada definitivamente**. Não serão feitas novas tentativas com `ext4magic`, leitura de conteúdo dos VHDX ou restauração dos volumes antigos. Os arquivos físicos de backup permanecem intactos e fora do fluxo de reconstrução; a única ação eventual relacionada à cópia de trabalho é desanexar especificamente `/dev/sdd` do WSL caso ainda esteja anexada, para liberar o Docker Desktop.
+- **Conclusão operacional:** a reconstrução prossegue de forma limpa com **volumes novos e vazios** gerados pelo Docker Compose a partir do estado validado no GitHub (`d1d6af1`). Como a auditoria pré-incidente já confirmara que não havia documentos oficiais RBAC ingeridos nem aprovações humanas registradas nos volumes antigos, não há perda de código nem de base normativa validada.
 
 ---
 

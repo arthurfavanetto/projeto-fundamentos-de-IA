@@ -49,10 +49,13 @@ src/rbac_assistant/
 
 ### Preparado (configuração/arquitetura), mas NÃO implementado
 - **Interface Telegram (Etapa 4):** existem apenas `TelegramConfig`, `AppSettings.telegram_bot_token`, `require_telegram_bot_token()`, mascaramento de tokens em `secret_redactor.py`, template `config/access_control.example.yaml`, ADR-03 e placeholder `src/rbac_assistant/interfaces/telegram/__init__.py`.
-- **Ausentes:** biblioteca de bot Telegram em `pyproject.toml`, Long Polling, handlers/comandos (`/start`, `/help`, `/status`, `/rbac`, `/buscar`, `/explicar`, `/documentos`, `/versao`, texto livre), `AccessControl` (`deny_by_default`), `MessageSplitter` (>4.096 chars), montagem de `config/access_control.yaml` em `docker-compose.yml` e integração no `src/rbac_assistant/main.py`.
+- **Ausentes (Telegram):** biblioteca de bot Telegram em `pyproject.toml`, Long Polling, handlers/comandos (`/start`, `/help`, `/status`, `/rbac`, `/buscar`, `/explicar`, `/documentos`, `/versao`, texto livre), `AccessControl` (`deny_by_default`), `MessageSplitter` (>4.096 chars), montagem de `config/access_control.yaml` em `docker-compose.yml` e integração no `src/rbac_assistant/main.py`.
+- **Auditoria persistente em `/app/logs` (`AuditPort`):** [`src/rbac_assistant/domain/ports/audit_port.py`](../src/rbac_assistant/domain/ports/audit_port.py) é atualmente apenas um contrato `Protocol` sem adaptador concreto gravando JSONL em `/app/logs` (o volume `audit_logs` existe e tem escrita validada no startup/healthcheck; trilhas de revisão humana de páginas já são persistidas em `/app/data/documents/reviews` e SQLite `page_reviews`).
+- **Rotação explícita de logs no Docker Compose:** `docker-compose.yml` ainda não declara `logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}` (usa padrão do Docker Desktop até PR autorizado).
 
 ### Pendente (operação / próximas etapas)
-1. Liberação segura do VHDX `/dev/sdd` no WSL e reconstrução dos volumes Docker vazios no host Windows 11.
-2. Ingestão controlada do `RBAC43EMD05.pdf` (`scripts/ingest_regulation.py`), inspeção (`scripts/inspect_document.py`), revisão e aprovação humana explícita (`scripts/validate_extraction.py`) e indexação (`scripts/index_document.py`) com a cota Free Tier disponível.
-3. Implementação completa da **Etapa 4 — Bot Telegram** na branch dedicada `feat/etapa-4-telegram-bot` com testes 100% offline.
-4. **Etapa 5 — Operação contínua e calibração real:** calibração do limiar provisório `max_vector_distance=0.85` sobre o RBAC 43 real e rotina de backup/restore.
+1. Liberação específica de `/dev/sdd` no WSL (recuperação forense VHDX encerrada definitivamente) e reconstrução limpa dos 3 volumes Docker novos/vazios no host Windows 11.
+2. Validação local no Windows (Python 3.12 + testes + Docker healthchecks + persistência + logs operacionais).
+3. Ingestão controlada do `RBAC43EMD05.pdf` (`scripts/ingest_regulation.py`), inspeção (`scripts/inspect_document.py`), revisão e aprovação humana explícita (`scripts/validate_extraction.py`) e indexação (`scripts/index_document.py`) com a cota Free Tier disponível.
+4. Implementação completa da **Etapa 4 — Bot Telegram** na branch dedicada `feat/etapa-4-telegram-bot` com testes 100% offline (incluindo adaptador de auditoria em `/app/logs` e rotação de logs no Compose, quando autorizado).
+5. **Etapa 5 — Operação contínua e calibração real:** calibração do limiar provisório `max_vector_distance=0.85` sobre o RBAC 43 real e rotina de backup/restore.

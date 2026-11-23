@@ -138,7 +138,52 @@ docker compose restart rbac-bot
 
 ---
 
-## 5. Backup Seguro dos Volumes Nomeados
+## 5. Logs, Auditoria e Rotação (Estado Real Auditado)
+
+### 5.1. O que está implementado hoje no código
+- **Logs operacionais estruturados (`src/rbac_assistant/config/logging_config.py`):**
+  - Emissão JSON via `structlog` com timestamp ISO-8601 UTC (`TimeStamper(fmt="iso", utc=True)`), nível de severidade (`add_log_level`) e redação determinística de segredos (`secret_redactor.redact_mapping`).
+  - Serviço principal (`python -m rbac_assistant.main`): emite em `stdout` (coletado pelo Docker Engine e consultável via `docker compose logs`).
+  - CLIs (`query_assistant.py`, `index_document.py`, `evaluate_rag.py`, `ingest_regulation.py`, `inspect_document.py`): emitem logs em `stderr` (`configure_cli_logging`), mantendo `stdout` puro para `--json`.
+- **Trilhas de revisão humana de páginas (Etapa 2):** persistidas duravelmente em SQLite (`page_reviews` em `/app/data/documents/catalog.sqlite3`) e arquivos em `/app/data/documents/reviews` dentro do volume `regulatory_documents`.
+
+### 5.2. Lacunas reais identificadas na auditoria (não implementadas ainda)
+- **Volume `/app/logs` (`audit_logs`) e `AuditPort`:** [`src/rbac_assistant/domain/ports/audit_port.py`](../src/rbac_assistant/domain/ports/audit_port.py) define hoje apenas o contrato `Protocol` (`AuditEvent` + `AuditPort.record()`), **sem adaptador concreto gravando arquivos JSONL em `/app/logs`**. Atualmente, `CheckSystemStatusUseCase` apenas verifica que `/app/logs` é gravável (`audit_logs_dir_writable=true`). Não marque a auditoria em arquivo como operacional até que um adaptador real (ex.: `JsonlAuditAdapter`) seja implementado na Etapa 4/5.
+- **Rotação de logs do Docker:** [`docker-compose.yml`](../docker-compose.yml) ainda **não** declara bloco `logging:` explícito; utiliza a retenção padrão do Docker Desktop. Quando autorizado em PR futuro, recomenda-se adicionar em ambos os serviços (`chromadb` e `rbac-bot`):
+  ```yaml
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+  ```
+
+### 5.3. Consulta e teste controlado dos novos logs operacionais (sem dados sensíveis)
+```powershell
+# Consultar logs por serviço e janela temporal
+docker compose logs --timestamps --since 15m rbac-bot
+docker compose logs --timestamps --since 15m chromadb
+
+# Conferir driver e opções de log efetivos dos containers atuais
+docker inspect --format '{{.Name}} -> {{json .HostConfig.LogConfig}}' rbac-bot rbac-chromadb
+
+# Gerar evento estruturado de teste controlado (sem credenciais) e confirmar redação
+@'
+import structlog
+from rbac_assistant.config.logging_config import configure_logging
+configure_logging(log_level="INFO", redact_secrets=True, stream="stdout")
+log = structlog.get_logger("rbac_assistant.recovery_check")
+log.info("recovery_log_probe", service="rbac-bot", status="ok", fake_token="123456789:AAFakeTokenNeverReal0123456789abcdef")
+'@ | docker compose exec -T rbac-bot python -
+
+# Confirmar retenção dos logs operacionais do container após restart
+docker compose restart rbac-bot
+docker compose logs --timestamps --tail=20 rbac-bot
+```
+
+---
+
+## 6. Backup Seguro dos Volumes Nomeados
 
 Antes de qualquer manutenção relevante, faça backup offline (com `docker compose stop` prévio para consistência do SQLite WAL e do ChromaDB):
 
@@ -157,7 +202,7 @@ docker compose start
 
 ---
 
-## 6. Procedimentos Estritamente Proibidos
+## 7. Procedimentos Estritamente Proibidos
 
 **NUNCA execute** os comandos abaixo no projeto (risco direto de destruição definitiva dos bancos SQLite, PDFs preservados, trilhas de revisão humana e coleções ChromaDB):
 

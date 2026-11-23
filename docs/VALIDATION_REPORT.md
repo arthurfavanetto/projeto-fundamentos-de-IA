@@ -73,9 +73,33 @@
 
 ---
 
-## 5. Pendências Abertas para Conclusão no Host Windows
-1. Confirmar no WSL se `/dev/sdd` foi desmontado com segurança e abrir o Docker Desktop no Windows 11.
-2. Recriar os 3 volumes novos/vazios e subir `rbac-chromadb` + `rbac-bot` com `docker compose up -d --build`.
-3. Validar healthchecks, presença de `TELEGRAM_BOT_TOKEN` no contêiner (sem revelar o valor) e testes de persistência (`verify_chroma_persistence.py` e `verify_sqlite_persistence.py`).
-4. Reexecutar `uv run --python 3.12 pytest` (sequencial e paralelo) no clone Windows `C:\Projetos\projeto-fundamentos-de-IA` sobre `d1d6af1`.
-5. Prosseguir posteriormente com a **Etapa 4 (Bot Telegram)** em branch dedicada `feat/etapa-4-telegram-bot` e/ou ingestão controlada do `RBAC43EMD05.pdf`.
+## 5. Avaliação Quantitativa Offline do Motor RAG (`scripts/evaluate_rag.py`)
+
+Executado com `env -u GEMINI_API_KEY uv run python scripts/evaluate_rag.py` sobre o corpus sintético controlado (`40` consultas, embedder determinístico `768d`, **0 chamadas reais à Gemini API**):
+
+| Modo (`max_vector_distance=0.85` provisório) | Rec@5 | Prec@5 | Prec@1 | MRR@10 | nDCG@10 | Estrut | Granul | DocFlt | VerFlt | Abst | GovV | HalCit |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `structural_only` | `40.6%` | `40.6%` | `40.6%` | `0.406` | `0.406` | `100.0%` | `39.4%` | `100.0%` | `100.0%` | `100.0%` | `0` | `0` |
+| `lexical_fts5_only` | `100.0%` | `71.4%` | `90.6%` | `0.948` | `0.961` | `100.0%` | `100.0%` | `100.0%` | `100.0%` | `100.0%` | `0` | `0` |
+| `vector_only` | `81.2%` | `41.7%` | `71.9%` | `0.766` | `0.778` | `30.8%` | `81.8%` | `100.0%` | `100.0%` | `100.0%` | `0` | `0` |
+| **`hybrid_rrf`** | **`100.0%`** | **`85.7%`** | **`100.0%`** | **`1.000`** | **`1.000`** | **`100.0%`** | **`100.0%`** | **`100.0%`** | **`100.0%`** | **`100.0%`** | **`0`** | **`0`** |
+
+- **Auditoria do `CitationValidator` (mock determinístico):** `5/5` sondas (`100.0%` em IDs `[EV-N]`, referências estruturais, páginas PDF/impressa, bloqueio de citação inexistente e bloqueio de seção errada).
+- **Ablação:** `baseline_rrf_k60_top5` (`Prec@5 67.8%`, `RetFP 39`) → `hybrid_default_rerank_cutoff` (`Prec@5 85.7%`, `RetFP 11`, `MRR@10 1.000`).
+- **Análise de sensibilidade (`max_vector_distance`, mantido em `0.85` PROVISÓRIO):**
+  - `0.50`: `HybR@5 98.4%`, `HybP@5 96.9%`, `12/13` categorias, `Abst 100.0%`
+  - `0.75`: `HybR@5 100.0%`, `HybP@5 90.1%`, `13/13` categorias, `Abst 100.0%`
+  - `0.85` (padrão provisório): `HybR@5 100.0%`, `HybP@5 85.7%`, `13/13` categorias, `Abst 100.0%`
+  - `0.95`: `HybR@5 100.0%`, `HybP@5 83.1%`, `13/13` categorias, mas **`Abst` cai para `66.7%`**
+  - *Nota:* não calibrado para produção até avaliação real com `gemini-embedding-2` sobre o RBAC 43 oficial.
+- **Cache de embeddings (`tests/unit/test_eval_embedding_cache.py`):** confirmado `46` chamadas simuladas (`6` documentais + `40` consultas únicas) vs `1.286` sem cache (**-96,42%**), `0` chamadas `generate_content`, métricas idênticas, cache reconstruído em memória por execução sem depender dos volumes antigos.
+
+---
+
+## 6. Pendências Abertas para Conclusão no Host Windows
+1. Confirmar no WSL se `/dev/sdd` foi desmontado com segurança (decisão definitiva de não usar mais os VHDX forenses) e abrir o Docker Desktop no Windows 11.
+2. Confirmar presença local de `.env` (sem exibir segredos) e do PDF `RBAC43EMD05.pdf` (SHA-256 exato).
+3. Recriar os 3 volumes novos/vazios e subir `rbac-chromadb` + `rbac-bot` com `docker compose up -d --build`.
+4. Validar healthchecks, presença de `TELEGRAM_BOT_TOKEN` no contêiner (sem revelar o valor), logs operacionais e testes de persistência (`verify_chroma_persistence.py` e `verify_sqlite_persistence.py`).
+5. Reexecutar Ruff, MyPy e `pytest --cov=rbac_assistant` no clone Windows `C:\Projetos\projeto-fundamentos-de-IA` sobre `d1d6af1`.
+6. Prosseguir com a ingestão controlada do `RBAC43EMD05.pdf` (após revisão e aprovação humana explícita) e, na sequência, a **Etapa 4 (Bot Telegram)** em branch dedicada `feat/etapa-4-telegram-bot`.
