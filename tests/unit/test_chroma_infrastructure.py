@@ -147,6 +147,7 @@ def test_docker_contracts_enforce_pinning_non_root_and_network_isolation(repo_ro
     assert "ports" not in chroma_svc
     assert "ports" not in bot_svc
     assert "chroma_data:/data" in chroma_svc["volumes"]
+    assert "./config:/app/config:ro" in bot_svc["volumes"]
     assert chroma_svc["networks"] == ["rbac_internal_net"]
     assert compose["networks"]["rbac_internal_net"]["internal"] is True
     assert "/api/v2/heartbeat" in " ".join(chroma_svc["healthcheck"]["test"])

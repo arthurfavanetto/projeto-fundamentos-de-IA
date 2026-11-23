@@ -1,0 +1,610 @@
+"""Testes 100% offline do Bot Telegram (handlers, autorização, erros API, shutdown e bootstrap)."""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from telegram.error import InvalidToken, NetworkError, RetryAfter, TelegramError, TimedOut
+
+from rbac_assistant import main as main_module
+from rbac_assistant.application.dto.ingestion_dto import RegisterDocumentDTO
+from rbac_assistant.application.services.catalog_service import CatalogService
+from rbac_assistant.application.services.chat_service import NormativeChatService
+from rbac_assistant.application.services.indexing_service import IndexingService
+from rbac_assistant.application.use_cases.check_system_status import CheckSystemStatusUseCase
+from rbac_assistant.config.settings import AppSettings, StorageConfig
+from rbac_assistant.domain.entities.rag import (
+    EvidenceTrustLevel,
+    FusedEvidence,
+    HybridRetrievalResult,
+    IndexStatusReport,
+    IndexVersionSummary,
+    RetrievalSource,
+)
+from rbac_assistant.domain.entities.regulatory_document import DocumentType, VersionStatus
+from rbac_assistant.domain.entities.regulatory_page import PageValidationStatus
+from rbac_assistant.infrastructure.audit.jsonl_audit_adapter import JsonlAuditAdapter
+from rbac_assistant.infrastructure.storage.sqlite_document_repository import (
+    SqliteDocumentRepository,
+)
+from rbac_assistant.infrastructure.vector_db.chroma_vector_store import ChromaVectorStore
+from rbac_assistant.interfaces.telegram.bot_runner import (
+    TelegramBotRunner,
+    is_usable_telegram_token,
+)
+from rbac_assistant.interfaces.telegram.command_router import (
+    TelegramCommandRouter,
+    TelegramRuntimeInfo,
+)
+from rbac_assistant.interfaces.telegram.message_splitter import MessageSplitter
+from rbac_assistant.security.access_control import AccessControl
+from rbac_assistant.security.rate_limiter import UserRateLimiter
+
+
+class _FakeVectorStore:
+    def check_heartbeat(self) -> int:
+        return 987654
+
+    def upsert_records(self, collection_name: str, records: Any) -> None:
+        return None
+
+    def get_records(self, collection_name: str, record_ids: Any) -> list[Any]:
+        return []
+
+    def query_similar(
+        self,
+        collection_name: str,
+        query_embedding: Any,
+        *,
+        top_k: int = 5,
+        where: Any = None,
+    ) -> list[Any]:
+        return []
+
+    def delete_collection(self, collection_name: str) -> None:
+        return None
+
+
+class _FakeIndexingService(IndexingService):
+    def __init__(self) -> None:
+        pass
+
+    def get_index_status(self, *, collection_name: str | None = None) -> IndexStatusReport:
+        del collection_name
+        return IndexStatusReport(
+            collection_name="regulatory_chunks_ge2_768_v1",
+            configured_embedding_model="gemini-embedding-2",
+            configured_embedding_dimension=768,
+            collection_embedding_model="gemini-embedding-2",
+            collection_embedding_dimension=768,
+            chroma_available=True,
+            chroma_vector_count=12,
+            total_sqlite_chunks=12,
+            total_documents=1,
+            total_versions=1,
+            indexed_versions_count=1,
+            unindexed_versions=(),
+            stale_versions=(),
+            compatibility_warning=None,
+            version_summaries=(
+                IndexVersionSummary(
+                    document_id="anac_rbac_43",
+                    version_id="anac_rbac_43_emd_05_abc12345",
+                    regulation_number="43",
+                    amendment_number="05",
+                    version_status="current",
+                    sqlite_chunk_count=12,
+                    indexed_chunk_count=12,
+                    is_indexed=True,
+                    is_stale=False,
+                    stale_reason=None,
+                ),
+            ),
+        )
+
+
+class _SpyLLM:
+    def __init__(
+        self,
+        reply: str = "Explicação fundamentada [EV-1] na seção 43.3 (página 4).",
+    ) -> None:
+        self.calls = 0
+        self._reply = reply
+
+    @property
+    def model_name(self) -> str:
+        return "gemini-4-hydrogen"
+
+    def generate_text(self, *, system_instruction: str, user_prompt: str) -> str:
+        del system_instruction, user_prompt
+        self.calls += 1
+        return self._reply
+
+
+class _SpyRetriever:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    def retrieve(self, *, query: str, filters: Any = None, top_k: int | None = None) -> Any:
+        del filters, top_k
+        self.queries.append(query)
+        evidence = FusedEvidence(
+            chunk_id="chunk_43_3",
+            unit_id="unit_43_3",
+            document_id="anac_rbac_43",
+            version_id="anac_rbac_43_emd_05_abc12345",
+            authority="ANAC",
+            document_type="RBAC",
+            regulation_number="43",
+            document_title="Manutenção, Manutenção Preventiva, Reconstrução e Alteração",
+            amendment_number="05",
+            version_status="current",
+            official_url="https://www.anac.gov.br/rbac-43",
+            section_number="43.3",
+            subsection_number="",
+            paragraph_number="",
+            item_number="",
+            title="Pessoas autorizadas a executar manutenção",
+            original_text=(
+                "43.3 Pessoas autorizadas a executar manutenção\n(a) Mecânico habilitado."
+            ),
+            pdf_pages=(4,),
+            printed_pages=("4/32",),
+            page_statuses=((4, PageValidationStatus.MANUALLY_APPROVED),),
+            trust_level=EvidenceTrustLevel.VALIDATED_LITERAL,
+            literal_transcription_allowed=True,
+            rrf_score=0.95,
+            matched_sources=(RetrievalSource.EXACT_STRUCTURAL,),
+        )
+        return HybridRetrievalResult(
+            query=query,
+            evidences=(evidence,),
+            blocked_evidences=(),
+            warnings=(),
+            index_empty=False,
+            diagnostics=None,
+        )
+
+
+def _build_router_fixture(
+    tmp_path: Path,
+    *,
+    admins: list[int] | None = None,
+    users: list[int] | None = None,
+    max_input_length: int = 1000,
+    requests_per_minute: int = 15,
+    burst_size: int = 5,
+) -> tuple[
+    TelegramCommandRouter,
+    _SpyRetriever,
+    _SpyLLM,
+    JsonlAuditAdapter,
+    SqliteDocumentRepository,
+]:
+    repo = SqliteDocumentRepository(":memory:")
+    repo.initialize()
+    catalog = CatalogService(repo)
+    catalog.register_document(
+        RegisterDocumentDTO(
+            document_id="anac_rbac_43",
+            authority="ANAC",
+            document_type=DocumentType.RBAC,
+            regulation_number="43",
+            document_title="Manutenção, Manutenção Preventiva, Reconstrução e Alteração",
+            amendment_number="05",
+            version_status=VersionStatus.CURRENT,
+        )
+    )
+    audit = JsonlAuditAdapter(logs_dir=tmp_path / "logs")
+    status_uc = CheckSystemStatusUseCase(
+        vector_store=_FakeVectorStore(),
+        documents_dir=tmp_path / "docs",
+        audit_logs_dir=tmp_path / "logs",
+    )
+    retriever = _SpyRetriever()
+    llm = _SpyLLM()
+    chat = NormativeChatService(
+        retriever=retriever,  # type: ignore[arg-type]
+        llm=llm,
+        audit_port=audit,
+    )
+    access_control = AccessControl(
+        admins=admins if admins is not None else [1001],
+        users=users if users is not None else [2002],
+        audit_port=audit,
+    )
+    router = TelegramCommandRouter(
+        access_control=access_control,
+        rate_limiter=UserRateLimiter(
+            requests_per_minute=requests_per_minute,
+            burst_size=burst_size,
+        ),
+        splitter=MessageSplitter(max_message_length=4096),
+        status_use_case=status_uc,
+        catalog_service=catalog,
+        indexing_service=_FakeIndexingService(),
+        chat_service=chat,
+        runtime_info=TelegramRuntimeInfo(
+            environment="test",
+            generation_model="gemini-4-hydrogen",
+            embedding_model="gemini-embedding-2",
+            embedding_dimensions=768,
+            collection_name="regulatory_chunks_ge2_768_v1",
+            allow_paid_models=False,
+            llm_configured=True,
+        ),
+        audit_port=audit,
+        max_input_length=max_input_length,
+    )
+    return router, retriever, llm, audit, repo
+
+
+@pytest.mark.unit
+async def test_telegram_router_all_commands_and_free_text_for_authorized_users(
+    tmp_path: Path,
+) -> None:
+    router, retriever, llm, _audit, repo = _build_router_fixture(
+        tmp_path,
+        requests_per_minute=50,
+        burst_size=50,
+    )
+    try:
+        r_start = await router.handle_message(user_id=2002, text="/start", update_id=1)
+        assert not r_start.access_denied
+        assert "Perfil ativo: USER" in r_start.messages[0]
+
+        r_help = await router.handle_message(user_id=2002, text="/help", update_id=2)
+        expected_cmds = (
+            "/start",
+            "/help",
+            "/status",
+            "/rbac",
+            "/buscar",
+            "/explicar",
+            "/documentos",
+            "/versao",
+        )
+        for cmd in expected_cmds:
+            assert cmd in r_help.messages[0]
+
+        r_status_user = await router.handle_message(user_id=2002, text="/status", update_id=3)
+        assert "SAUDÁVEL" in r_status_user.messages[0]
+        assert "Diagnóstico ADMIN" not in r_status_user.messages[0]
+
+        r_status_admin = await router.handle_message(user_id=1001, text="/status", update_id=4)
+        assert "Diagnóstico ADMIN" in r_status_admin.messages[0]
+        assert "987654" in r_status_admin.messages[0]
+
+        r_docs = await router.handle_message(user_id=2002, text="/documentos", update_id=5)
+        assert "ANAC RBAC 43" in r_docs.messages[0]
+        assert "indexado (12 chunks)" in r_docs.messages[0]
+
+        r_ver = await router.handle_message(user_id=2002, text="/versao", update_id=6)
+        assert "gemini-4-hydrogen" in r_ver.messages[0]
+        assert "gemini-embedding-2 (768d)" in r_ver.messages[0]
+
+        # /rbac e /buscar operam sem geração IA (literal/recuperação)
+        r_rbac = await router.handle_message(user_id=2002, text="/rbac 43.3", update_id=7)
+        assert "TEXTO NORMATIVO" in r_rbac.messages[0]
+        assert "43.3 Pessoas autorizadas" in r_rbac.messages[0]
+        assert llm.calls == 0
+
+        r_buscar = await router.handle_message(user_id=2002, text="/buscar manutenção", update_id=8)
+        assert "43.3" in r_buscar.messages[0]
+        assert llm.calls == 0
+
+        # /explicar e texto livre acionam explicação fundamentada via NormativeChatService
+        r_explicar = await router.handle_message(user_id=2002, text="/explicar 43.3", update_id=9)
+        assert "EXPLICAÇÃO (GERADA POR IA)" in r_explicar.messages[0]
+        assert llm.calls == 1
+
+        r_free = await router.handle_message(
+            user_id=2002,
+            text="Quem pode executar manutenção no RBAC 43?",
+            update_id=10,
+        )
+        assert "EXPLICAÇÃO (GERADA POR IA)" in r_free.messages[0]
+        assert llm.calls == 2
+        assert len(retriever.queries) == 4
+
+        # Comando desconhecido para usuário autorizado
+        r_unknown = await router.handle_message(user_id=2002, text="/inexistente", update_id=11)
+        assert "Comando não reconhecido" in r_unknown.messages[0]
+
+        # Update duplicado é ignorado sem rechamar serviços
+        r_dup = await router.handle_message(user_id=2002, text="/explicar 43.3", update_id=9)
+        assert r_dup.duplicate_ignored is True
+        assert r_dup.messages == ()
+        assert llm.calls == 2
+    finally:
+        repo.close()
+
+
+@pytest.mark.unit
+async def test_telegram_router_blocks_unauthorized_commands_and_free_text_before_rag(
+    tmp_path: Path,
+) -> None:
+    router, retriever, llm, audit, repo = _build_router_fixture(tmp_path)
+    try:
+        for idx, payload in enumerate(
+            ("/start", "/rbac 43.3", "/explicar 43.3", "/desconhecido", "Qual o texto do 43.3?"),
+            start=100,
+        ):
+            resp = await router.handle_message(user_id=999999, text=payload, update_id=idx)
+            assert resp.access_denied is True
+            assert "Acesso negado" in resp.messages[0]
+
+        # Nenhuma consulta chegou ao retriever ou LLM
+        assert retriever.queries == []
+        assert llm.calls == 0
+
+        # Eventos de negação auditados no JSONL
+        denied_events = [
+            e
+            for e in audit.read_events()
+            if e["event_type"] == "telegram_access_control" and e["outcome"] == "denied"
+        ]
+        assert len(denied_events) == 5
+    finally:
+        repo.close()
+
+
+@pytest.mark.unit
+async def test_telegram_router_rejects_overly_long_messages_and_enforces_rate_limit(
+    tmp_path: Path,
+) -> None:
+    router, retriever, llm, _audit, repo = _build_router_fixture(
+        tmp_path,
+        max_input_length=120,
+        requests_per_minute=2,
+        burst_size=2,
+    )
+    try:
+        r_long = await router.handle_message(user_id=2002, text="A" * 200, update_id=1)
+        assert "Mensagem muito longa" in r_long.messages[0]
+        assert retriever.queries == []
+        assert llm.calls == 0
+
+        # 2 permitidas, 3ª bloqueada por rate limit
+        r1 = await router.handle_message(user_id=2002, text="/help", update_id=2)
+        r2 = await router.handle_message(user_id=2002, text="/help", update_id=3)
+        assert r1.rate_limited is False
+        assert r2.rate_limited is False
+        r_limited = await router.handle_message(user_id=2002, text="/help", update_id=4)
+        assert r_limited.rate_limited is True
+        assert "Limite temporário" in r_limited.messages[0]
+    finally:
+        repo.close()
+
+
+class _FakeUpdater:
+    def __init__(self, fail_once: Exception | None = None) -> None:
+        self.started = False
+        self.stopped = False
+        self._fail_once = fail_once
+        self.start_attempts = 0
+
+    async def start_polling(self, **_kwargs: Any) -> None:
+        self.start_attempts += 1
+        if self._fail_once is not None:
+            exc = self._fail_once
+            self._fail_once = None
+            raise exc
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+class _FakeApplication:
+    def __init__(self, updater: _FakeUpdater) -> None:
+        self.updater = updater
+        self.handlers: list[Any] = []
+        self.error_handlers: list[Any] = []
+        self.initialized = False
+        self.started = False
+        self.stopped = False
+        self.shutdown_called = False
+
+    def add_handler(self, handler: Any) -> None:
+        self.handlers.append(handler)
+
+    def add_error_handler(self, handler: Any) -> None:
+        self.error_handlers.append(handler)
+
+    async def initialize(self) -> None:
+        self.initialized = True
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    async def shutdown(self) -> None:
+        self.shutdown_called = True
+
+
+@pytest.mark.unit
+async def test_telegram_bot_runner_lifecycle_retries_errors_and_blocks_real_api_in_tests(
+    tmp_path: Path,
+) -> None:
+    router, _retriever, _llm, audit, repo = _build_router_fixture(tmp_path)
+    fake_token = "123456789:AAFakeTelegramBotTokenNeverReal0123456789"
+    try:
+        assert is_usable_telegram_token(fake_token) is True
+        assert is_usable_telegram_token("REPLACE_WITH_TELEGRAM_BOT_TOKEN") is False
+        assert is_usable_telegram_token("") is False
+        assert is_usable_telegram_token(None) is False
+
+        # 1. Bloqueio de conexão real em testes quando sem application injetada
+        real_runner = TelegramBotRunner(token=fake_token, router=router)
+        with pytest.raises(RuntimeError, match="RBAC_BLOCK_REAL_TELEGRAM_API=1"):
+            real_runner.build_application()
+
+        # 2. Retry transitório (NetworkError) seguido de polling bem-sucedido e shutdown gracioso
+        updater = _FakeUpdater(fail_once=NetworkError("DNS temporariamente indisponível"))
+        fake_app = _FakeApplication(updater)
+        runner = TelegramBotRunner(
+            token=fake_token,
+            router=router,
+            startup_retry_max_attempts=3,
+            startup_retry_base_delay_seconds=0.01,
+            audit_port=audit,
+            application=fake_app,
+        )
+        stop_event = asyncio.Event()
+
+        async def _trigger_stop() -> None:
+            while not updater.started:
+                await asyncio.sleep(0.01)
+            stop_event.set()
+
+        stop_task = asyncio.create_task(_trigger_stop())
+        exit_code = await runner.run_async(stop_event=stop_event)
+        await stop_task
+
+        assert exit_code == 0
+        assert updater.start_attempts == 2
+        assert fake_app.initialized is True
+        assert fake_app.started is True
+        assert updater.stopped is True
+        assert fake_app.stopped is True
+        assert fake_app.shutdown_called is True
+        assert len(fake_app.handlers) == 10  # 8 comandos + comandos desconhecidos + texto livre
+        assert len(fake_app.error_handlers) == 1
+
+        # 3. InvalidToken encerra com código 1 sem loop infinito
+        invalid_app = _FakeApplication(_FakeUpdater(fail_once=InvalidToken("bad token")))
+        bad_runner = TelegramBotRunner(
+            token=fake_token,
+            router=router,
+            startup_retry_max_attempts=3,
+            startup_retry_base_delay_seconds=0.01,
+            application=invalid_app,
+        )
+        assert await bad_runner.run_async(stop_event=asyncio.Event()) == 1
+
+        # 4. Global error handler trata TimedOut/RetryAfter/TelegramError sem vazar token
+        for err in (
+            TimedOut("timeout"),
+            RetryAfter(1),
+            TelegramError(f"api fail token={fake_token}"),
+        ):
+            ctx = SimpleNamespace(error=err)
+            await runner.handle_error(None, ctx)  # type: ignore[arg-type]
+
+        raw_audit = audit.audit_file_path.read_text(encoding="utf-8")
+        assert fake_token not in raw_audit
+    finally:
+        repo.close()
+
+
+@pytest.mark.unit
+async def test_telegram_bot_runner_handle_update_delivers_replies_and_handles_retry_after(
+    tmp_path: Path,
+) -> None:
+    router, _retriever, _llm, _audit, repo = _build_router_fixture(tmp_path)
+    sent: list[str] = []
+    retry_raised = False
+
+    async def _reply_text(*, text: str, disable_web_page_preview: bool = True) -> None:
+        nonlocal retry_raised
+        del disable_web_page_preview
+        if not retry_raised:
+            retry_raised = True
+            raise RetryAfter(0.01)
+        sent.append(text)
+
+    fake_message = SimpleNamespace(text="/help", reply_text=_reply_text)
+    fake_update = SimpleNamespace(
+        update_id=501,
+        effective_message=fake_message,
+        effective_user=SimpleNamespace(id=2002),
+    )
+
+    runner = TelegramBotRunner(
+        token="123456789:AAFakeTelegramBotTokenNeverReal0123456789",
+        router=router,
+    )
+    try:
+        await runner.handle_update(fake_update, SimpleNamespace())  # type: ignore[arg-type]
+        assert len(sent) == 1
+        assert "/rbac" in sent[0]
+    finally:
+        repo.close()
+
+
+@pytest.mark.unit
+def test_main_standby_mode_shuts_down_cleanly_without_telegram_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(
+        _env_file=None,  # type: ignore[call-arg]
+        storage=StorageConfig(
+            documents_dir=tmp_path / "documents",
+            audit_logs_dir=tmp_path / "logs",
+        ),
+        access_control_yaml_path=tmp_path / "missing_access_control.yaml",
+    )
+    monkeypatch.setattr(main_module, "load_settings", lambda: settings)
+    monkeypatch.setattr(ChromaVectorStore, "check_heartbeat", lambda _self: 321)
+
+    orig_event_cls = threading.Event
+
+    class _PreSetEvent(orig_event_cls):
+        def wait(self, timeout: float | None = None) -> bool:
+            del timeout
+            return True
+
+    monkeypatch.setattr(main_module.threading, "Event", _PreSetEvent)
+    assert main_module.main([]) == 0
+    adapter = JsonlAuditAdapter.from_settings(settings)
+    actions = [(e["event_type"], e["outcome"]) for e in adapter.read_events()]
+    assert ("telegram_polling", "standby") in actions
+    assert ("service_lifecycle", "stopped") in actions
+
+
+@pytest.mark.unit
+async def test_build_telegram_router_wires_hexagonal_stack_offline(tmp_path: Path) -> None:
+    ac_file = tmp_path / "access_control.yaml"
+    ac_file.write_text(
+        "policy:\n  deny_by_default: true\nroles:\n  admins: [7001]\n  users: []\n",
+        encoding="utf-8",
+    )
+    settings = AppSettings(
+        _env_file=None,  # type: ignore[call-arg]
+        storage=StorageConfig(
+            documents_dir=tmp_path / "documents",
+            audit_logs_dir=tmp_path / "logs",
+        ),
+        access_control_yaml_path=ac_file,
+    )
+    audit = JsonlAuditAdapter.from_settings(settings)
+    vector_store = _FakeVectorStore()
+    status_uc = CheckSystemStatusUseCase(
+        vector_store=vector_store,
+        documents_dir=settings.storage.documents_dir,
+        audit_logs_dir=settings.storage.audit_logs_dir,
+        audit_port=audit,
+    )
+    router, repo, gemini_client = main_module.build_telegram_router(
+        settings=settings,
+        vector_store=vector_store,  # type: ignore[arg-type]
+        audit_adapter=audit,
+        status_use_case=status_uc,
+    )
+    try:
+        assert gemini_client is None
+        r_ok = await router.handle_message(user_id=7001, text="/versao", update_id=901)
+        assert "gemini-4-hydrogen" in r_ok.messages[0]
+        r_deny = await router.handle_message(user_id=8888, text="/versao", update_id=902)
+        assert r_deny.access_denied is True
+    finally:
+        repo.close()

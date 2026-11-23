@@ -58,6 +58,7 @@ services:
     volumes:
       - regulatory_documents:/app/data/documents
       - audit_logs:/app/logs
+      - ./config:/app/config:ro
     networks:
       - rbac_internal_net
       - rbac_egress_net

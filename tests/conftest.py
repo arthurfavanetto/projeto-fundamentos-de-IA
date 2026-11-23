@@ -17,6 +17,7 @@ from google import genai as google_genai
 _SECRET_ENV_VARS: tuple[str, ...] = ("GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN")
 os.environ["RBAC_DISABLE_DOTENV"] = "1"
 os.environ["RBAC_BLOCK_REAL_GEMINI_API"] = "1"
+os.environ["RBAC_BLOCK_REAL_TELEGRAM_API"] = "1"
 for _secret_var in _SECRET_ENV_VARS:
     os.environ.pop(_secret_var, None)
 
@@ -38,10 +39,11 @@ def _blocked_real_genai_client(*_args: Any, **_kwargs: Any) -> Any:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Reforça isolamento de `.env` e bloqueio de chamadas Gemini antes da coleta."""
+    """Reforça isolamento de `.env` e bloqueio de chamadas Gemini/Telegram antes da coleta."""
     del config
     os.environ["RBAC_DISABLE_DOTENV"] = "1"
     os.environ["RBAC_BLOCK_REAL_GEMINI_API"] = "1"
+    os.environ["RBAC_BLOCK_REAL_TELEGRAM_API"] = "1"
     for secret_var in _SECRET_ENV_VARS:
         os.environ.pop(secret_var, None)
     AppSettings.model_config["env_file"] = None
@@ -51,18 +53,20 @@ def pytest_configure(config: pytest.Config) -> None:
 def _isolate_tests_from_host_dotenv_and_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:
-    """Impede vazamento de `.env`, chamadas reais à Gemini e estado de logging entre testes.
+    """Impede vazamento de `.env`, chamadas reais à Gemini/Telegram e estado de logging.
 
     Abrange:
     - tempo de importação e `pytest_configure` (antes de qualquer fixture);
     - cada teste individual e cada worker `pytest-xdist` (`spawn` no Windows);
-    - subprocessos filhos via `RBAC_DISABLE_DOTENV=1` e `RBAC_BLOCK_REAL_GEMINI_API=1`;
+    - subprocessos filhos via `RBAC_DISABLE_DOTENV=1`, `RBAC_BLOCK_REAL_GEMINI_API=1` e
+      `RBAC_BLOCK_REAL_TELEGRAM_API=1`;
     - tentativa direta de criar `google.genai.Client` sem fake injetado;
     - reset determinístico do `structlog` no teardown.
-    Em produção fora do `pytest`, `.env` e o SDK Gemini operam normalmente.
+    Em produção fora do `pytest`, `.env` e os SDKs operam normalmente.
     """
     monkeypatch.setenv("RBAC_DISABLE_DOTENV", "1")
     monkeypatch.setenv("RBAC_BLOCK_REAL_GEMINI_API", "1")
+    monkeypatch.setenv("RBAC_BLOCK_REAL_TELEGRAM_API", "1")
     monkeypatch.setitem(AppSettings.model_config, "env_file", None)
     monkeypatch.setattr(google_genai, "Client", _blocked_real_genai_client)
     for secret_var in _SECRET_ENV_VARS:

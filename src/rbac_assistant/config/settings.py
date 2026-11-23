@@ -183,7 +183,12 @@ class TelegramConfig(BaseModel):
 
     mode: Literal["long_polling"] = "long_polling"
     max_message_length: int = Field(default=4096, ge=256, le=4096)
+    max_input_length: int = Field(default=1000, ge=64, le=4096)
     polling_timeout_seconds: int = Field(default=30, ge=1, le=120)
+    max_concurrent_updates_per_user: int = Field(default=1, ge=1, le=5)
+    duplicate_update_cache_size: int = Field(default=512, ge=32, le=10000)
+    startup_retry_max_attempts: int = Field(default=5, ge=1, le=20)
+    startup_retry_base_delay_seconds: float = Field(default=2.0, ge=0.1, le=60.0)
 
 
 class RateLimitConfig(BaseModel):
@@ -207,7 +212,6 @@ class AuditConfig(BaseModel):
     def max_file_size_bytes(self) -> int:
         """Retorna o limite de tamanho por arquivo JSONL de auditoria em bytes."""
         return self.max_file_size_mb * 1024 * 1024
-
 
 
 class SecurityConfig(BaseModel):
@@ -269,9 +273,11 @@ class AppSettings(BaseSettings):
     # Credenciais opcionais nas Etapas 1 e 2; obrigatórias para chamadas reais Gemini/Telegram
     gemini_api_key: SecretStr | None = None
     telegram_bot_token: SecretStr | None = None
+    telegram_polling_enabled: bool = True
 
     # Caminhos de configuração YAML
     settings_yaml_path: Path = Path("config/settings.yaml")
+    access_control_yaml_path: Path = Path("config/access_control.yaml")
 
     # Blocos não-sensíveis carregados do settings.yaml
     storage: StorageConfig = Field(default_factory=StorageConfig)
