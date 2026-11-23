@@ -325,11 +325,12 @@ class NormativeChatService:
                     f"recuperadas foram descartadas da explicação IA: {', '.join(discarded)}."
                 )
 
+            safe_explanation = redact_text(citation_check.sanitized_explanation)
             answer = self._formatter.build_answer(
                 query=clean_question,
                 usable_evidences=retrieval.evidences,
                 blocked_evidences=retrieval.blocked_evidences,
-                explanation=citation_check.sanitized_explanation,
+                explanation=safe_explanation,
                 extra_observations=extra_observations,
                 generation_model=self._llm.model_name,
                 used_fallback_without_llm=False,

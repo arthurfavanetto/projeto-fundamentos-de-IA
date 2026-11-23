@@ -1,48 +1,78 @@
-# Guia Operacional — Bot Telegram (Etapa 4) e Controle de Acesso
+# Guia Operacional — Bot Telegram Público, Dois Administradores e Escopo Normativo Estrito
 
-Este documento detalha a arquitetura implementada, a configuração segura de credenciais e da lista de acesso (`deny_by_default`) e o roteiro de validação local do **Bot Telegram** no Windows 11.
+Este documento detalha a arquitetura operacional do **Bot Telegram** em **modo público em conversas privadas**, a separação determinística de privilégios para **dois administradores**, o comando `/id`, as proteções contra abuso e o roteiro de publicação e validação local no Windows 11.
 
-> **Estado de validação:** todos os handlers, controle de acesso `deny_by_default`, `UserRateLimiter`, `MessageSplitter` (4.096 UTF-16), tratamento de erros da API Telegram e encerramento gracioso estão implementados e testados **100% offline com mocks** (VM Linux e GitHub Actions CI). O teste real com o servidor da API Telegram e usuários autorizados permanece **PENDENTE DE VALIDAÇÃO LOCAL NO WINDOWS**.
-
----
-
-## 1. Arquitetura e Segurança Implementadas
-
-- **Dependência:** `python-telegram-bot` (v22.x, fixada em `pyproject.toml` e `uv.lock`, modo **HTTPS Long Polling** — sem webhooks nem portas de entrada no roteador, ADR-03).
-- **Controle de acesso determinístico (`src/rbac_assistant/security/access_control.py`):**
-  - Política imutável **`deny_by_default`**: qualquer `Telegram User ID` ausente é bloqueado antes de qualquer chamada ao RAG ou Gemini.
-  - Se `config/access_control.yaml` estiver ausente, malformado ou vazio, **100% dos usuários são bloqueados** (modo *fail-closed*, sem usuários ou administradores fictícios).
-  - Aplicado uniformemente a todos os 8 comandos, comandos não reconhecidos e mensagens de texto livre.
-- **Proteções operacionais:**
-  - `UserRateLimiter`: `15` requisições/minuto e rajada (`burst_size`) de `5` por usuário.
-  - Limite de entrada: `1000` caracteres por mensagem (`telegram.max_input_length`).
-  - Deduplicação de `update_id` (cache LRU de `512` eventos) e controle de concorrência por usuário.
-  - `MessageSplitter`: paginação fiel `<= 4.096` unidades UTF-16 com cabeçalhos `[Parte X/Y]` preservando 100% do texto normativo literal e aplicando redação de segredos (`secret_redactor`).
-  - Modo standby seguro: quando `TELEGRAM_BOT_TOKEN` está ausente/placeholder (ex.: CI ou testes offline) ou `TELEGRAM_POLLING_ENABLED=false`, o contêiner `rbac-bot` permanece saudável para CLIs e healthchecks sem tentar conexão externa.
+> **Estado de validação:** o modo público (`public_access: true`, `default_role: USER`), o isolamento dos dois administradores (`ADMIN`), o comando `/id`, o escopo estrito de conversas privadas (`allow_group_chats: false`), a recuperação restrita a páginas aprovadas (`only_approved_literal=True`), o `UserRateLimiter` (por usuário + rajada + global), a concorrência global, o timeout de chamadas, o `MessageSplitter` (4.096 UTF-16) e a compatibilidade `PTB_TIMEDELTA=1` estão implementados e testados **100% offline com mocks** (VM Linux e GitHub Actions CI). O teste real com a API do Telegram e a configuração local dos dois IDs em `config/access_control.yaml` permanecem **PENDENTES DE VALIDAÇÃO LOCAL NO WINDOWS**.
 
 ---
 
-## 2. Comandos Suportados
+## 1. Política de Acesso Público e Separação de Privilégios
 
-| Comando | Perfil mínimo | Comportamento |
+Por decisão expressa do proprietário, o bot opera em **modo público** para usuários comuns em conversas privadas, mantendo os privilégios administrativos restritos exclusivamente aos dois administradores cadastrados localmente:
+
+- **Acesso público (`policy.public_access: true`, `policy.default_role: USER`):**
+  - Qualquer pessoa que abrir uma conversa privada com o bot pode enviar comandos e perguntas sem cadastro, whitelist ou aprovação prévia, recebendo automaticamente o perfil **`USER`**.
+  - Usuários comuns **nunca** recebem privilégios `ADMIN` — nem por ausência de `config/access_control.yaml`, nem por arquivo malformado/incompatível, nem por tentativa de definir `default_role: ADMIN`, nem por parâmetros/mensagens no chat.
+- **Dois administradores (`roles.admins`):**
+  - Recebem perfil **`ADMIN`** apenas os Telegram User IDs numéricos listados em `roles.admins` no arquivo local `config/access_control.yaml` (ignorado pelo Git).
+  - Arquivo ausente concede apenas `USER` no modo público (`admins = ()`, zero administradores); arquivo malformado ou raiz inválida opera em modo *fail-closed* (`public_access=False`, zero administradores).
+- **Desabilitação explícita do modo público:**
+  - Caso o proprietário deseje fechar o acesso futuramente, basta definir `policy.public_access: false` em `config/access_control.yaml` (e opcionalmente informar `roles.users`).
+- **Escopo inicial de conversas (`telegram.allow_group_chats: false`):**
+  - A versão pública inicial atende **exclusivamente conversas privadas individuais** (`filters.ChatType.PRIVATE` + guarda em `TelegramBotRunner.handle_update`).
+  - Mensagens gerais de grupos, supergrupos e canais são ignoradas automaticamente. O suporte a grupos permanece separado para decisão futura.
+
+---
+
+## 2. Comandos Suportados e Separação `USER` vs. `ADMIN`
+
+| Comando | Perfil | Comportamento |
 | --- | :---: | --- |
-| `/start` | `USER` | Boas-vindas, perfil autorizado e explicação da separação literal vs. IA |
-| `/help` | `USER` | Lista completa de comandos suportados |
-| `/status` | `USER` / `ADMIN` | Saúde do ChromaDB e índices (`ADMIN` exibe também heartbeat, volumes graváveis e coleção) |
-| `/rbac <seção>` | `USER` | Recuperação direta do SQLite SSOT sem geração IA (ex.: `/rbac 43.3`) |
-| `/buscar <termo>` | `USER` | Busca híbrida (estrutural + FTS5 + vetorial) sem geração IA |
-| `/explicar <seção ou pergunta>` | `USER` | Fluxo completo RAG: texto normativo literal aprovado + explicação Gemini + referências |
-| `/documentos` | `USER` | Lista regulamentos cadastrados e status de indexação |
-| `/versao` | `USER` | Versão do sistema, política Gemini Free Tier e emendas cadastradas |
-| Texto livre | `USER` | Equivalente a consulta completa via `NormativeChatService` |
+| `/start` | `USER` / `ADMIN` | Boas-vindas, perfil ativo, modo de acesso e explicação do escopo normativo estrito |
+| `/help` | `USER` / `ADMIN` | Lista completa dos 9 comandos suportados e instruções de uso |
+| `/id` | `USER` / `ADMIN` | Retorna **exclusivamente** o Telegram User ID numérico do próprio solicitante (nunca exibe IDs de terceiros nem registra o ID em logs públicos) |
+| `/status` | `USER` (público) | Formato público sanitizado: disponibilidade geral, documentos/versões indexadas, disponibilidade da explicação IA e escopo normativo — **sem** caminhos internos, coleção vetorial, heartbeats, volumes ou credenciais |
+| `/status` | `ADMIN` | Inclui `--- Diagnóstico ADMIN ---`: ambiente, política de acesso, quantidade de administradores configurados, status/heartbeat do ChromaDB, chunks SQLite/vetores Chroma, gravabilidade de volumes, coleção vetorial, versões não indexadas/defasadas e erros redigidos |
+| `/rbac <seção>` | `USER` / `ADMIN` | Recuperação direta do texto literal aprovado no SQLite SSOT sem geração IA (ex.: `/rbac 43.3`) |
+| `/buscar <termo>` | `USER` / `ADMIN` | Busca híbrida (estrutural + FTS5 + vetorial) restrita a páginas aprovadas, sem geração IA |
+| `/explicar <seção ou pergunta>` | `USER` / `ADMIN` | Texto normativo literal aprovado + explicação Gemini + referências validadas |
+| `/documentos` | `USER` / `ADMIN` | Lista regulamentos disponíveis (`ADMIN` vê contagem detalhada de chunks e dicas operacionais) |
+| `/versao` | `USER` / `ADMIN` | Versão do assistente, política Gemini Free Tier e emendas vigentes (`ADMIN` vê também ambiente e coleção ChromaDB) |
+| Texto livre | `USER` / `ADMIN` | Pergunta em linguagem natural respondida apenas com evidência aprovada e indexada (recusa fundamentada fora do escopo ou sem evidência) |
 
 ---
 
-## 3. Configuração Local Segura (Host Windows 11)
+## 3. Escopo Normativo Estrito e Proteções Contra Abuso
 
-### 3.1. Configurar `config/access_control.yaml` (fora do Git)
+- **Escopo normativo estrito (Telegram público):**
+  - `telegram_only_approved_literal: true` restringe a recuperação estrutural, lexical (FTS5) e vetorial (ChromaDB) exclusivamente a páginas aprovadas (`VALIDATED_LITERAL`). Conteúdo aguardando revisão ou reprovado é excluído.
+  - Sem busca na internet e sem conhecimento geral do Gemini para preencher lacunas.
+  - `PromptGuard` trata tentativas de *prompt injection*, exfiltração de prompts/variáveis de ambiente/credenciais, escalada de privilégio e quebra de escopo como dados não confiáveis.
+  - `CitationValidator` descarta deterministicamente `[EV-N]`, seções, artigos e páginas não confirmados nas evidências recuperadas; `secret_redactor` sanitiza qualquer padrão de segredo.
+- **Proteções para operação pública:**
+  - Entrada limitada a `1000` caracteres (`telegram.max_input_length`).
+  - `UserRateLimiter`: `15` req/min por usuário, rajada (`burst_size`) de `5` em `10s` e teto global de `60` req/min (`security.rate_limit.global_requests_per_minute`) protegendo a cota Gemini Free Tier (`GEMINI_ALLOW_PAID_MODELS=false`, sem fallback pago).
+  - Concorrência limitada a `1` atualização simultânea por usuário e `8` globais (`telegram.max_global_concurrent_updates`), com timeout de `45s` (`telegram.command_timeout_seconds`) e deduplicação LRU de `512` `update_id`s.
+  - Isolamento completo entre usuários: **sem memória conversacional cruzada** e sem exposição de auditoria de terceiros.
+  - `security.audit.pseudonymize_user_ids: true` pseudonimiza `actor_id` no JSONL privado em `/app/logs/audit_events.jsonl`, e logs `stdout/stderr` não registram IDs de usuários indiscriminadamente.
 
-O arquivo `config/access_control.yaml` é montado **somente para leitura** (`./config:/app/config:ro`) no contêiner `rbac-bot` e permanece bloqueado no `.gitignore`.
+---
+
+## 4. Como Obter os IDs dos Dois Administradores e Configurar Localmente (Windows 11)
+
+> **Segurança:** nunca envie `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY` ou Telegram User IDs pessoais no chat nem faça commit de `config/access_control.yaml` ou `.env`.
+
+### 4.1. Passo 1 — Subir o bot em modo público e descobrir os dois IDs via `/id`
+
+Mesmo antes de criar `config/access_control.yaml`, o bot em modo público inicia com `USER` padrão e **zero administradores** (`admins = ()`), permitindo que os dois administradores descubram seus próprios IDs com segurança:
+
+1. Inicie os serviços no Windows 11 (`docker compose up -d --build`) e confirme `telegram_long_polling_started` em `docker compose logs --tail=40 rbac-bot`.
+2. Cada um dos dois administradores abre uma conversa privada com o bot e envia `/id`.
+3. O bot responderá individualmente com o Telegram User ID numérico de cada administrador.
+
+### 4.2. Passo 2 — Criar `config/access_control.yaml` local (fora do Git)
+
+O arquivo `config/access_control.yaml` é montado **somente leitura** (`./config:/app/config:ro`) no contêiner `rbac-bot` e permanece bloqueado no `.gitignore`:
 
 ```powershell
 Set-Location "C:\Projetos\projeto-fundamentos-de-IA"
@@ -50,37 +80,56 @@ Copy-Item .\config\access_control.example.yaml .\config\access_control.yaml
 git check-ignore -v config/access_control.yaml
 ```
 
-Edite `config\access_control.yaml` substituindo os exemplos pelos **Telegram User IDs numéricos reais** dos operadores autorizados (remova IDs não utilizados):
+Edite `config\access_control.yaml` localmente inserindo exclusivamente os dois IDs numéricos obtidos com `/id`:
 
 ```yaml
 policy:
-  deny_by_default: true
+  public_access: true
+  default_role: USER
 
 roles:
   admins:
-    - <SEU_TELEGRAM_USER_ID_NUMERICO>
-  users: []
+    - <ID_NUMERICO_ADMIN_1>
+    - <ID_NUMERICO_ADMIN_2>
 ```
 
-### 3.2. Conferir `TELEGRAM_BOT_TOKEN` no `.env` local (sem exibir o valor)
+Reinicie apenas `rbac-bot` (sem comando destrutivo):
 
 ```powershell
-# O .env local já deve conter TELEGRAM_BOT_TOKEN=<token do @BotFather>
-# Nunca cole ou imprima o valor do token no terminal ou no chat.
-docker compose up -d --build
-docker compose ps
-docker compose logs --tail=40 rbac-bot
+docker compose restart rbac-bot
 ```
 
 ---
 
-## 4. Roteiro de Teste Real Controlado (No Telegram do Proprietário)
+## 5. Preparação para Divulgação Pública (`@BotFather` e link `t.me`)
 
-1. Confirme nos logs de `rbac-bot` o evento `telegram_long_polling_started` (sem `telegram_invalid_bot_token` nem `409 Conflict`).
-2. Com um usuário **autorizado** em `config/access_control.yaml`, teste em sequência:
-   - `/start` → confirmar perfil `ADMIN` ou `USER`.
-   - `/status` → confirmar `SAUDÁVEL` e contagens corretas.
-   - `/documentos` e `/versao` → confirmar `ANAC RBAC 43` (após ingestão) e política `gemini-4-hydrogen` / `gemini-embedding-2 (768d)`.
-   - `/rbac 43.3` e `/buscar manutencao` → confirmar transcrição/localização sem erro.
-   - `/explicar 43.3` e uma pergunta em texto livre → confirmar blocos separados e citações válidas.
-3. Com um usuário **NÃO listado** em `config/access_control.yaml` (ou removendo temporariamente um ID de teste), envie `/start`, `/rbac 43.3` e texto livre → confirmar resposta `Acesso negado` e registro `telegram_access_control` (`outcome: "denied"`) em `/app/logs/audit_events.jsonl`.
+Para divulgar o bot com segurança:
+
+1. No `@BotFather`, configure os comandos públicos com `/setcommands`:
+   ```text
+   start - Apresentacao e escopo normativo do assistente
+   help - Lista de comandos e instrucoes de uso
+   id - Exibe o seu proprio Telegram User ID numerico
+   status - Disponibilidade do assistente e da base normativa
+   rbac - Consulta direta a uma secao do RBAC sem IA
+   buscar - Busca hibrida nos regulamentos aprovados
+   explicar - Texto literal aprovado + explicacao fundamentada
+   documentos - Lista regulamentos disponiveis na base
+   versao - Versao do sistema e emendas vigentes
+   ```
+2. Mantenha o modo de grupos desabilitado no `@BotFather` (`/setjoingroups` → `Disable`) enquanto a política inicial for restrita a conversas privadas.
+3. Divulgue **apenas** o `@username` do bot e o link público `https://t.me/<username_do_bot>`. **Nunca** divulgue o `TELEGRAM_BOT_TOKEN`.
+
+---
+
+## 6. Roteiro de Validação Real no Telegram (Host Windows 11)
+
+1. Confirme `telegram_long_polling_started` nos logs de `rbac-bot` e ausência de `PTBDeprecationWarning`.
+2. Com um **usuário público** (ID não listado em `roles.admins`), em conversa privada:
+   - Envie `/start` → confirme `Perfil ativo: USER` (sem bloqueio).
+   - Envie `/id` → confirme exibição apenas do próprio ID.
+   - Envie `/status` → confirme formato público sanitizado (sem `Diagnóstico ADMIN`, heartbeat ou caminhos).
+   - Envie `/rbac 43.3`, `/buscar manutencao`, `/explicar 43.3` (após aprovação/indexação) e uma pergunta fora do escopo (ex.: receita culinária) → confirme resposta fundamentada no corpus aprovado e recusa segura fora do escopo.
+3. Com **cada um dos dois administradores** cadastrados em `roles.admins`:
+   - Envie `/status` → confirme `--- Diagnóstico ADMIN ---` e `Administradores configurados: 2`.
+   - Envie `/id` → confirme exibição exclusivamente do próprio ID.

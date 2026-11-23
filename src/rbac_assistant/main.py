@@ -163,11 +163,13 @@ def build_telegram_router(
     )
     access_control = AccessControl.from_yaml(
         settings.access_control_yaml_path,
+        default_public_access=settings.security.public_access,
         audit_port=audit_adapter,
     )
     rate_limiter = UserRateLimiter(
         requests_per_minute=settings.security.rate_limit.requests_per_minute,
         burst_size=settings.security.rate_limit.burst_size,
+        global_requests_per_minute=settings.security.rate_limit.global_requests_per_minute,
     )
     splitter = MessageSplitter(max_message_length=settings.telegram.max_message_length)
     runtime_info = TelegramRuntimeInfo(
@@ -191,8 +193,14 @@ def build_telegram_router(
         audit_port=audit_adapter,
         max_input_length=settings.telegram.max_input_length,
         max_concurrent_updates_per_user=settings.telegram.max_concurrent_updates_per_user,
+        max_global_concurrent_updates=settings.telegram.max_global_concurrent_updates,
+        command_timeout_seconds=settings.telegram.command_timeout_seconds,
         duplicate_update_cache_size=settings.telegram.duplicate_update_cache_size,
-        allow_preliminary_native_search=settings.retrieval.allow_preliminary_native_search,
+        only_approved_literal=settings.retrieval.telegram_only_approved_literal,
+        allow_preliminary_native_search=(
+            not settings.retrieval.telegram_only_approved_literal
+            and settings.retrieval.allow_preliminary_native_search
+        ),
     )
     return router, repository, gemini_client
 
@@ -254,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
         audit_logs_dir_writable=report.audit_logs_dir_writable,
         audit_file=str(audit_adapter.audit_file_path),
         telegram_token_configured=tg_token_usable,
+        telegram_access_mode="public" if settings.security.public_access else "restricted",
+        telegram_allow_group_chats=settings.telegram.allow_group_chats,
         access_control_path=str(settings.access_control_yaml_path),
         access_control_present=settings.access_control_yaml_path.is_file(),
         ocr_policy=settings.extraction.ocr_unreviewed_policy,
@@ -316,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
                 startup_retry_base_delay_seconds=(
                     settings.telegram.startup_retry_base_delay_seconds
                 ),
+                allow_group_chats=settings.telegram.allow_group_chats,
                 audit_port=audit_adapter,
             )
             exit_code = runner.run(stop_event=stop_event)

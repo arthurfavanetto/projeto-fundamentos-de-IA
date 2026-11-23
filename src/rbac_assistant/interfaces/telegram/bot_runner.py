@@ -122,6 +122,7 @@ class TelegramBotRunner:
         polling_timeout_seconds: int = 30,
         startup_retry_max_attempts: int = 5,
         startup_retry_base_delay_seconds: float = 2.0,
+        allow_group_chats: bool = False,
         audit_port: AuditPort | None = None,
         application: Any | None = None,
     ) -> None:
@@ -132,6 +133,7 @@ class TelegramBotRunner:
         self._polling_timeout_seconds = polling_timeout_seconds
         self._startup_retry_max_attempts = startup_retry_max_attempts
         self._startup_retry_base_delay_seconds = startup_retry_base_delay_seconds
+        self._allow_group_chats = allow_group_chats
         self._audit_port = audit_port
         self._injected_application = application
 
@@ -164,6 +166,16 @@ class TelegramBotRunner:
     ) -> None:
         """Handler unificado para comandos, comandos desconhecidos e texto livre."""
         del context
+        chat = getattr(update, "effective_chat", None)
+        chat_type = getattr(chat, "type", None) if chat is not None else None
+        if (
+            not self._allow_group_chats
+            and chat_type is not None
+            and str(chat_type).strip().lower() != "private"
+        ):
+            logger.info("telegram_non_private_chat_ignored", chat_type=str(chat_type))
+            return
+
         message = update.effective_message
         if message is None:
             return
@@ -322,9 +334,12 @@ class TelegramBotRunner:
                 .build()
             )
 
+        chat_filter = filters.ALL if self._allow_group_chats else filters.ChatType.PRIVATE
+
         for cmd in (
             "start",
             "help",
+            "id",
             "status",
             "rbac",
             "buscar",
@@ -332,12 +347,14 @@ class TelegramBotRunner:
             "documentos",
             "versao",
         ):
-            app.add_handler(CommandHandler(cmd, self.handle_update))
+            app.add_handler(CommandHandler(cmd, self.handle_update, filters=chat_filter))
 
-        # Captura comandos não reconhecidos — também protegidos por AccessControl!
-        app.add_handler(MessageHandler(filters.COMMAND, self.handle_update))
-        # Captura mensagens de texto livre — também protegidas por AccessControl!
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_update))
+        # Captura comandos não reconhecidos — também protegidos por AccessControl e escopo privado!
+        app.add_handler(MessageHandler(chat_filter & filters.COMMAND, self.handle_update))
+        # Captura mensagens de texto livre — protegidas por AccessControl e escopo privado!
+        app.add_handler(
+            MessageHandler(chat_filter & filters.TEXT & ~filters.COMMAND, self.handle_update)
+        )
         app.add_error_handler(self.handle_error)
         return app
 

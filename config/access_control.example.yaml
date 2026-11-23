@@ -1,23 +1,33 @@
 # ==============================================================================
-# RBAC AI Assistant — Controle de Acesso Operacional (Template Seguro)
+# RBAC AI Assistant — Controle de Acesso Operacional (Template Seguro — Modo Público)
 # ==============================================================================
 # Copie este arquivo para `config/access_control.yaml` no ambiente local/VPS e
-# preencha os Telegram User IDs numéricos autorizados.
+# substitua os valores de exemplo pelos Telegram User IDs numéricos reais dos
+# dois administradores.
+#
+# COMO DESCOBRIR OS TELEGRAM USER IDs DOS ADMINISTRADORES:
+# 1. Inicie o bot em modo público e abra uma conversa privada com ele no Telegram.
+# 2. Cada administrador deve enviar o comando `/id` em conversa privada.
+# 3. Copie os dois IDs numéricos exibidos para a lista `roles.admins` abaixo no
+#    arquivo local `config/access_control.yaml` (fora do Git) e reinicie `rbac-bot`.
 #
 # SEGURANÇA:
 # - `config/access_control.yaml` está no `.gitignore` para não expor IDs reais
-#   em repositórios públicos.
-# - Política padrão: DENY-BY-DEFAULT (qualquer ID ausente é bloqueado antes do RAG/LLM).
+#   no repositório Git.
+# - Com `public_access: true` e `default_role: USER`, qualquer usuário em conversa
+#   privada recebe automaticamente o perfil USER (nunca ADMIN).
+# - Privilégios ADMIN são concedidos exclusivamente aos IDs listados em `roles.admins`.
+# - Para desabilitar explicitamente o acesso público, defina `public_access: false`
+#   e adicione a lista opcional `roles.users` com os IDs permitidos.
 # - A verificação ocorre deterministicamente em Python (nunca delegada ao LLM).
 
 policy:
-  deny_by_default: true
+  public_access: true
+  default_role: USER
 
 roles:
-  # ADMIN: consultas normativas + diagnósticos detalhados (/status) + comandos administrativos
+  # ADMIN: acesso completo + diagnósticos detalhados (/status) + futuros comandos administrativos
+  # Os números abaixo são APENAS exemplos estruturais — substitua pelos IDs reais localmente.
   admins:
-    - 111111111  # Substituir pelo Telegram User ID numérico do administrador
-
-  # USER: consultas normativas (/start, /help, /status, /rbac, /buscar, /explicar, /documentos, /versao + texto livre)
-  users:
-    - 222222222  # Substituir pelo Telegram User ID numérico do usuário autorizado
+    - 111111111
+    - 222222222
