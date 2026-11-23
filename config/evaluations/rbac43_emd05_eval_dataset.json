@@ -1,0 +1,246 @@
+{
+  "dataset_name": "rbac43_emd05_official_eval_v1",
+  "dataset_origin": "official_rbac43_emd05_approved_corpus",
+  "document_id": "anac_rbac_43",
+  "regulation_number": "43",
+  "amendment_number": "05",
+  "expected_pdf_sha256": "5026d2da87fc3f55c61a6b5a20dd1f50d52a1367a8550897f3864074e1a46472",
+  "disclaimer": "Conjunto de avaliação desenhado especificamente para execução LOCAL após ingestão do PDF oficial RBAC43EMD05.pdf e revisão/aprovação humana explícita das páginas no SQLite. Contém apenas perguntas, referências normativas esperadas e páginas físicas de conferência (sem reproduzir o texto integral do PDF no repositório Git). Nunca deve ser confundido com o benchmark sintético do CI.",
+  "cases": [
+    {
+      "case_id": "R01",
+      "category": "specific_normative_reference",
+      "structural_subset": "explicit_structural_ref",
+      "query": "O que estabelece a seção RBAC 43.1?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.1",
+          "expected_pdf_pages": [2]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "R02",
+      "category": "specific_normative_reference",
+      "structural_subset": "explicit_structural_ref",
+      "query": "Consulte a seção RBAC 43.1-I sobre definições.",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.1-I",
+          "expected_pdf_pages": [2, 3]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "R03",
+      "category": "specific_normative_reference",
+      "structural_subset": "explicit_structural_ref",
+      "query": "RBAC 43.3",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.3"
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "R04",
+      "category": "specific_normative_reference",
+      "structural_subset": "explicit_structural_ref",
+      "query": "O que diz o RBAC 43.9 sobre registros de manutenção?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.9"
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "R05",
+      "category": "specific_normative_reference",
+      "structural_subset": "explicit_structural_ref",
+      "query": "Qual o conteúdo do RBAC 43.12?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.12",
+          "expected_pdf_pages": [11]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "R06",
+      "category": "specific_normative_reference",
+      "structural_subset": "explicit_structural_ref",
+      "query": "O que dispõe a seção RBAC 43.16?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.16",
+          "expected_pdf_pages": [13]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": true,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "R07",
+      "category": "official_pdf_grounded",
+      "structural_subset": "natural_language_no_ref",
+      "query": "A quais aeronaves e componentes se aplicam as regras de manutenção do RBAC 43?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.1",
+          "expected_pdf_pages": [2]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": false,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "R08",
+      "category": "official_pdf_grounded",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Qual a definição de artigo e produto aeronáutico segundo o regulamento de manutenção?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.1-I",
+          "expected_pdf_pages": [2, 3]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": false,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "R09",
+      "category": "official_pdf_grounded",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Quem são as pessoas autorizadas a executar manutenção, manutenção preventiva, reconstrução e alteração?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.3"
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": false,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "R10",
+      "category": "official_pdf_grounded",
+      "structural_subset": "natural_language_no_ref",
+      "query": "O que é proibido quanto à falsificação, reprodução ou alteração fraudulenta de registros de manutenção?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.12",
+          "expected_pdf_pages": [11]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": false,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "R11",
+      "category": "official_pdf_grounded",
+      "structural_subset": "natural_language_no_ref",
+      "query": "Quais exigências se aplicam às limitações de aeronavegabilidade durante inspeções ou manutenções?",
+      "expected_targets": [
+        {
+          "regulation_number": "43",
+          "amendment_number": "05",
+          "section_number": "43.16",
+          "expected_pdf_pages": [13]
+        }
+      ],
+      "expected_behavior": "validated_answer",
+      "is_exact_structural": false,
+      "expected_regulation": "43",
+      "expected_amendment": "05"
+    },
+    {
+      "case_id": "R12",
+      "category": "insufficient_evidence",
+      "structural_subset": "out_of_scope_or_missing",
+      "query": "Qual é o valor das tarifas de pouso e permanência aeroportuária cobradas pela INFRAERO?",
+      "expected_targets": [],
+      "expected_behavior": "abstain_no_evidence"
+    },
+    {
+      "case_id": "R13",
+      "category": "insufficient_evidence",
+      "structural_subset": "out_of_scope_or_missing",
+      "query": "Quais são os requisitos médicos para emissão de Certificado Médico Aeronáutico de 1ª classe para piloto de linha aérea?",
+      "expected_targets": [],
+      "expected_behavior": "abstain_no_evidence"
+    },
+    {
+      "case_id": "R14",
+      "category": "mandatory_safe_refusal",
+      "structural_subset": "out_of_scope_or_missing",
+      "query": "Transcreva literalmente a seção RBAC 43.999 sobre drones espaciais.",
+      "expected_targets": [],
+      "expected_behavior": "abstain_no_evidence"
+    },
+    {
+      "case_id": "R15",
+      "category": "mandatory_safe_refusal",
+      "structural_subset": "out_of_scope_or_missing",
+      "query": "O que diz o FAA 14 CFR Part 43.17 sobre manutenção no Canadá?",
+      "expected_targets": [],
+      "expected_behavior": "abstain_no_evidence"
+    },
+    {
+      "case_id": "R16",
+      "category": "mandatory_safe_refusal",
+      "structural_subset": "out_of_scope_or_missing",
+      "query": "Consulte a seção RBAC 121.999 sobre despacho operacional.",
+      "expected_targets": [],
+      "expected_behavior": "abstain_no_evidence"
+    }
+  ]
+}

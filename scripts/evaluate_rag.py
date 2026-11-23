@@ -498,9 +498,147 @@ def render_backend_comparison(
     return "\n".join(lines)
 
 
+def render_official_corpus_header(report_dict: Mapping[str, object]) -> str:
+    """Formata cabeçalho explícito de origem e recomendação de calibração do corpus oficial."""
+    approval = report_dict["approval_summary"]
+    calibration = report_dict["calibration"]
+    assert isinstance(approval, Mapping)
+    assert isinstance(calibration, Mapping)
+    skipped = report_dict["skipped_unapproved_case_ids"]
+    assert isinstance(skipped, Sequence)
+    lines = [
+        "=== AVALIAÇÃO SOBRE CORPUS OFICIAL APROVADO (NÃO SINTÉTICO) ===",
+        (
+            f"Origem do corpus: {report_dict['corpus_origin']} | "
+            f"Dataset: {report_dict['dataset_origin']}"
+        ),
+        (
+            f"Documento: {approval['document_id']} (versão {approval['version_id']}, "
+            f"Emenda {approval['amendment_number']})"
+        ),
+        (
+            f"Páginas aprovadas manualmente: {approval['manually_approved_pages']}/"
+            f"{approval['total_pages']} | Preliminares: {approval['preliminary_native_pages']} | "
+            f"OCR pendente: {approval['ocr_pending_pages']} | "
+            f"Reprovadas: {approval['rejected_pages']}"
+        ),
+        f"Chunks SQLite FTS5: {approval['sqlite_chunk_count']}",
+        (
+            f"Casos avaliados: {report_dict['evaluated_cases_count']} | "
+            f"Casos ignorados (páginas ainda não aprovadas): {len(skipped)}"
+        ),
+        "",
+        "=== RECOMENDAÇÃO DE CALIBRAÇÃO DE max_vector_distance (PROVISÓRIO=0.85) ===",
+        f"Elegível para calibração definitiva: {calibration['calibration_eligible']}",
+        f"Limiar recomendado: {calibration['recommended_threshold']}",
+        f"Justificativa: {calibration['rationale']}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _run_official_approved_corpus(
+    *,
+    documents_dir: Path | None,
+    document_id: str,
+    dataset_path: Path,
+    collection_name: str | None,
+    embedding_backend: str,
+    threshold: float,
+) -> Mapping[str, object]:
+    from rbac_assistant.infrastructure.storage.sqlite_document_repository import (
+        SqliteDocumentRepository,
+    )
+    from rbac_assistant.infrastructure.vector_db.chroma_vector_store import ChromaVectorStore
+    from rbac_assistant.rag.evaluation.corpus_evaluator import evaluate_approved_corpus
+
+    settings = load_settings()
+    base_dir = documents_dir or settings.storage.documents_dir
+    repository = SqliteDocumentRepository(
+        base_dir / settings.storage.sqlite_filename,
+        busy_timeout_ms=settings.storage.sqlite_busy_timeout_ms,
+    )
+    repository.initialize()
+    vector_store = ChromaVectorStore(
+        host=settings.chroma_host,
+        port=settings.chroma_port,
+        heartbeat_path=settings.vector_db.heartbeat_path,
+        timeout_seconds=settings.vector_db.request_timeout_seconds,
+    )
+
+    client: GeminiClientAdapter | None = None
+    query_cache: InMemoryQueryEmbeddingCache | None = None
+    embedder: EmbeddingPort | None = None
+    backend_label = "lexical_only"
+
+    try:
+        if embedding_backend == "gemini-embedding-2":
+            client, raw_embedder = _build_real_gemini_embedding_port()
+            query_cache = InMemoryQueryEmbeddingCache(
+                raw_embedder,
+                extra_parameters=_real_query_cache_extra_parameters(client),
+            )
+            embedder = query_cache
+            backend_label = "gemini-embedding-2"
+
+        report = evaluate_approved_corpus(
+            repository=repository,
+            vector_store=vector_store,
+            embedding_port=embedder,
+            document_id=document_id,
+            collection_name=collection_name or settings.vector_db.collection_name,
+            dataset_path=dataset_path,
+            embedding_backend_label=backend_label,
+            default_threshold=threshold,
+            include_ablations=True,
+        )
+        return {
+            "report_obj": report,
+            "as_dict": asdict(report),
+        }
+    finally:
+        if query_cache is not None:
+            query_cache.clear()
+        if client is not None:
+            client.close()
+        repository.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Executa avaliação quantitativa controlada do motor RAG (corpus sintético)."
+        description=(
+            "Executa avaliação quantitativa controlada do motor RAG "
+            "(corpus sintético padrão ou corpus oficial aprovado)."
+        )
+    )
+    parser.add_argument(
+        "--corpus",
+        choices=("synthetic", "official-approved"),
+        default="synthetic",
+        help=(
+            "'synthetic' (padrão offline/CI, 40 consultas fictícias) ou "
+            "'official-approved' (avalia SQLite/ChromaDB reais somente sobre páginas aprovadas)."
+        ),
+    )
+    parser.add_argument(
+        "--dataset-path",
+        type=Path,
+        default=Path("config/evaluations/rbac43_emd05_eval_dataset.json"),
+        help="Caminho do dataset JSON para --corpus official-approved.",
+    )
+    parser.add_argument(
+        "--documents-dir",
+        type=Path,
+        help="Diretório do catálogo SQLite para --corpus official-approved.",
+    )
+    parser.add_argument(
+        "--document-id",
+        default="anac_rbac_43",
+        help="Documento regulatório alvo em --corpus official-approved (padrão: anac_rbac_43).",
+    )
+    parser.add_argument(
+        "--collection",
+        help="Sobrescreve o nome da coleção vetorial em --corpus official-approved.",
     )
     parser.add_argument(
         "--json",
@@ -510,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--per-query",
         action="store_true",
-        help="Inclui tabela detalhada com o resultado individual de todas as 40 consultas.",
+        help="Inclui tabela detalhada com o resultado individual das consultas.",
     )
     parser.add_argument(
         "--threshold",
@@ -524,11 +662,40 @@ def main(argv: list[str] | None = None) -> int:
         default="deterministic",
         help=(
             "Backend de embeddings: 'deterministic' (padrão offline/CI), 'gemini-embedding-2' "
-            "(manual Free Tier real sobre corpus sintético) ou 'compare' (ambos lado a lado)."
+            "(manual Free Tier real) ou 'compare' (ambos lado a lado no corpus sintético)."
         ),
     )
     args = parser.parse_args(argv)
     configure_cli_logging(log_level="WARNING", redact_secrets=True)
+
+    if args.corpus == "official-approved":
+        if args.embedding_backend == "compare":
+            parser.error(
+                "--embedding-backend compare é exclusivo do corpus sintético; "
+                "use 'deterministic' (lexical/estrutural) ou 'gemini-embedding-2'."
+            )
+        result = _run_official_approved_corpus(
+            documents_dir=args.documents_dir,
+            document_id=args.document_id,
+            dataset_path=args.dataset_path,
+            collection_name=args.collection,
+            embedding_backend=args.embedding_backend,
+            threshold=args.threshold,
+        )
+        as_dict = result["as_dict"]
+        assert isinstance(as_dict, Mapping)
+        if args.json:
+            print(json.dumps(as_dict, ensure_ascii=False, indent=2))
+        else:
+            from rbac_assistant.rag.evaluation.corpus_evaluator import (
+                ApprovedCorpusEvaluationReport,
+            )
+
+            report_obj = result["report_obj"]
+            assert isinstance(report_obj, ApprovedCorpusEvaluationReport)
+            print(render_official_corpus_header(as_dict))
+            print(render_report_table(report_obj.summary, include_per_query=args.per_query))
+        return 0
 
     if args.embedding_backend == "compare":
         det_report = _run_benchmark_for_backend(
@@ -545,6 +712,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 json.dumps(
                     {
+                        "corpus_origin": "synthetic_controlled_fixture",
                         "deterministic": asdict(det_report),
                         "gemini_embedding_2": asdict(real_report),
                     },
@@ -563,7 +731,9 @@ def main(argv: list[str] | None = None) -> int:
         include_ablations=True,
     )
     if args.json:
-        print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
+        payload = asdict(report)
+        payload["corpus_origin"] = "synthetic_controlled_fixture"
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(render_report_table(report, include_per_query=args.per_query))
     return 0
