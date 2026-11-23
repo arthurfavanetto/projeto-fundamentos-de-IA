@@ -52,6 +52,7 @@ services:
       CHROMA_PORT: "8000"
       ENVIRONMENT: ${ENVIRONMENT:-local}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PTB_TIMEDELTA: "1"
     depends_on:
       chromadb:
         condition: service_healthy

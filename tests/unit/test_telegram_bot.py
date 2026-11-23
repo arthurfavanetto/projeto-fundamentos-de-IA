@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
+import warnings
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from telegram.error import InvalidToken, NetworkError, RetryAfter, TelegramError, TimedOut
+from telegram.warnings import PTBDeprecationWarning
 
 from rbac_assistant import main as main_module
 from rbac_assistant.application.dto.ingestion_dto import RegisterDocumentDTO
@@ -33,8 +37,10 @@ from rbac_assistant.infrastructure.storage.sqlite_document_repository import (
     SqliteDocumentRepository,
 )
 from rbac_assistant.infrastructure.vector_db.chroma_vector_store import ChromaVectorStore
+from rbac_assistant.interfaces.telegram import bot_runner as bot_runner_module
 from rbac_assistant.interfaces.telegram.bot_runner import (
     TelegramBotRunner,
+    _normalize_retry_after_seconds,
     is_usable_telegram_token,
 )
 from rbac_assistant.interfaces.telegram.command_router import (
@@ -606,5 +612,325 @@ async def test_build_telegram_router_wires_hexagonal_stack_offline(tmp_path: Pat
         assert "gemini-4-hydrogen" in r_ok.messages[0]
         r_deny = await router.handle_message(user_id=8888, text="/versao", update_id=902)
         assert r_deny.access_denied is True
+    finally:
+        repo.close()
+
+
+class _LegacyScalarRetryAfter(RetryAfter):
+    """Subclasse controlada para simular `.retry_after` legado (`int`/`float`) em testes offline."""
+
+    def __init__(self, scalar_seconds: int | float) -> None:
+        self._scalar_seconds = scalar_seconds
+        TelegramError.__init__(
+            self,
+            f"Flood control exceeded. Retry in {scalar_seconds} seconds",
+        )
+
+    @property
+    def retry_after(self) -> Any:
+        return self._scalar_seconds
+
+
+class _SequenceFakeUpdater:
+    """Fake de Updater que executa uma sequência controlada de exceções antes de iniciar."""
+
+    def __init__(self, outcomes: list[Exception | None]) -> None:
+        self._outcomes = list(outcomes)
+        self.started = False
+        self.stopped = False
+        self.start_attempts = 0
+
+    async def start_polling(self, **_kwargs: Any) -> None:
+        self.start_attempts += 1
+        if self._outcomes:
+            outcome = self._outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+@pytest.mark.unit
+def test_normalize_retry_after_seconds_handles_int_float_timedelta_and_rejects_invalid() -> None:
+    assert _normalize_retry_after_seconds(0) == 0.0
+    assert _normalize_retry_after_seconds(2) == 2.0
+    assert _normalize_retry_after_seconds(45) == 10.0
+    assert _normalize_retry_after_seconds(0.25) == 0.25
+    assert _normalize_retry_after_seconds(1.5) == 1.5
+    assert _normalize_retry_after_seconds(99.9) == 10.0
+    assert _normalize_retry_after_seconds(timedelta(0)) == 0.0
+    assert _normalize_retry_after_seconds(timedelta(seconds=2, milliseconds=500)) == 2.5
+    assert _normalize_retry_after_seconds(timedelta(seconds=30)) == 10.0
+    assert _normalize_retry_after_seconds(timedelta(seconds=25), max_wait_seconds=30.0) == 25.0
+
+    invalid_values: list[Any] = [
+        -1,
+        -0.01,
+        timedelta(seconds=-2),
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        True,
+        False,
+        "5",
+        None,
+    ]
+    for bad_value in invalid_values:
+        with pytest.raises(ValueError):
+            _normalize_retry_after_seconds(bad_value)
+
+    for bad_max in (-1.0, float("nan"), float("inf"), True):
+        with pytest.raises(ValueError):
+            _normalize_retry_after_seconds(1, max_wait_seconds=bad_max)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+async def test_telegram_bot_runner_retry_after_int_and_timedelta_without_deprecation_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert os.environ.get("PTB_TIMEDELTA") == "1"
+    router, _retriever, _llm, audit, repo = _build_router_fixture(
+        tmp_path,
+        requests_per_minute=50,
+        burst_size=50,
+    )
+    slept: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        slept.append(delay)
+
+    monkeypatch.setattr(bot_runner_module.asyncio, "sleep", _fake_sleep)
+
+    runner = TelegramBotRunner(
+        token="123456789:AAFakeTelegramBotTokenNeverReal0123456789",
+        router=router,
+        audit_port=audit,
+    )
+
+    try:
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always", PTBDeprecationWarning)
+
+            err_from_int = RetryAfter(2)
+            assert isinstance(err_from_int.retry_after, timedelta)
+            assert err_from_int.retry_after == timedelta(seconds=2)
+
+            err_from_td = RetryAfter(timedelta(milliseconds=250))
+            assert isinstance(err_from_td.retry_after, timedelta)
+            assert err_from_td.retry_after == timedelta(milliseconds=250)
+
+            scenarios: list[tuple[RetryAfter, float]] = [
+                (RetryAfter(2), 2.0),
+                (RetryAfter(timedelta(milliseconds=250)), 0.25),
+                (RetryAfter(timedelta(seconds=45)), 10.0),
+                (_LegacyScalarRetryAfter(3), 3.0),
+                (_LegacyScalarRetryAfter(1.5), 1.5),
+            ]
+            for idx, (retry_exc, expected_delay) in enumerate(scenarios, start=600):
+                slept.clear()
+                delivered: list[str] = []
+                attempts = 0
+
+                async def _reply_once_after_retry(
+                    *,
+                    text: str,
+                    disable_web_page_preview: bool = True,
+                    _exc: RetryAfter = retry_exc,
+                    _delivered: list[str] = delivered,
+                ) -> None:
+                    nonlocal attempts
+                    del disable_web_page_preview
+                    attempts += 1
+                    if attempts == 1:
+                        raise _exc
+                    _delivered.append(text)
+
+                fake_update = SimpleNamespace(
+                    update_id=idx,
+                    effective_message=SimpleNamespace(
+                        text="/help",
+                        reply_text=_reply_once_after_retry,
+                    ),
+                    effective_user=SimpleNamespace(id=2002),
+                )
+                await runner.handle_update(fake_update, SimpleNamespace())  # type: ignore[arg-type]
+                assert slept == [expected_delay]
+                assert attempts == 2
+                assert len(delivered) == 1
+
+            # Valores negativos ou inválidos não acionam sleep nem derrubam o handler
+            for invalid_exc in (
+                RetryAfter(timedelta(seconds=-3)),
+                _LegacyScalarRetryAfter(-5),
+                _LegacyScalarRetryAfter(float("nan")),
+            ):
+                slept.clear()
+                calls = 0
+
+                async def _raise_invalid_retry(
+                    *,
+                    text: str,
+                    disable_web_page_preview: bool = True,
+                    _exc: RetryAfter = invalid_exc,
+                ) -> None:
+                    nonlocal calls
+                    del text, disable_web_page_preview
+                    calls += 1
+                    raise _exc
+
+                await runner._reply_with_resilience(
+                    message=SimpleNamespace(reply_text=_raise_invalid_retry),
+                    text="Resposta de teste",
+                )
+                assert calls == 1
+                assert slept == []
+
+        assert captured == [], f"PTBDeprecationWarning inesperado: {captured}"
+        invalid_events = [
+            e
+            for e in audit.read_events()
+            if e["event_type"] == "telegram_api_error" and e["outcome"] == "invalid_retry_after"
+        ]
+        assert len(invalid_events) == 3
+    finally:
+        repo.close()
+
+
+@pytest.mark.unit
+async def test_telegram_bot_runner_startup_backoff_retry_and_network_failure_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router, _retriever, _llm, audit, repo = _build_router_fixture(tmp_path)
+    fake_token = "123456789:AAFakeTelegramBotTokenNeverReal0123456789"
+    recorded_sleeps: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        recorded_sleeps.append(delay)
+
+    monkeypatch.setattr(bot_runner_module.asyncio, "sleep", _fake_sleep)
+
+    # Garante bloqueio de API real e nenhuma chamada ao ApplicationBuilder
+    def _forbid_builder(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("ApplicationBuilder real não pode ser invocado em testes offline.")
+
+    monkeypatch.setattr(bot_runner_module, "ApplicationBuilder", _forbid_builder)
+
+    try:
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always", PTBDeprecationWarning)
+
+            # 1. Bloqueio de API real permanece ativo
+            real_runner = TelegramBotRunner(token=fake_token, router=router)
+            with pytest.raises(RuntimeError, match="RBAC_BLOCK_REAL_TELEGRAM_API=1"):
+                real_runner.build_application()
+
+            # 2. Backoff exponencial + RetryAfter (timedelta) na inicialização até sucesso
+            stop_event = asyncio.Event()
+
+            class _StopOnStartUpdater(_SequenceFakeUpdater):
+                async def start_polling(self, **kwargs: Any) -> None:
+                    await super().start_polling(**kwargs)
+                    if self.started:
+                        stop_event.set()
+
+            updater = _StopOnStartUpdater(
+                [
+                    NetworkError("dns down"),
+                    RetryAfter(timedelta(seconds=5)),
+                    TimedOut("socket timeout"),
+                    RetryAfter(timedelta(seconds=120)),
+                    None,
+                ]
+            )
+            fake_app = _FakeApplication(updater)  # type: ignore[arg-type]
+            runner = TelegramBotRunner(
+                token=fake_token,
+                router=router,
+                startup_retry_max_attempts=5,
+                startup_retry_base_delay_seconds=2.0,
+                audit_port=audit,
+                application=fake_app,
+            )
+            exit_code = await runner.run_async(stop_event=stop_event)
+            assert exit_code == 0
+            assert updater.start_attempts == 5
+            assert recorded_sleeps == [2.0, 5.0, 8.0, 30.0]
+            assert fake_app.stopped is True
+            assert fake_app.shutdown_called is True
+
+            # 3. Esgotamento de retries por falha de rede retorna código 1 com shutdown limpo
+            recorded_sleeps.clear()
+            failing_updater = _SequenceFakeUpdater(
+                [
+                    NetworkError("offline 1"),
+                    TimedOut("offline 2"),
+                    NetworkError("offline 3"),
+                ]
+            )
+            failing_app = _FakeApplication(failing_updater)  # type: ignore[arg-type]
+            failing_runner = TelegramBotRunner(
+                token=fake_token,
+                router=router,
+                startup_retry_max_attempts=3,
+                startup_retry_base_delay_seconds=2.0,
+                audit_port=audit,
+                application=failing_app,
+            )
+            assert await failing_runner.run_async(stop_event=asyncio.Event()) == 1
+            assert failing_updater.start_attempts == 3
+            assert recorded_sleeps == [2.0, 4.0]
+            assert failing_app.stopped is True
+            assert failing_app.shutdown_called is True
+
+            # 4. Falha de rede na 1ª tentativa e no retry após RetryAfter sem perda de controle
+            recorded_sleeps.clear()
+            secondary_calls = 0
+
+            async def _retry_then_network_error(
+                *,
+                text: str,
+                disable_web_page_preview: bool = True,
+            ) -> None:
+                nonlocal secondary_calls
+                del text, disable_web_page_preview
+                secondary_calls += 1
+                if secondary_calls == 1:
+                    raise RetryAfter(1)
+                raise NetworkError(f"reset by peer token={fake_token}")
+
+            await runner._reply_with_resilience(
+                message=SimpleNamespace(reply_text=_retry_then_network_error),
+                text="Mensagem normativa",
+            )
+            assert secondary_calls == 2
+            assert recorded_sleeps == [1.0]
+
+            async def _immediate_timeout(
+                *,
+                text: str,
+                disable_web_page_preview: bool = True,
+            ) -> None:
+                del text, disable_web_page_preview
+                raise TimedOut("gateway timeout")
+
+            await runner._reply_with_resilience(
+                message=SimpleNamespace(reply_text=_immediate_timeout),
+                text="Mensagem normativa 2",
+            )
+
+        assert captured == [], f"PTBDeprecationWarning inesperado: {captured}"
+        raw_audit = audit.audit_file_path.read_text(encoding="utf-8")
+        assert fake_token not in raw_audit
+        network_events = [
+            e
+            for e in audit.read_events()
+            if e["event_type"] == "telegram_api_error" and e["outcome"] == "network_error"
+        ]
+        assert len(network_events) >= 2
+        assert any(e.get("metadata", {}).get("after_retry") is True for e in network_events)
     finally:
         repo.close()

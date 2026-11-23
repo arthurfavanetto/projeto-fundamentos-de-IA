@@ -138,6 +138,7 @@ def test_docker_contracts_enforce_pinning_non_root_and_network_isolation(repo_ro
     assert "FROM python:3.12-slim-bookworm AS builder" in app_df
     assert "FROM python:3.12-slim-bookworm AS runtime" in app_df
     assert "USER 10001:10001" in app_df
+    assert "PTB_TIMEDELTA=1" in app_df
     assert "rbac_assistant.healthcheck" in app_df
 
     compose = yaml.safe_load((repo_root / "docker-compose.yml").read_text(encoding="utf-8"))
@@ -148,6 +149,7 @@ def test_docker_contracts_enforce_pinning_non_root_and_network_isolation(repo_ro
     assert "ports" not in bot_svc
     assert "chroma_data:/data" in chroma_svc["volumes"]
     assert "./config:/app/config:ro" in bot_svc["volumes"]
+    assert bot_svc["environment"]["PTB_TIMEDELTA"] == "1"
     assert chroma_svc["networks"] == ["rbac_internal_net"]
     assert compose["networks"]["rbac_internal_net"]["internal"] is True
     assert "/api/v2/heartbeat" in " ".join(chroma_svc["healthcheck"]["test"])
