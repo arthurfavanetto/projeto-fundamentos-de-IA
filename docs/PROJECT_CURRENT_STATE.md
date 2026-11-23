@@ -1,6 +1,7 @@
 # Estado Atual do Projeto — RBAC AI Assistant
 
-> **Referência de código:** `main` = `d1d6af150b0a20292ae7f91e33da0b91146573ca` (Etapas 0, 1, 2 e 3 integradas; PRs #4 a #9 mergeados).  
+> **Referência de código:** `main` = `d1d6af150b0a20292ae7f91e33da0b91146573ca` (Etapas 0, 1, 2 e 3 integradas; PRs #4 a #9 mergeados).
+>
 > **Domínio:** Regulamentos Brasileiros da Aviação Civil (**RBAC — ANAC**; nunca *Role-Based Access Control*).
 
 ---

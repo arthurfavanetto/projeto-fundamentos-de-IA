@@ -1,6 +1,7 @@
 # Relatório de Validação Técnica — Reconstrução (22/11/2026)
 
-> **Ambiente de validação desta rodada:** VM Linux Debian 12 do Antigravity (2 vCPUs `Intel Xeon Platinum 8481C`, 7.8 GiB RAM, `Python 3.12.16` via `uv 0.13.7`), sobre o commit consolidado `main` = `d1d6af150b0a20292ae7f91e33da0b91146573ca`.  
+> **Ambiente de validação desta rodada:** VM Linux Debian 12 do Antigravity (2 vCPUs `Intel Xeon Platinum 8481C`, 7.8 GiB RAM, `Python 3.12.16` via `uv 0.13.7`), sobre o commit consolidado `main` = `d1d6af150b0a20292ae7f91e33da0b91146573ca`.
+>
 > **Isolamento:** todas as execuções ocorreram com `env -u GEMINI_API_KEY`, `RBAC_DISABLE_DOTENV=1` e `RBAC_BLOCK_REAL_GEMINI_API=1` (0 chamadas reais à API Gemini, 0 chamadas à API Telegram).
 
 ---
