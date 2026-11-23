@@ -14,10 +14,13 @@ from google import genai as google_genai
 
 # Proteção imediata no tempo de importação (antes da coleta de qualquer módulo de teste,
 # inclusive em cada worker `pytest-xdist` criado por `spawn` no Windows e em subprocessos).
+# Também habilita o modo moderno `datetime.timedelta` do `python-telegram-bot` (`PTB_TIMEDELTA=1`)
+# antes da importação da biblioteca `telegram`.
 _SECRET_ENV_VARS: tuple[str, ...] = ("GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN")
 os.environ["RBAC_DISABLE_DOTENV"] = "1"
 os.environ["RBAC_BLOCK_REAL_GEMINI_API"] = "1"
 os.environ["RBAC_BLOCK_REAL_TELEGRAM_API"] = "1"
+os.environ["PTB_TIMEDELTA"] = "1"
 for _secret_var in _SECRET_ENV_VARS:
     os.environ.pop(_secret_var, None)
 
@@ -39,11 +42,12 @@ def _blocked_real_genai_client(*_args: Any, **_kwargs: Any) -> Any:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Reforça isolamento de `.env` e bloqueio de chamadas Gemini/Telegram antes da coleta."""
+    """Reforça isolamento de `.env`, modo `PTB_TIMEDELTA=1` e bloqueio Gemini/Telegram."""
     del config
     os.environ["RBAC_DISABLE_DOTENV"] = "1"
     os.environ["RBAC_BLOCK_REAL_GEMINI_API"] = "1"
     os.environ["RBAC_BLOCK_REAL_TELEGRAM_API"] = "1"
+    os.environ["PTB_TIMEDELTA"] = "1"
     for secret_var in _SECRET_ENV_VARS:
         os.environ.pop(secret_var, None)
     AppSettings.model_config["env_file"] = None
@@ -58,8 +62,8 @@ def _isolate_tests_from_host_dotenv_and_secrets(
     Abrange:
     - tempo de importação e `pytest_configure` (antes de qualquer fixture);
     - cada teste individual e cada worker `pytest-xdist` (`spawn` no Windows);
-    - subprocessos filhos via `RBAC_DISABLE_DOTENV=1`, `RBAC_BLOCK_REAL_GEMINI_API=1` e
-      `RBAC_BLOCK_REAL_TELEGRAM_API=1`;
+    - subprocessos filhos via `RBAC_DISABLE_DOTENV=1`, `RBAC_BLOCK_REAL_GEMINI_API=1`,
+      `RBAC_BLOCK_REAL_TELEGRAM_API=1` e `PTB_TIMEDELTA=1`;
     - tentativa direta de criar `google.genai.Client` sem fake injetado;
     - reset determinístico do `structlog` no teardown.
     Em produção fora do `pytest`, `.env` e os SDKs operam normalmente.
@@ -67,6 +71,7 @@ def _isolate_tests_from_host_dotenv_and_secrets(
     monkeypatch.setenv("RBAC_DISABLE_DOTENV", "1")
     monkeypatch.setenv("RBAC_BLOCK_REAL_GEMINI_API", "1")
     monkeypatch.setenv("RBAC_BLOCK_REAL_TELEGRAM_API", "1")
+    monkeypatch.setenv("PTB_TIMEDELTA", "1")
     monkeypatch.setitem(AppSettings.model_config, "env_file", None)
     monkeypatch.setattr(google_genai, "Client", _blocked_real_genai_client)
     for secret_var in _SECRET_ENV_VARS:

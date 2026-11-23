@@ -11,6 +11,7 @@ Características operacionais:
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import threading
 from contextlib import suppress
@@ -50,6 +51,45 @@ _PLACEHOLDER_PREFIXES: tuple[str, ...] = (
     "changeme",
     "placeholder",
 )
+_MAX_REPLY_RETRY_AFTER_SECONDS: float = 10.0
+_MAX_STARTUP_RETRY_DELAY_SECONDS: float = 30.0
+
+
+def _normalize_retry_after_seconds(
+    retry_after: int | float | timedelta,
+    *,
+    max_wait_seconds: float = _MAX_REPLY_RETRY_AFTER_SECONDS,
+) -> float:
+    """Normaliza `RetryAfter.retry_after` (`int`, `float` ou `timedelta`) para segundos finitos.
+
+    Regras de segurança e compatibilidade (`PTB_TIMEDELTA=1` e formato legado):
+    - `datetime.timedelta` usa exclusivamente `.total_seconds()` (nunca `float(timedelta)`).
+    - `int` e `float` são convertidos para `float`, rejeitando `bool`.
+    - Rejeita tempos negativos, `NaN`, infinitos ou tipos inválidos com `ValueError`.
+    - Aplica o limite superior `max_wait_seconds` sem ampliar limites de retry.
+    """
+    if isinstance(max_wait_seconds, bool) or not isinstance(max_wait_seconds, int | float):
+        raise ValueError("`max_wait_seconds` deve ser um número finito e não negativo.")
+    max_wait = float(max_wait_seconds)
+    if not math.isfinite(max_wait) or max_wait < 0.0:
+        raise ValueError("`max_wait_seconds` deve ser um número finito e não negativo.")
+
+    if isinstance(retry_after, timedelta):
+        seconds = retry_after.total_seconds()
+    elif isinstance(retry_after, int | float) and not isinstance(retry_after, bool):
+        seconds = float(retry_after)
+    else:
+        raise ValueError(
+            f"Tipo inválido para retry_after: {type(retry_after).__name__}. "
+            "Esperado int, float ou datetime.timedelta."
+        )
+
+    if not math.isfinite(seconds) or seconds < 0.0:
+        raise ValueError(
+            f"Tempo de espera retry_after inválido ({seconds!r}s): deve ser finito e >= 0."
+        )
+
+    return min(seconds, max_wait)
 
 
 def is_usable_telegram_token(token: str | None) -> bool:
@@ -148,15 +188,53 @@ class TelegramBotRunner:
         try:
             await message.reply_text(text=text, disable_web_page_preview=True)
         except RetryAfter as exc:
-            raw_delay = (
-                exc.retry_after.total_seconds()
-                if isinstance(exc.retry_after, timedelta)
-                else float(exc.retry_after)
-            )
-            wait_seconds = min(raw_delay, 10.0)
+            try:
+                wait_seconds = _normalize_retry_after_seconds(
+                    exc.retry_after,
+                    max_wait_seconds=_MAX_REPLY_RETRY_AFTER_SECONDS,
+                )
+            except ValueError as norm_exc:
+                logger.warning(
+                    "telegram_invalid_retry_after",
+                    error=redact_text(str(norm_exc)),
+                )
+                self._audit(
+                    action="telegram_api_error",
+                    status="invalid_retry_after",
+                    details={"error_type": type(exc).__name__},
+                )
+                return
+
             logger.warning("telegram_retry_after", retry_after_seconds=wait_seconds)
             await asyncio.sleep(wait_seconds)
-            await message.reply_text(text=text, disable_web_page_preview=True)
+            try:
+                await message.reply_text(text=text, disable_web_page_preview=True)
+            except Forbidden as retry_exc:
+                logger.warning("telegram_reply_forbidden", error=redact_text(str(retry_exc)))
+            except (TimedOut, NetworkError, RetryAfter) as retry_exc:
+                logger.warning(
+                    "telegram_reply_network_error",
+                    error_type=type(retry_exc).__name__,
+                    error=redact_text(str(retry_exc)),
+                    after_retry=True,
+                )
+                self._audit(
+                    action="telegram_api_error",
+                    status="network_error",
+                    details={"error_type": type(retry_exc).__name__, "after_retry": True},
+                )
+            except TelegramError as retry_exc:
+                logger.error(
+                    "telegram_reply_api_error",
+                    error_type=type(retry_exc).__name__,
+                    error=redact_text(str(retry_exc)),
+                    after_retry=True,
+                )
+                self._audit(
+                    action="telegram_api_error",
+                    status="telegram_error",
+                    details={"error_type": type(retry_exc).__name__, "after_retry": True},
+                )
         except Forbidden as exc:
             logger.warning("telegram_reply_forbidden", error=redact_text(str(exc)))
         except (TimedOut, NetworkError) as exc:
@@ -305,7 +383,7 @@ class TelegramBotRunner:
                         details={"attempt": attempt},
                     )
                     return 1
-                except (NetworkError, TimedOut) as exc:
+                except (NetworkError, TimedOut, RetryAfter) as exc:
                     safe_err = redact_text(str(exc))
                     logger.warning(
                         "telegram_startup_network_retry",
@@ -321,8 +399,27 @@ class TelegramBotRunner:
                     if attempt >= self._startup_retry_max_attempts:
                         logger.error("telegram_startup_exhausted_retries")
                         return 1
-                    delay = self._startup_retry_base_delay_seconds * (2 ** (attempt - 1))
-                    await asyncio.sleep(min(delay, 30.0))
+                    base_delay = max(0.0, float(self._startup_retry_base_delay_seconds))
+                    backoff_delay = min(
+                        base_delay * (2 ** (attempt - 1)),
+                        _MAX_STARTUP_RETRY_DELAY_SECONDS,
+                    )
+                    if isinstance(exc, RetryAfter):
+                        try:
+                            retry_delay = _normalize_retry_after_seconds(
+                                exc.retry_after,
+                                max_wait_seconds=_MAX_STARTUP_RETRY_DELAY_SECONDS,
+                            )
+                        except ValueError as norm_exc:
+                            logger.warning(
+                                "telegram_invalid_retry_after",
+                                error=redact_text(str(norm_exc)),
+                            )
+                            retry_delay = backoff_delay
+                        delay = max(backoff_delay, retry_delay)
+                    else:
+                        delay = backoff_delay
+                    await asyncio.sleep(delay)
 
             # Aguarda sinal externo de encerramento (SIGTERM/SIGINT)
             while not stop_event.is_set():

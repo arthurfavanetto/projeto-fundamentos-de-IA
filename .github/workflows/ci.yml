@@ -13,6 +13,8 @@ jobs:
   quality-and-tests:
     name: Lint, Typecheck & Pytest (Python 3.12)
     runs-on: ubuntu-latest
+    env:
+      PTB_TIMEDELTA: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
@@ -132,6 +134,22 @@ jobs:
           docker compose exec -T rbac-bot python scripts/index_document.py --status
           docker compose exec -T rbac-bot python -c "import sqlite3; c=sqlite3.connect('/app/data/documents/catalog.sqlite3'); assert c.execute(\"SELECT name FROM sqlite_master WHERE name='normative_chunks_fts'\").fetchone() is not None; print('[OK] SQLite FTS5 virtual table verified inside rbac-bot container.')"
           docker compose exec -T rbac-bot python -c "from pathlib import Path; p=Path('/app/logs/audit_events.jsonl'); assert p.is_file() and p.stat().st_size > 0; print('[OK] Production audit_events.jsonl verified inside /app/logs.')"
+          docker compose exec -T rbac-bot python - <<'PY'
+          import os
+          import warnings
+          from datetime import timedelta
+          from telegram.error import RetryAfter
+          from telegram.warnings import PTBDeprecationWarning
+
+          assert os.getenv("PTB_TIMEDELTA") == "1", f"PTB_TIMEDELTA={os.getenv('PTB_TIMEDELTA')!r}"
+          with warnings.catch_warnings(record=True) as captured:
+              warnings.simplefilter("always", PTBDeprecationWarning)
+              err = RetryAfter(2)
+              value = err.retry_after
+          assert value == timedelta(seconds=2), f"Unexpected retry_after={value!r}"
+          assert not captured, f"Unexpected PTBDeprecationWarning: {captured}"
+          print("[OK] PTB_TIMEDELTA=1 active inside rbac-bot with zero PTBDeprecationWarning.")
+          PY
           docker compose exec -T rbac-bot python scripts/verify_sqlite_persistence.py --phase cleanup
           docker compose exec -T rbac-bot python scripts/verify_audit_persistence.py --phase cleanup
 
