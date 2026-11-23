@@ -153,3 +153,7 @@ def test_docker_contracts_enforce_pinning_non_root_and_network_isolation(repo_ro
     assert chroma_svc["restart"] == "unless-stopped"
     assert bot_svc["restart"] == "unless-stopped"
     assert bot_svc["depends_on"]["chromadb"]["condition"] == "service_healthy"
+    for svc in (chroma_svc, bot_svc):
+        assert svc["logging"]["driver"] == "json-file"
+        assert svc["logging"]["options"]["max-size"] == "10m"
+        assert svc["logging"]["options"]["max-file"] == "5"
