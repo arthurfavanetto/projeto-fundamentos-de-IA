@@ -23,6 +23,7 @@ from rbac_assistant.application.services.indexing_service import IndexingService
 from rbac_assistant.config.logging_config import configure_cli_logging
 from rbac_assistant.config.settings import AppSettings, load_settings
 from rbac_assistant.domain.ports.rag_ports import EmbeddingPort
+from rbac_assistant.infrastructure.audit.jsonl_audit_adapter import JsonlAuditAdapter
 from rbac_assistant.infrastructure.llm.gemini_client import (
     GeminiClientAdapter,
     GeminiEmbeddingAdapter,
@@ -76,10 +77,16 @@ def _build_indexing_service(
     *,
     settings: AppSettings,
     documents_dir: Path | None,
+    audit_logs_dir: Path | None,
     collection_name: str | None,
     require_api_key: bool,
 ) -> tuple[IndexingService, GeminiClientAdapter | None]:
     base_dir = documents_dir or settings.storage.documents_dir
+    resolved_audit_dir = audit_logs_dir or (
+        documents_dir / "audit_logs"
+        if documents_dir is not None
+        else settings.storage.audit_logs_dir
+    )
     repository = SqliteDocumentRepository(
         base_dir / settings.storage.sqlite_filename,
         busy_timeout_ms=settings.storage.sqlite_busy_timeout_ms,
@@ -93,6 +100,7 @@ def _build_indexing_service(
         heartbeat_path=settings.vector_db.heartbeat_path,
         timeout_seconds=settings.vector_db.request_timeout_seconds,
     )
+    audit_adapter = JsonlAuditAdapter.from_settings(settings, logs_dir=resolved_audit_dir)
 
     gemini_client: GeminiClientAdapter | None = None
     embedding_port: EmbeddingPort
@@ -126,6 +134,7 @@ def _build_indexing_service(
         vector_store=vector_store,
         embedding_port=embedding_port,
         default_collection_name=collection_name or settings.vector_db.collection_name,
+        audit_port=audit_adapter,
     )
     return service, gemini_client
 
@@ -159,6 +168,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--collection", help="Sobrescreve o nome da coleção no ChromaDB.")
     parser.add_argument("--documents-dir", type=Path, help="Sobrescreve o diretório de dados.")
+    parser.add_argument(
+        "--audit-logs-dir",
+        type=Path,
+        help="Sobrescreve o diretório de logs JSONL de auditoria.",
+    )
     args = parser.parse_args(argv)
 
     if not args.status and not args.document_id and not args.rebuild_collection:
@@ -176,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     service, gemini_client = _build_indexing_service(
         settings=settings,
         documents_dir=args.documents_dir,
+        audit_logs_dir=args.audit_logs_dir,
         collection_name=args.collection,
         require_api_key=require_api_key,
     )

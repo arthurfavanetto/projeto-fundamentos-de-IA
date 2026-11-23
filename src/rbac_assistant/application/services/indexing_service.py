@@ -31,6 +31,7 @@ from rbac_assistant.domain.exceptions import (
     IndexingError,
     StorageConnectionError,
 )
+from rbac_assistant.domain.ports.audit_port import AuditEvent, AuditPort
 from rbac_assistant.domain.ports.document_repository_port import DocumentRepositoryPort
 from rbac_assistant.domain.ports.rag_ports import ChunkingPort, EmbeddingPort
 from rbac_assistant.domain.ports.vector_store_port import (
@@ -55,6 +56,7 @@ class IndexingService:
         vector_store: VectorStorePort,
         embedding_port: EmbeddingPort,
         default_collection_name: str = "regulatory_chunks_ge2_768_v1",
+        audit_port: AuditPort | None = None,
     ) -> None:
         self._repository = repository
         self._catalog_service = catalog_service
@@ -62,6 +64,7 @@ class IndexingService:
         self._vector_store = vector_store
         self._embedding_port = embedding_port
         self._default_collection_name = default_collection_name
+        self._audit_port = audit_port
 
     def index_document(
         self,
@@ -119,6 +122,23 @@ class IndexingService:
                     collection=target_collection,
                     chunks=reg_entry.chunk_count,
                 )
+                if self._audit_port is not None:
+                    self._audit_port.record(
+                        AuditEvent(
+                            timestamp=datetime.now(UTC),
+                            action="document_indexed",
+                            status="skipped_up_to_date",
+                            actor_id="system",
+                            details={
+                                "document_id": document.document_id,
+                                "version_id": version.version_id,
+                                "collection_name": target_collection,
+                                "chunks_created": reg_entry.chunk_count,
+                                "embedding_model": self._embedding_port.model_name,
+                                "embedding_dimension": self._embedding_port.dimensions,
+                            },
+                        )
+                    )
                 return IndexingOutcome(
                     document_id=document.document_id,
                     version_id=version.version_id,
@@ -239,6 +259,24 @@ class IndexingService:
             embedding_model=self._embedding_port.model_name,
             embedding_dimension=self._embedding_port.dimensions,
         )
+        if self._audit_port is not None:
+            self._audit_port.record(
+                AuditEvent(
+                    timestamp=datetime.now(UTC),
+                    action="document_indexed",
+                    status="success",
+                    actor_id="system",
+                    details={
+                        "document_id": document.document_id,
+                        "version_id": version.version_id,
+                        "collection_name": target_collection,
+                        "chunks_created": len(enriched_chunks),
+                        "stale_chunks_removed": total_removed,
+                        "embedding_model": self._embedding_port.model_name,
+                        "embedding_dimension": self._embedding_port.dimensions,
+                    },
+                )
+            )
         return IndexingOutcome(
             document_id=document.document_id,
             version_id=version.version_id,

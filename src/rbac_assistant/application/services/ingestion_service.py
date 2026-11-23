@@ -22,7 +22,12 @@ from rbac_assistant.domain.entities.regulatory_page import (
     ExtractionMetadata,
     RegulatoryPage,
 )
-from rbac_assistant.domain.exceptions import OcrUnavailableError, SourceFetchError
+from rbac_assistant.domain.exceptions import (
+    AuditWriteError,
+    OcrUnavailableError,
+    SourceFetchError,
+)
+from rbac_assistant.domain.ports.audit_port import AuditEvent, AuditPort
 from rbac_assistant.domain.ports.document_repository_port import DocumentRepositoryPort
 from rbac_assistant.domain.ports.document_source_port import DocumentSourcePort
 from rbac_assistant.domain.ports.file_store_port import FileStorePort
@@ -55,6 +60,7 @@ class IngestionService:
         local_source: DocumentSourcePort,
         http_source: DocumentSourcePort | None = None,
         ocr_adapter: OCRPort | None = None,
+        audit_port: AuditPort | None = None,
         min_native_chars: int = 50,
         max_pdf_pages: int = 1000,
         ocr_language: str = "por",
@@ -69,10 +75,12 @@ class IngestionService:
         self._local_source = local_source
         self._http_source = http_source
         self._ocr_adapter = ocr_adapter
+        self._audit_port = audit_port
         self._min_native_chars = min_native_chars
         self._max_pdf_pages = max_pdf_pages
         self._ocr_language = ocr_language
         self._extraction_version = extraction_version
+
 
     def _select_source(self, source_kind: str) -> DocumentSourcePort:
         if source_kind == "local":
@@ -132,6 +140,23 @@ class IngestionService:
                     units_created=len(units_existing),
                 )
             )
+            if self._audit_port is not None:
+                self._audit_port.record(
+                    AuditEvent(
+                        timestamp=datetime.now(UTC),
+                        action="document_ingested",
+                        status="skipped_idempotent",
+                        actor_id="system",
+                        details={
+                            "document_id": existing_doc.document_id,
+                            "version_id": existing_version.version_id,
+                            "amendment_number": existing_version.amendment_number,
+                            "pages_extracted": len(pages_existing),
+                            "units_created": len(units_existing),
+                            "source_hash": fetched.file_hash,
+                        },
+                    )
+                )
             return IngestionResultDTO(
                 document=existing_doc,
                 version=existing_version,
@@ -343,6 +368,26 @@ class IngestionService:
                 },
             )
 
+            if self._audit_port is not None:
+                self._audit_port.record(
+                    AuditEvent(
+                        timestamp=datetime.now(UTC),
+                        action="document_ingested",
+                        status="success",
+                        actor_id="system",
+                        details={
+                            "document_id": document.document_id,
+                            "version_id": version.version_id,
+                            "amendment_number": amendment,
+                            "pages_extracted": len(regulatory_pages),
+                            "units_created": len(parsed_units),
+                            "tables_extracted": len(all_tables),
+                            "ocr_pages_count": len(ocr_page_numbers),
+                            "source_hash": fetched.file_hash,
+                        },
+                    )
+                )
+
             return IngestionResultDTO(
                 document=document,
                 version=version,
@@ -355,6 +400,8 @@ class IngestionService:
                 raw_pdf_path=str(raw_pdf_path),
                 extracted_snapshot_path=str(snapshot_path),
             )
+        except AuditWriteError:
+            raise
         except Exception as exc:
             # Registra falha no histórico se o documento já existir no catálogo
             if self._repository.get_document(doc_dto.document_id) is not None:
@@ -369,6 +416,20 @@ class IngestionService:
                         extraction_version=self._extraction_version,
                         source_hash=fetched.file_hash,
                         error_message=str(exc),
+                    )
+                )
+            if self._audit_port is not None:
+                self._audit_port.record(
+                    AuditEvent(
+                        timestamp=datetime.now(UTC),
+                        action="document_ingested",
+                        status="failed",
+                        actor_id="system",
+                        details={
+                            "document_id": doc_dto.document_id,
+                            "amendment_number": amendment,
+                            "error_type": type(exc).__name__,
+                        },
                     )
                 )
             raise

@@ -79,3 +79,6 @@ class LLMRateLimitError(LLMServiceError):
 class LLMTimeoutError(LLMServiceError):
     """Sinaliza expiração de tempo limite (timeout) ao chamar o serviço de IA."""
 
+
+class AuditWriteError(DomainError):
+    """Sinaliza falha explícita ao persistir um evento de auditoria de forma durável."""

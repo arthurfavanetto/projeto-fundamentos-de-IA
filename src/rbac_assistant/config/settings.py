@@ -194,10 +194,20 @@ class RateLimitConfig(BaseModel):
 
 
 class AuditConfig(BaseModel):
-    """Parâmetros de auditoria e redação."""
+    """Parâmetros de auditoria persistente em JSONL, redação e rotação em `/app/logs`."""
 
     pseudonymize_user_ids: bool = False
     redact_secrets: bool = True
+    filename: str = Field(default="audit_events.jsonl", min_length=1)
+    max_file_size_mb: int = Field(default=10, ge=1, le=500)
+    max_rotated_files: int = Field(default=10, ge=1, le=100)
+    max_detail_string_length: int = Field(default=300, ge=64, le=2000)
+
+    @property
+    def max_file_size_bytes(self) -> int:
+        """Retorna o limite de tamanho por arquivo JSONL de auditoria em bytes."""
+        return self.max_file_size_mb * 1024 * 1024
+
 
 
 class SecurityConfig(BaseModel):

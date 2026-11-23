@@ -6,6 +6,7 @@ import argparse
 import signal
 import sys
 import threading
+from datetime import UTC, datetime
 from types import FrameType
 
 import structlog
@@ -13,6 +14,9 @@ import structlog
 from rbac_assistant.application.use_cases.check_system_status import CheckSystemStatusUseCase
 from rbac_assistant.config.logging_config import configure_logging
 from rbac_assistant.config.settings import load_settings
+from rbac_assistant.domain.exceptions import AuditWriteError
+from rbac_assistant.domain.ports.audit_port import AuditEvent
+from rbac_assistant.infrastructure.audit.jsonl_audit_adapter import JsonlAuditAdapter
 from rbac_assistant.infrastructure.vector_db.chroma_vector_store import ChromaVectorStore
 
 
@@ -36,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     logger = structlog.get_logger("rbac_assistant.main")
 
+    audit_adapter = JsonlAuditAdapter.from_settings(settings)
     vector_store = ChromaVectorStore(
         host=settings.chroma_host,
         port=settings.chroma_port,
@@ -46,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         vector_store=vector_store,
         documents_dir=settings.storage.documents_dir,
         audit_logs_dir=settings.storage.audit_logs_dir,
+        audit_port=audit_adapter,
     )
     report = status_use_case.execute()
 
@@ -57,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         chroma_heartbeat=report.chroma_heartbeat,
         documents_dir_writable=report.documents_dir_writable,
         audit_logs_dir_writable=report.audit_logs_dir_writable,
+        audit_file=str(audit_adapter.audit_file_path),
         ocr_policy=settings.extraction.ocr_unreviewed_policy,
         error=report.error,
     )
@@ -77,11 +84,37 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_shutdown)
     signal.signal(signal.SIGINT, _handle_shutdown)
 
+    try:
+        audit_adapter.record(
+            AuditEvent(
+                timestamp=datetime.now(UTC),
+                action="service_lifecycle",
+                status="started",
+                actor_id="system",
+                details={"environment": settings.environment},
+            )
+        )
+    except AuditWriteError as exc:
+        logger.error("audit_write_failed_on_startup", error=str(exc))
+        return 1
+
     logger.info(
         "foundation_ready",
-        message="Fundação Etapa 1 operacional aguardando sinal de encerramento.",
+        message="Fundação operacional aguardando sinal de encerramento.",
     )
     stop_event.wait()
+    try:
+        audit_adapter.record(
+            AuditEvent(
+                timestamp=datetime.now(UTC),
+                action="service_lifecycle",
+                status="stopped",
+                actor_id="system",
+                details={"environment": settings.environment},
+            )
+        )
+    except AuditWriteError as exc:
+        logger.error("audit_write_failed_on_shutdown", error=str(exc))
     logger.info("foundation_stopped")
     return 0
 
