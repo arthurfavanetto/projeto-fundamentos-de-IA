@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -262,6 +263,7 @@ class SqliteDocumentRepository:
         # Bancos `:memory:` exigem reutilização da mesma conexão durante o ciclo de vida do repo
         self._reuse_connection = True if self._is_memory else reuse_connection
         self._shared_conn: sqlite3.Connection | None = None
+        self._shared_lock = threading.RLock()
         self._parent_ensured = self._is_memory
 
     @property
@@ -270,9 +272,10 @@ class SqliteDocumentRepository:
 
     def close(self) -> None:
         """Fecha explicitamente a conexão reutilizada quando `reuse_connection=True`."""
-        if self._shared_conn is not None:
-            self._shared_conn.close()
-            self._shared_conn = None
+        with self._shared_lock:
+            if self._shared_conn is not None:
+                self._shared_conn.close()
+                self._shared_conn = None
 
     def __enter__(self) -> SqliteDocumentRepository:
         return self
@@ -289,6 +292,7 @@ class SqliteDocumentRepository:
             conn_target,
             timeout=self._busy_timeout_ms / 1000.0,
             isolation_level=None,
+            check_same_thread=not self._reuse_connection,
         )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
@@ -300,9 +304,10 @@ class SqliteDocumentRepository:
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         if self._reuse_connection:
-            if self._shared_conn is None:
-                self._shared_conn = self._open_connection()
-            yield self._shared_conn
+            with self._shared_lock:
+                if self._shared_conn is None:
+                    self._shared_conn = self._open_connection()
+                yield self._shared_conn
             return
 
         conn = self._open_connection()

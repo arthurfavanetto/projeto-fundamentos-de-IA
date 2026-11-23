@@ -79,7 +79,12 @@ retrieval:
 telegram:
   mode: "long_polling"
   max_message_length: 4096
+  max_input_length: 1000
   polling_timeout_seconds: 30
+  max_concurrent_updates_per_user: 1
+  duplicate_update_cache_size: 512
+  startup_retry_max_attempts: 5
+  startup_retry_base_delay_seconds: 2.0
 
 security:
   deny_by_default: true
