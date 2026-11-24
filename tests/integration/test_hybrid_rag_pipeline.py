@@ -823,11 +823,12 @@ def test_operational_cli_scripts_status_and_no_llm_query(
 def test_sqlite_migrations_fts5_rebuild_and_embedding_prefix_isolation(tmp_path: Path) -> None:
     repo, catalog, ingestion, validate_uc, vector_store, validation = _build_env(tmp_path)
 
-    # 1. Migrações incrementais v001, v002 e v003 aplicadas e registradas
+    # 1. Migrações incrementais v001..v004 aplicadas e registradas
     assert repo.list_applied_migrations() == [
         "v001_initial_catalog",
         "v002_fts5_and_chunks",
         "v003_index_strategy_metadata",
+        "v004_table_structure_metadata",
     ]
 
     version_id = _ingest_synthetic_rbac(ingestion, tmp_path)

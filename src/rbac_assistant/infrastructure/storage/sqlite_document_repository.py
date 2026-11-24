@@ -20,6 +20,7 @@ from rbac_assistant.domain.entities.normative_unit import (
     NormativeTable,
     NormativeUnitType,
     StructureStatus,
+    TableCellGeometry,
 )
 from rbac_assistant.domain.entities.rag import (
     IndexRegistryEntry,
@@ -199,6 +200,8 @@ def _serialize_extraction_metadata(meta: ExtractionMetadata | None) -> str:
         "page_height": meta.page_height,
         "table_count": meta.table_count,
         "image_count": meta.image_count,
+        "applied_corrections": list(meta.applied_corrections),
+        "glyph_anomalies": list(meta.glyph_anomalies),
         "quality_metrics": {
             "char_count": meta.quality_metrics.char_count,
             "line_count": meta.quality_metrics.line_count,
@@ -234,6 +237,8 @@ def _deserialize_extraction_metadata(raw_json: str) -> ExtractionMetadata | None
         passed_automated_checks=bool(qm.get("passed_automated_checks", False)),
         issues=tuple(str(item) for item in qm.get("issues", [])),
     )
+    raw_corrections = data.get("applied_corrections") or []
+    raw_anomalies = data.get("glyph_anomalies") or []
     return ExtractionMetadata(
         extraction_method=ExtractionMethod(data["extraction_method"]),
         extraction_timestamp=datetime.fromisoformat(data["extraction_timestamp"]),
@@ -244,6 +249,55 @@ def _deserialize_extraction_metadata(raw_json: str) -> ExtractionMetadata | None
         page_height=float(data.get("page_height", 0.0)),
         table_count=int(data.get("table_count", 0)),
         image_count=int(data.get("image_count", 0)),
+        applied_corrections=tuple(
+            dict(item) for item in raw_corrections if isinstance(item, dict)
+        ),
+        glyph_anomalies=tuple(
+            dict(item) for item in raw_anomalies if isinstance(item, dict)
+        ),
+    )
+
+
+def _serialize_table_metadata(table: NormativeTable) -> str:
+    return json.dumps(table.metadata_to_dict(), ensure_ascii=False)
+
+
+def _deserialize_table_row(row: sqlite3.Row) -> NormativeTable:
+    col_names = set(row.keys())
+    raw_meta = (
+        str(row["metadata_json"])
+        if "metadata_json" in col_names and row["metadata_json"]
+        else "{}"
+    )
+    meta = json.loads(raw_meta) if raw_meta else {}
+    raw_bbox = meta.get("bbox")
+    bbox: tuple[float, float, float, float] | None = None
+    if isinstance(raw_bbox, list) and len(raw_bbox) == 4:
+        bbox = (
+            float(raw_bbox[0]),
+            float(raw_bbox[1]),
+            float(raw_bbox[2]),
+            float(raw_bbox[3]),
+        )
+    cells = tuple(
+        TableCellGeometry.from_dict(item)
+        for item in (meta.get("cells") or [])
+        if isinstance(item, dict)
+    )
+    return NormativeTable(
+        table_id=str(row["table_id"]),
+        version_id=str(row["version_id"]),
+        unit_id=str(row["unit_id"]) if row["unit_id"] else None,
+        pdf_page_number=int(row["pdf_page_number"]),
+        caption=str(row["caption"]),
+        rows=tuple(tuple(str(cell) for cell in r) for r in json.loads(row["rows_json"])),
+        bbox=bbox,
+        cells=cells,
+        header_row_count=int(meta.get("header_row_count", 1)),
+        table_kind=str(meta.get("table_kind", "data_table")),
+        has_merged_cells=bool(meta.get("has_merged_cells", False)),
+        visual_layout_preserved=bool(meta.get("visual_layout_preserved", True)),
+        layout_fidelity_note=str(meta.get("layout_fidelity_note", "")),
     )
 
 
@@ -764,10 +818,15 @@ class SqliteDocumentRepository:
                 ),
             )
 
-            # Remove unidades, tabelas e entradas FTS5 antigas da versão antes de reinserir
+            # Remove unidades, tabelas, FTS5 e registro vetorial obsoletos antes de reinserir
             if self._table_exists(conn, "normative_chunks_fts"):
                 conn.execute(
                     "DELETE FROM normative_chunks_fts WHERE version_id = ?;",
+                    (version.version_id,),
+                )
+            if self._table_exists(conn, "vector_index_registry"):
+                conn.execute(
+                    "DELETE FROM vector_index_registry WHERE version_id = ?;",
                     (version.version_id,),
                 )
             conn.execute("DELETE FROM normative_units WHERE version_id = ?;", (version.version_id,))
@@ -926,8 +985,9 @@ class SqliteDocumentRepository:
                 conn.execute(
                     """
                     INSERT INTO normative_tables (
-                        table_id, version_id, unit_id, pdf_page_number, caption, rows_json
-                    ) VALUES (?, ?, ?, ?, ?, ?);
+                        table_id, version_id, unit_id, pdf_page_number, caption, rows_json,
+                        metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?);
                     """,
                     (
                         table.table_id,
@@ -936,6 +996,7 @@ class SqliteDocumentRepository:
                         table.pdf_page_number,
                         table.caption,
                         json.dumps([list(r) for r in table.rows], ensure_ascii=False),
+                        _serialize_table_metadata(table),
                     ),
                 )
 
@@ -1292,7 +1353,7 @@ class SqliteDocumentRepository:
                     f"""
                     SELECT * FROM normative_tables
                     WHERE version_id = ? AND pdf_page_number IN ({placeholders})
-                    ORDER BY pdf_page_number ASC, table_id ASC;
+                    ORDER BY pdf_page_number ASC, rowid ASC;
                     """,
                     [version_id, *page_numbers],
                 ).fetchall()
@@ -1301,21 +1362,11 @@ class SqliteDocumentRepository:
                     """
                     SELECT * FROM normative_tables
                     WHERE version_id = ?
-                    ORDER BY pdf_page_number ASC, table_id ASC;
+                    ORDER BY pdf_page_number ASC, rowid ASC;
                     """,
                     (version_id,),
                 ).fetchall()
-        return [
-            NormativeTable(
-                table_id=str(r["table_id"]),
-                version_id=str(r["version_id"]),
-                unit_id=str(r["unit_id"]) if r["unit_id"] else None,
-                pdf_page_number=int(r["pdf_page_number"]),
-                caption=str(r["caption"]),
-                rows=tuple(tuple(str(cell) for cell in row) for row in json.loads(r["rows_json"])),
-            )
-            for r in rows
-        ]
+        return [_deserialize_table_row(r) for r in rows]
 
     def list_references(self, unit_id: str) -> list[NormativeReference]:
         with self._connect() as conn:

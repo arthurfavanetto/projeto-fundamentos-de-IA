@@ -97,6 +97,8 @@ class ExtractionMetadata:
     page_height: float = 0.0
     table_count: int = 0
     image_count: int = 0
+    applied_corrections: tuple[dict[str, object], ...] = ()
+    glyph_anomalies: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

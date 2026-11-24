@@ -147,6 +147,15 @@ class CitationValidator:
             if sec:
                 allowed_sections.add(sec)
                 allowed_reg_sections.add((reg, sec))
+                if (
+                    len(sec) >= 4
+                    and sec[0].isalpha()
+                    and reg is not None
+                    and sec.startswith(f"{sec[0]}{reg}.")
+                ):
+                    for app_label in (f"apêndice {sec[0]}", f"apendice {sec[0]}"):
+                        allowed_sections.add(app_label)
+                        allowed_reg_sections.add((reg, app_label))
 
             # Inclui referências cruzadas literalmente presentes no texto oficial da evidência
             for cross_ref in resolve_structural_references(ev.original_text):

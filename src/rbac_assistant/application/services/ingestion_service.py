@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from rbac_assistant.application.dto.ingestion_dto import (
@@ -221,15 +222,46 @@ class IngestionService:
                     else:
                         method = ExtractionMethod.OCR_REQUIRED_UNAVAILABLE
 
+                page_tables: list[NormativeTable] = []
+                for t_idx, ext_table in enumerate(ext_page.tables):
+                    t_hash = hashlib.sha256(
+                        f"{version_id}:{ext_page.pdf_page_number}:{t_idx}".encode()
+                    ).hexdigest()[:12]
+                    page_tables.append(
+                        NormativeTable(
+                            table_id=f"tbl_{t_hash}",
+                            version_id=version_id,
+                            pdf_page_number=ext_page.pdf_page_number,
+                            rows=ext_table.rows,
+                            caption=ext_table.caption,
+                            bbox=ext_table.bbox,
+                            cells=ext_table.cells,
+                            header_row_count=ext_table.header_row_count,
+                            table_kind=ext_table.table_kind,
+                            has_merged_cells=ext_table.has_merged_cells,
+                            visual_layout_preserved=ext_table.visual_layout_preserved,
+                            layout_fidelity_note=ext_table.layout_fidelity_note,
+                        )
+                    )
+                all_tables.extend(page_tables)
+
                 content_hash = compute_page_content_hash(
                     orig_text,
                     tuple(table.rows for table in ext_page.tables),
                 )
 
+                unresolved_anomalies = tuple(
+                    f"{an.kind} ({an.text!r}) em '{an.context[:80]}'"
+                    for an in ext_page.glyph_anomalies
+                    if an.resolved_by_correction_id is None
+                )
                 quality = self._quality_checker.evaluate(
                     original_text=orig_text,
                     normalized_text=norm_text,
                     min_chars=self._min_native_chars,
+                    unresolved_glyph_anomalies=unresolved_anomalies,
+                    correction_issues=ext_page.correction_issues,
+                    tables=page_tables,
                 )
                 initial_status = self._validation_service.determine_initial_page_status(
                     extraction_method=method,
@@ -247,6 +279,8 @@ class IngestionService:
                     page_height=ext_page.page_height,
                     table_count=len(ext_page.tables),
                     image_count=ext_page.image_count,
+                    applied_corrections=ext_page.applied_corrections,
+                    glyph_anomalies=tuple(an.to_dict() for an in ext_page.glyph_anomalies),
                 )
                 regulatory_pages.append(
                     RegulatoryPage(
@@ -263,19 +297,6 @@ class IngestionService:
                         coordinates_summary=ext_page.coordinates_summary,
                     )
                 )
-
-                for t_idx, ext_table in enumerate(ext_page.tables):
-                    t_hash = hashlib.sha256(
-                        f"{version_id}:{ext_page.pdf_page_number}:{t_idx}".encode()
-                    ).hexdigest()[:12]
-                    all_tables.append(
-                        NormativeTable(
-                            table_id=f"tbl_{t_hash}",
-                            version_id=version_id,
-                            pdf_page_number=ext_page.pdf_page_number,
-                            rows=ext_table.rows,
-                        )
-                    )
 
             document = RegulatoryDocument(
                 document_id=doc_dto.document_id,
@@ -325,6 +346,31 @@ class IngestionService:
                 tables=all_tables,
             )
 
+            # Vincula cada tabela/formulário à unidade normativa raiz proprietária na página
+            root_units = [u for u in parsed_units if u.parent_unit_id is None]
+            linked_tables: list[NormativeTable] = []
+            for tbl in all_tables:
+                page_roots = [u for u in root_units if tbl.pdf_page_number in u.page_numbers]
+                owner_unit_id: str | None = None
+                if len(page_roots) == 1:
+                    owner_unit_id = page_roots[0].unit_id
+                elif len(page_roots) > 1:
+                    cues = [
+                        c.splitlines()[0].strip()
+                        for row in tbl.rows[:3]
+                        for c in row
+                        if len(c.strip()) >= 3
+                    ]
+                    if tbl.caption:
+                        cues.insert(0, tbl.caption.split("—")[0].strip())
+                    matched_roots = [
+                        u for u in page_roots if any(cue in u.original_text for cue in cues)
+                    ]
+                    if len(matched_roots) == 1:
+                        owner_unit_id = matched_roots[0].unit_id
+                linked_tables.append(replace(tbl, unit_id=owner_unit_id))
+            all_tables = linked_tables
+
             extraction_run = ExtractionRun(
                 run_id=run_id,
                 document_id=document.document_id,
@@ -366,6 +412,16 @@ class IngestionService:
                             "extraction_method": p.extraction_method.value,
                             "validation_status": p.validation_status.value,
                             "content_hash": p.content_hash,
+                            "applied_corrections": (
+                                list(p.extraction_metadata.applied_corrections)
+                                if p.extraction_metadata is not None
+                                else []
+                            ),
+                            "glyph_anomalies": (
+                                list(p.extraction_metadata.glyph_anomalies)
+                                if p.extraction_metadata is not None
+                                else []
+                            ),
                         }
                         for p in regulatory_pages
                     ],
