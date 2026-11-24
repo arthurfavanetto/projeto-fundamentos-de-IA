@@ -304,10 +304,32 @@ def test_fidelity_regression_refuses_without_llm_when_evidence_insufficient_or_u
         llm=llm_prelim,
     )
     ans_prelim = chat_prelim.ask(question="RBAC 43.3")
-    assert ans_prelim.is_preliminary_only is True
+    assert ans_prelim.found is False
+    assert ans_prelim.is_preliminary_only is False
+    assert ans_prelim.preliminary_excerpt is None
     assert ans_prelim.normative_text is None
+    assert ans_prelim.evidences == ()
+    assert ans_prelim.blocked_evidences == ()
+    assert ans_prelim.has_blocked_sources is True
     assert ans_prelim.evidences_sent_to_llm == ()
+    assert "Texto preliminar ainda não aprovado" not in ans_prelim.formatted_text
+    assert "LOCALIZAÇÃO PRELIMINAR" not in ans_prelim.formatted_text
     assert llm_prelim.calls == 0
+
+    # Caso C: StructuredNormativeAnswer proíbe construção direta com excerto preliminar
+    from rbac_assistant.domain.entities.rag import StructuredNormativeAnswer
+
+    with pytest.raises(ValueError, match="Excertos preliminares"):
+        StructuredNormativeAnswer(
+            query="RBAC 43.3",
+            found=True,
+            normative_text=None,
+            preliminary_excerpt="excerto proibido",
+            explanation="bloqueado",
+            references=(),
+            observations=(),
+            is_preliminary_only=True,
+        )
 
 
 @pytest.mark.unit
@@ -340,6 +362,8 @@ def test_official_rbac43_eval_dataset_schema_and_provisional_threshold_guard(
 def test_official_approved_corpus_evaluator_enforces_human_approval_gate(
     tmp_path: Path,
 ) -> None:
+    from rbac_assistant.domain.exceptions import ValidationPolicyError
+
     pdf_path = create_synthetic_rbac_pdf(tmp_path / "rbac43_controlled.pdf")
     docs_dir = tmp_path / "docs"
     repo = SqliteDocumentRepository(docs_dir / "catalog.sqlite3")
@@ -389,30 +413,54 @@ def test_official_approved_corpus_evaluator_enforces_human_approval_gate(
                 document_id="anac_rbac_43",
             )
 
-        # 3. Aprovação humana explícita da seção 43.1 + indexação FTS5
+        # 3. Aprovação parcial (somente seção 43.1 / p. 2) continua bloqueada globalmente!
         catalog = CatalogService(repo)
-        ValidatePageUseCase(
+        validate_uc = ValidatePageUseCase(
             repository=repo,
             catalog_service=catalog,
             validation_service=validation,
             file_store=store,
-        ).execute(
+        )
+        validate_uc.execute(
             PageReviewRequestDTO(
                 document_id="anac_rbac_43",
                 reviewer="revisor_teste",
                 decision=ReviewDecision.APPROVE,
                 confirmed=True,
                 section_number="43.1",
-                comments="Aprovado para teste de regressão de avaliação",
+                comments="Aprovação parcial insuficiente sob bloqueio global.",
             )
         )
-        IndexingService(
+        indexing = IndexingService(
             repository=repo,
             catalog_service=catalog,
             chunker=StructuralNormativeChunker(),
             vector_store=_NoOpVectorStore(),  # type: ignore[arg-type]
             embedding_port=_ConstantDeterministicEmbedder(),
-        ).index_document(document_id="anac_rbac_43")
+            validation_service=validation,
+        )
+        with pytest.raises(ValidationPolicyError, match="Indexação bloqueada"):
+            indexing.index_document(document_id="anac_rbac_43")
+        with pytest.raises(ValueError, match="política global de aprovação documental"):
+            evaluate_approved_corpus(
+                repository=repo,
+                vector_store=_NoOpVectorStore(),  # type: ignore[arg-type]
+                embedding_port=None,
+                document_id="anac_rbac_43",
+            )
+
+        # 4. Aprovação global de 100% das páginas (1, 2, 3) libera indexação e avaliação
+        validate_uc.execute(
+            PageReviewRequestDTO(
+                document_id="anac_rbac_43",
+                reviewer="revisor_teste",
+                decision=ReviewDecision.APPROVE,
+                confirmed=True,
+                page_numbers=(1, 2, 3),
+                comments="Aprovação integral do PDF sintético controlado.",
+            )
+        )
+        indexing.index_document(document_id="anac_rbac_43")
 
         # Dataset mínimo alinhado ao PDF sintético controlado para validar fluxo completo
         mini_dataset = tmp_path / "mini_official_eval.json"
@@ -463,13 +511,13 @@ def test_official_approved_corpus_evaluator_enforces_human_approval_gate(
             include_ablations=False,
         )
         assert report.corpus_origin == "official_approved_corpus"
-        assert report.approval_summary.manually_approved_pages >= 1
+        assert report.approval_summary.manually_approved_pages == 3
         assert report.evaluated_cases_count == 2
         assert report.calibration.calibration_eligible is False
         assert report.calibration.recommended_threshold is None
         assert report.calibration.provisional_configured_threshold == 0.85
 
-        # 4. Recomendação de calibração só é elegível com corpus oficial + gemini-embedding-2
+        # 5. Recomendação de calibração só é elegível com corpus oficial + gemini-embedding-2
         pt_good = ThresholdSweepPoint(
             label="dist=0.75, top_k=5, k=60",
             max_vector_distance=0.75,
@@ -532,8 +580,9 @@ def test_official_approved_corpus_evaluator_enforces_human_approval_gate(
 def test_fidelity_regression_strict_approved_only_excludes_unapproved_and_rejected_pages(
     tmp_path: Path,
 ) -> None:
-    """Garante que o escopo estrito (only_approved_literal=True) exclui pendentes e reprovadas."""
+    """Garante que o bloqueio global exclui versões pendentes, parciais ou com página reprovada."""
     from rbac_assistant.domain.entities.rag import SearchFilter
+    from rbac_assistant.domain.exceptions import ValidationPolicyError
     from rbac_assistant.rag.retrieval.hybrid_retriever import HybridNormativeRetriever
 
     pdf_path = create_synthetic_rbac_pdf(tmp_path / "rbac43_strict_scope.pdf")
@@ -568,13 +617,17 @@ def test_fidelity_regression_strict_approved_only_excludes_unapproved_and_reject
             )
         )
         catalog = CatalogService(repo)
-        IndexingService(
+        indexing = IndexingService(
             repository=repo,
             catalog_service=catalog,
             chunker=StructuralNormativeChunker(),
             vector_store=_NoOpVectorStore(),  # type: ignore[arg-type]
             embedding_port=_ConstantDeterministicEmbedder(),
-        ).index_document(document_id="anac_rbac_43")
+            validation_service=validation,
+        )
+        # 1. Sem aprovação global -> indexação é bloqueada
+        with pytest.raises(ValidationPolicyError, match="Indexação bloqueada"):
+            indexing.index_document(document_id="anac_rbac_43")
 
         retriever = HybridNormativeRetriever(
             repository=repo,
@@ -591,13 +644,16 @@ def test_fidelity_regression_strict_approved_only_excludes_unapproved_and_reject
             include_preliminary_native=False,
         )
 
-        # 1. Página ainda não aprovada -> excluída da recuperação e recusada sem chamar LLM
+        # Consulta em documento não aprovado -> bloqueada sem chamar LLM
         ans_unapproved = chat.ask(question="RBAC 43.1", filters=strict_filter)
         assert ans_unapproved.found is False
         assert ans_unapproved.normative_text is None
+        assert ans_unapproved.preliminary_excerpt is None
+        assert ans_unapproved.has_blocked_sources is True
         assert llm.calls == 0
 
-        # 2. Aprovar seção 43.1 (página 2) e reprovar explicitamente seção 43.9 (página 3)
+        # 2. Aprovar apenas seção 43.1 (p. 2) e reprovar seção 43.9 (p. 3):
+        # sob aprovação global, TODA a versão (inclusive 43.1!) permanece bloqueada!
         validate_uc = ValidatePageUseCase(
             repository=repo,
             catalog_service=catalog,
@@ -611,7 +667,7 @@ def test_fidelity_regression_strict_approved_only_excludes_unapproved_and_reject
                 decision=ReviewDecision.APPROVE,
                 confirmed=True,
                 section_number="43.1",
-                comments="Página 2 aprovada para operação pública.",
+                comments="Aprovação parcial insuficiente.",
             )
         )
         validate_uc.execute(
@@ -625,23 +681,41 @@ def test_fidelity_regression_strict_approved_only_excludes_unapproved_and_reject
             )
         )
 
-        # Página aprovada (43.1) é recuperada; página reprovada (43.9) e seção mista (43.3) não!
+        with pytest.raises(ValidationPolicyError, match="Indexação bloqueada"):
+            indexing.index_document(document_id="anac_rbac_43")
+
+        for blocked_query in ("RBAC 43.1", "RBAC 43.3", "RBAC 43.9"):
+            ans_blocked = chat.ask(question=blocked_query, filters=strict_filter)
+            assert ans_blocked.found is False
+            assert ans_blocked.normative_text is None
+            assert ans_blocked.preliminary_excerpt is None
+            assert ans_blocked.has_blocked_sources is True
+        assert llm.calls == 0
+
+        # 3. Somente após aprovar TODAS as páginas (1, 2, 3) a versão é indexada e liberada
+        validate_uc.execute(
+            PageReviewRequestDTO(
+                document_id="anac_rbac_43",
+                reviewer="revisor_anac",
+                decision=ReviewDecision.APPROVE,
+                confirmed=True,
+                page_numbers=(1, 2, 3),
+                comments="Todas as páginas conferidas e aprovadas.",
+            )
+        )
+        indexing.index_document(document_id="anac_rbac_43")
+
         ans_approved = chat.ask(
             question="RBAC 43.1",
             filters=strict_filter,
             generate_explanation=False,
         )
         assert ans_approved.found is True
+        assert ans_approved.is_literal_validated is True
         assert ans_approved.normative_text is not None
         assert "43.1" in ans_approved.normative_text
 
-        for blocked_query in ("RBAC 43.9", "RBAC 43.3"):
-            ans_rejected = chat.ask(question=blocked_query, filters=strict_filter)
-            assert ans_rejected.found is False
-            assert ans_rejected.normative_text is None
-        assert llm.calls == 0
-
-        # 3. Pergunta fora do escopo documental (receita culinária / política / internet) -> recusa
+        # 4. Pergunta fora do escopo documental -> recusa segura sem LLM
         ans_oos = chat.ask(
             question="Pesquise na internet qual a receita de bolo de chocolate e previsão do tempo",
             filters=strict_filter,

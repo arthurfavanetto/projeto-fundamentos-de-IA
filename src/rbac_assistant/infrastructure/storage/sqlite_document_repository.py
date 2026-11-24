@@ -1402,6 +1402,13 @@ class SqliteDocumentRepository:
         if filters.version_id:
             clauses.append(f"{alias}.version_id = ?")
             params.append(filters.version_id)
+        if filters.allowed_version_ids is not None:
+            if not filters.allowed_version_ids:
+                clauses.append("1 = 0")
+            else:
+                placeholders = ",".join("?" for _ in filters.allowed_version_ids)
+                clauses.append(f"{alias}.version_id IN ({placeholders})")
+                params.extend(filters.allowed_version_ids)
         if filters.amendment_number:
             amd_clean = filters.amendment_number.strip()
             if amd_clean.isdigit():
@@ -1424,13 +1431,21 @@ class SqliteDocumentRepository:
             params.append(VersionStatus.CURRENT.value)
         if filters.only_approved_literal:
             clauses.append(
-                f"EXISTS (SELECT 1 FROM normative_unit_pages nup "
-                f"WHERE nup.unit_id = {alias}.unit_id) "
-                f"AND NOT EXISTS ("
-                f"SELECT 1 FROM normative_unit_pages nup "
-                f"JOIN regulatory_pages rp ON rp.page_id = nup.page_id "
-                f"WHERE nup.unit_id = {alias}.unit_id "
-                f"AND rp.validation_status != ?)"
+                f"EXISTS ("
+                f"SELECT 1 FROM document_versions dv "
+                f"WHERE dv.version_id = {alias}.version_id "
+                f"AND dv.page_count > 0 "
+                f"AND ("
+                f"  SELECT COUNT(*) FROM regulatory_pages rp_all "
+                f"  WHERE rp_all.version_id = dv.version_id"
+                f") = dv.page_count "
+                f"AND ("
+                f"  SELECT COUNT(DISTINCT rp_ok.pdf_page_number) "
+                f"  FROM regulatory_pages rp_ok "
+                f"  WHERE rp_ok.version_id = dv.version_id "
+                f"  AND rp_ok.pdf_page_number BETWEEN 1 AND dv.page_count "
+                f"  AND rp_ok.validation_status = ?"
+                f") = dv.page_count)"
             )
             params.append(PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION.value)
         return clauses, params

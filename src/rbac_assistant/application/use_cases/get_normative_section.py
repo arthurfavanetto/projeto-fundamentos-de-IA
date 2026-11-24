@@ -44,6 +44,31 @@ class GetNormativeSectionUseCase:
             amendment_number=amendment_number,
         )
 
+        # Bloqueio global obrigatório antes de consultar unidades ou expor qualquer texto
+        all_version_pages = self._repository.get_pages(version.version_id)
+        doc_assessment = self._validation_service.evaluate_document_version(
+            version=version,
+            pages=all_version_pages,
+        )
+        if not doc_assessment.literal_transcription_allowed:
+            return SectionLookupResultDTO(
+                found=False,
+                section=None,
+                auxiliary_unreviewed_available=False,
+                blocked_by_document_approval=True,
+                pending_pdf_pages=doc_assessment.pending_pdf_pages,
+                rejected_pdf_pages=doc_assessment.rejected_pdf_pages,
+                missing_pdf_pages=doc_assessment.missing_pdf_pages,
+                message=(
+                    doc_assessment.block_reason
+                    or (
+                        f"A versão '{version.version_id}' de {document.document_type.value} "
+                        f"{document.regulation_number} ainda não possui todas as páginas "
+                        "revisadas e aprovadas para transcrição literal."
+                    )
+                ),
+            )
+
         units = self._repository.get_units_by_section(
             version_id=version.version_id,
             section_number=section_number,
@@ -67,7 +92,8 @@ class GetNormativeSectionUseCase:
         primary = root_units[0] if root_units else units[0]
 
         page_numbers = sorted({p for u in units for p in u.page_numbers})
-        pages = self._repository.get_pages(version.version_id, page_numbers=page_numbers)
+        pages_by_num = {p.pdf_page_number: p for p in all_version_pages}
+        pages = [pages_by_num[p_num] for p_num in page_numbers if p_num in pages_by_num]
         tables = tuple(self._repository.list_tables(version.version_id, page_numbers=page_numbers))
         references = tuple(primary.references)
 
@@ -82,7 +108,20 @@ class GetNormativeSectionUseCase:
             pages=pages,
             structure_status=structure_status,
             policy=policy,
+            document_assessment=doc_assessment,
         )
+        if not assessment.literal_transcription_allowed:
+            return SectionLookupResultDTO(
+                found=False,
+                section=None,
+                auxiliary_unreviewed_available=False,
+                blocked_by_document_approval=True,
+                pending_pdf_pages=assessment.pending_pdf_pages,
+                message=(
+                    assessment.warning_message
+                    or f"Seção '{primary.section_number}' bloqueada pela política de aprovação."
+                ),
+            )
 
         printed_pages = tuple(
             p.printed_page_number or f"PDF {p.pdf_page_number}" for p in pages
@@ -116,6 +155,6 @@ class GetNormativeSectionUseCase:
         return SectionLookupResultDTO(
             found=True,
             section=section,
-            auxiliary_unreviewed_available=assessment.auxiliary_unreviewed_allowed,
-            message=assessment.warning_message or "Transcrição literal aprovada.",
+            auxiliary_unreviewed_available=False,
+            message="Transcrição literal aprovada.",
         )

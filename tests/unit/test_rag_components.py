@@ -343,7 +343,13 @@ class _InMemoryChromaCollection:
     def _matches_where(cls, metadata: dict[str, Any], where: dict[str, Any]) -> bool:
         if "$and" in where:
             return all(cls._matches_where(metadata, sub) for sub in where["$and"])
-        return all(metadata.get(k) == v for k, v in where.items())
+        for k, v in where.items():
+            if isinstance(v, dict) and "$in" in v:
+                if metadata.get(k) not in v["$in"]:
+                    return False
+            elif metadata.get(k) != v:
+                return False
+        return True
 
 
 class _InMemoryChromaClient:
@@ -569,4 +575,65 @@ def test_sqlite_in_memory_repository_and_retriever_per_request_ssot_dedup(
         assert get_doc_calls > calls_before_second
     finally:
         repo.close()
+
+
+@pytest.mark.unit
+def test_chroma_where_in_operator_and_response_formatter_never_leak_preliminary() -> None:
+    from rbac_assistant.infrastructure.vector_db.chroma_vector_store import _format_chroma_where
+    from rbac_assistant.rag.generation.response_formatter import NormativeResponseFormatter
+
+    assert _format_chroma_where({"version_id": ["v1"]}) == {"version_id": "v1"}
+    assert _format_chroma_where({"version_id": ["v1", "v2"]}) == {
+        "version_id": {"$in": ["v1", "v2"]}
+    }
+    assert _format_chroma_where({"version_id": ["v1", "v2"], "version_status": "current"}) == {
+        "$and": [
+            {"version_id": {"$in": ["v1", "v2"]}},
+            {"version_status": "current"},
+        ]
+    }
+
+    prelim = FusedEvidence(
+        chunk_id="c_prelim_fmt",
+        unit_id="u_prelim_fmt",
+        document_id="doc_43",
+        version_id="v_05",
+        authority="ANAC",
+        document_type="RBAC",
+        regulation_number="43",
+        document_title="RBAC 43",
+        amendment_number="05",
+        version_status="current",
+        official_url="https://example.test/43",
+        section_number="43.11",
+        subsection_number="",
+        paragraph_number="",
+        item_number="",
+        title="Pendente",
+        original_text="SEGREDO_PRELIMINAR_NAO_APROVADO",
+        pdf_pages=(5,),
+        printed_pages=("5/10",),
+        page_statuses=(),
+        trust_level=EvidenceTrustLevel.PRELIMINARY_UNREVIEWED,
+        literal_transcription_allowed=False,
+        rrf_score=0.5,
+        matched_sources=(RetrievalSource.EXACT_STRUCTURAL,),
+    )
+    ans = NormativeResponseFormatter().build_answer(
+        query="RBAC 43.11",
+        usable_evidences=(prelim,),
+        blocked_evidences=(prelim,),
+        explanation="Documento ainda não aprovado integralmente.",
+    )
+    assert ans.found is False
+    assert ans.is_literal_validated is False
+    assert ans.is_preliminary_only is False
+    assert ans.preliminary_excerpt is None
+    assert ans.normative_text is None
+    assert ans.evidences == ()
+    assert ans.blocked_evidences == ()
+    assert ans.references == ()
+    assert ans.has_blocked_sources is True
+    assert "SEGREDO_PRELIMINAR_NAO_APROVADO" not in ans.formatted_text
+    assert "LOCALIZAÇÃO PRELIMINAR" not in ans.formatted_text
 

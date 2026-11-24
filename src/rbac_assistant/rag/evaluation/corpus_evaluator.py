@@ -128,7 +128,6 @@ def load_evaluation_cases_from_json(
 
 _HUMAN_APPROVED_STATUSES: frozenset[PageValidationStatus] = frozenset(
     {
-        PageValidationStatus.MANUALLY_APPROVED,
         PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
     }
 )
@@ -267,14 +266,25 @@ def evaluate_approved_corpus(
     sweep_thresholds: Sequence[float] = (0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95),
     include_ablations: bool = True,
 ) -> ApprovedCorpusEvaluationReport:
-    """Executa avaliação controlada exclusivamente sobre páginas aprovadas no SQLite real."""
+    """Executa avaliação controlada exclusivamente sobre versões integralmente aprovadas."""
     approval = inspect_official_corpus_approval(repository=repository, document_id=document_id)
-    if approval.manually_approved_pages == 0:
+    validation_service = ValidationService(ValidationPolicy.STRICT_ALL_PAGES)
+    version = repository.get_version(approval.version_id)
+    if version is None:
+        raise ValueError(f"Versão '{approval.version_id}' não localizada no SQLite.")
+    all_pages = repository.get_pages(approval.version_id)
+    doc_assessment = validation_service.evaluate_document_version(
+        version=version,
+        pages=all_pages,
+    )
+    if not doc_assessment.literal_transcription_allowed:
         raise ValueError(
             f"O documento '{document_id}' (versão {approval.version_id}) possui "
-            f"0/{approval.total_pages} páginas aprovadas manualmente. Revise e aprove páginas "
-            "explicitamente com `scripts/validate_extraction.py` antes de executar a avaliação "
-            "do corpus oficial."
+            f"{approval.manually_approved_pages}/{approval.total_pages} páginas aprovadas "
+            "manualmente para transcrição literal e está bloqueado pela política global "
+            f"de aprovação documental ({doc_assessment.block_reason}). Revise e aprove "
+            "todas as páginas explicitamente com `scripts/validate_extraction.py` antes de "
+            "executar a avaliação do corpus oficial."
         )
     if approval.sqlite_chunk_count == 0:
         raise ValueError(
@@ -285,8 +295,8 @@ def evaluate_approved_corpus(
     dataset_name, dataset_origin, all_cases = load_evaluation_cases_from_json(dataset_path)
     approved_pages = {
         p.pdf_page_number
-        for p in repository.get_pages(approval.version_id)
-        if p.validation_status in _HUMAN_APPROVED_STATUSES
+        for p in all_pages
+        if p.validation_status == PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION
     }
 
     # Seleciona casos negativos (sem alvos) e casos cujas seções/páginas alvo estão aprovadas
@@ -320,8 +330,6 @@ def evaluate_approved_corpus(
             f"aprovadas manualmente em '{approval.version_id}' "
             f"(aprovadas: {sorted(approved_pages)})."
         )
-
-    validation_service = ValidationService(ValidationPolicy.REVIEW_ON_DEMAND)
 
     def _retriever_factory(
         mode: str,

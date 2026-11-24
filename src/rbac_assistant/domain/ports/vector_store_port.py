@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 MetadataValue = str | int | float | bool
+MetadataFilterValue = MetadataValue | Sequence[MetadataValue]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +89,7 @@ class VectorStorePort(Protocol):
         self,
         *,
         collection_name: str,
-        where: Mapping[str, MetadataValue],
+        where: Mapping[str, MetadataFilterValue],
     ) -> None:
         """Remove todos os registros que satisfaçam um filtro de metadados."""
 
@@ -99,7 +100,7 @@ class VectorStorePort(Protocol):
         self,
         *,
         collection_name: str,
-        where: Mapping[str, MetadataValue] | None = None,
+        where: Mapping[str, MetadataFilterValue] | None = None,
     ) -> list[str]:
         """Lista os IDs de registros persistidos na coleção (opcionalmente filtrados)."""
 
@@ -109,7 +110,7 @@ class VectorStorePort(Protocol):
         collection_name: str,
         query_embedding: Sequence[float],
         top_k: int = 5,
-        where: Mapping[str, MetadataValue] | None = None,
+        where: Mapping[str, MetadataFilterValue] | None = None,
     ) -> list[VectorSearchHit]:
         """Executa busca vetorial filtrada por metadados normativos."""
 

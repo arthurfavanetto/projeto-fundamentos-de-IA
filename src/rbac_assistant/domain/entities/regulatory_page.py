@@ -2,11 +2,43 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
 from rbac_assistant.domain.entities.normative_unit import ExtractionMethod
+
+
+def compute_page_content_hash(
+    original_text: str,
+    tables: Sequence[Sequence[Sequence[str]]] = (),
+) -> str:
+    """Calcula fingerprint SHA-256 determinístico combinando `original_text` e tabelas.
+
+    Garantias de integridade:
+    - Utiliza exclusivamente `original_text` (nunca `normalized_text`) e a estrutura
+      exata das tabelas extraídas da página.
+    - Preserva Unicode integral (`ensure_ascii=False`), fronteiras de células, ordem de
+      tabelas, ordem de linhas, ordem de colunas e células vazias via JSON canônico UTF-8.
+    - Independente do `source_hash` binário do PDF.
+    """
+    canonical_tables = [
+        [[str(cell) for cell in row] for row in table_rows]
+        for table_rows in tables
+    ]
+    payload = json.dumps(
+        {
+            "original_text": original_text,
+            "tables": canonical_tables,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class PageValidationStatus(StrEnum):

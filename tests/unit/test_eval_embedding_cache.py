@@ -223,10 +223,12 @@ def test_compare_benchmark_real_path_hits_exactly_46_embed_calls_and_zero_genera
     assert sdk_run1.closed is True
     assert sdk_run1.generate_calls == []
     assert sdk_run1.document_batch_calls == 6
-    assert sdk_run1.document_texts_count == 18
-    assert sdk_run1.query_calls == 40
-    assert len(sdk_run1.unique_query_payloads) == 40
-    assert len(sdk_run1.embed_calls) == 46
+    assert sdk_run1.document_texts_count == 15
+    # 5 consultas (Q27 ambígua sem current, Q33 RBAC 999 inexistente e Q34-Q36 de versões
+    # não aprovadas) são bloqueadas/encerradas ANTES de chamar embed_query (35 elegíveis).
+    assert sdk_run1.query_calls == 35
+    assert len(sdk_run1.unique_query_payloads) == 35
+    assert len(sdk_run1.embed_calls) == 41
 
     # Execução 2 independente não reutiliza cache da execução 1
     eval_cli._run_benchmark_for_backend(
@@ -239,10 +241,10 @@ def test_compare_benchmark_real_path_hits_exactly_46_embed_calls_and_zero_genera
     assert sdk_run2.closed is True
     assert sdk_run2.generate_calls == []
     assert sdk_run2.document_batch_calls == 6
-    assert sdk_run2.query_calls == 40
-    assert len(sdk_run2.embed_calls) == 46
+    assert sdk_run2.query_calls == 35
+    assert len(sdk_run2.embed_calls) == 41
 
-    # Execução sem cache comprova o baseline de 1.286 chamadas (redução real de 96,4%)
+    # Execução sem cache comprova o baseline de 1.126 chamadas (redução real de 96,36%)
     eval_cli._run_benchmark_for_backend(
         backend="gemini-embedding-2",
         threshold=0.85,
@@ -251,11 +253,11 @@ def test_compare_benchmark_real_path_hits_exactly_46_embed_calls_and_zero_genera
     )
     sdk_uncached = created_sdks[2]
     assert sdk_uncached.document_batch_calls == 6
-    assert sdk_uncached.query_calls == 1280
-    assert len(sdk_uncached.embed_calls) == 1286
+    assert sdk_uncached.query_calls == 1120
+    assert len(sdk_uncached.embed_calls) == 1126
     reduction = 1.0 - (len(sdk_run1.embed_calls) / len(sdk_uncached.embed_calls))
-    assert reduction == pytest.approx(1.0 - 46 / 1286, rel=1e-6)
-    assert reduction > 0.964
+    assert reduction == pytest.approx(1.0 - 41 / 1126, rel=1e-6)
+    assert reduction > 0.96
 
     # Nenhum arquivo persistido no diretório de trabalho (tudo isolado em TemporaryDirectory + RAM)
     assert list(tmp_path.iterdir()) == []
@@ -338,8 +340,8 @@ def test_query_embedding_cache_preserves_identical_metrics_before_and_after(
     )
 
     assert base_embedder.doc_calls == cached_delegate.doc_calls == 6
-    assert base_embedder.query_calls == 1280
-    assert cached_delegate.query_calls == 40
-    assert cached_embedder.cache_misses == 40
-    assert cached_embedder.cache_hits == 1240
+    assert base_embedder.query_calls == 1120
+    assert cached_delegate.query_calls == 35
+    assert cached_embedder.cache_misses == 35
+    assert cached_embedder.cache_hits == 1085
     assert asdict(report_cached) == asdict(report_uncached)

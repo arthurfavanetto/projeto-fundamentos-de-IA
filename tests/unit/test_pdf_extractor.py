@@ -121,3 +121,72 @@ def test_optional_ocr_adapter_fails_cleanly_when_tesseract_missing(
     assert adapter.is_available() is False
     with pytest.raises(OcrUnavailableError):
         adapter.extract_page_text(tmp_path / "any.pdf", pdf_page_number=1)
+
+
+@pytest.mark.unit
+def test_page_content_hash_incorporates_original_text_and_table_structure(tmp_path: Path) -> None:
+    from rbac_assistant.domain.entities.regulatory_page import compute_page_content_hash
+
+    base_text = "43.9 Conteúdo, forma e disposição de registros — inspeção."
+    table_a = (
+        (
+            ("Item", "Descrição", "Referência"),
+            ("01", "Inspeção periódica", "Seção 43.9"),
+            ("02", "Retorno ao serviço", "Seção 43.3"),
+        ),
+    )
+
+    h_base = compute_page_content_hash(base_text, table_a)
+    assert len(h_base) == 64
+    assert h_base == compute_page_content_hash(base_text, table_a)
+
+    # 1. Alterar original_text (inclusive acento Unicode) muda o hash
+    h_text_changed = compute_page_content_hash(base_text.replace("inspeção", "inspecao"), table_a)
+    assert h_text_changed != h_base
+
+    # 2. Alterar uma única célula de tabela mantendo original_text idêntico muda o hash!
+    table_cell_changed = (
+        (
+            ("Item", "Descrição", "Referência"),
+            ("01", "Inspeção extraordinária", "Seção 43.9"),
+            ("02", "Retorno ao serviço", "Seção 43.3"),
+        ),
+    )
+    assert compute_page_content_hash(base_text, table_cell_changed) != h_base
+
+    # 3. Alterar ordem das linhas ou colunas muda o hash
+    table_row_swapped = (
+        (
+            ("Item", "Descrição", "Referência"),
+            ("02", "Retorno ao serviço", "Seção 43.3"),
+            ("01", "Inspeção periódica", "Seção 43.9"),
+        ),
+    )
+    assert compute_page_content_hash(base_text, table_row_swapped) != h_base
+
+    table_col_swapped = (
+        (
+            ("Descrição", "Item", "Referência"),
+            ("Inspeção periódica", "01", "Seção 43.9"),
+            ("Retorno ao serviço", "02", "Seção 43.3"),
+        ),
+    )
+    assert compute_page_content_hash(base_text, table_col_swapped) != h_base
+
+    # 4. Preserva fronteiras de célula ("ab"|"c" != "a"|"bc") e células vazias
+    h_boundary_1 = compute_page_content_hash(base_text, ((("ab", "c"),),))
+    h_boundary_2 = compute_page_content_hash(base_text, ((("a", "bc"),),))
+    h_empty_cell = compute_page_content_hash(base_text, ((("",),),))
+    h_no_tables = compute_page_content_hash(base_text, ())
+    assert len({h_boundary_1, h_boundary_2, h_empty_cell, h_no_tables}) == 4
+
+    # 5. PdfPlumberExtractorAdapter inclui as tabelas extraídas no content_hash da página 3
+    pdf_path = create_synthetic_rbac_pdf(tmp_path / "rbac43_table_hash.pdf")
+    pages = PdfPlumberExtractorAdapter().extract_pages(pdf_path, min_native_chars=40)
+    p3 = pages[2]
+    assert len(p3.tables) == 1
+    assert p3.content_hash == compute_page_content_hash(
+        p3.original_text,
+        tuple(t.rows for t in p3.tables),
+    )
+    assert p3.content_hash != compute_page_content_hash(p3.original_text, ())

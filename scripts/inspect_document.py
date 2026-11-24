@@ -78,7 +78,19 @@ def main(argv: list[str] | None = None) -> int:
             policy=active_policy,
         )
         if not lookup.found or lookup.section is None:
-            print(json.dumps({"found": False, "message": lookup.message}, ensure_ascii=False))
+            print(
+                json.dumps(
+                    {
+                        "found": False,
+                        "blocked_by_document_approval": lookup.blocked_by_document_approval,
+                        "pending_pdf_pages": list(lookup.pending_pdf_pages),
+                        "rejected_pdf_pages": list(lookup.rejected_pdf_pages),
+                        "missing_pdf_pages": list(lookup.missing_pdf_pages),
+                        "message": lookup.message,
+                    },
+                    ensure_ascii=False,
+                )
+            )
             return 1
         sec = lookup.section
         print(

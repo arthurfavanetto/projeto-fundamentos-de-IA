@@ -28,6 +28,7 @@ def test_load_settings_from_repository_yaml(
     assert settings.extraction.ocr_unreviewed_policy == "block_until_reviewed"
     assert settings.extraction.require_integrity_check_for_native_pages is True
     assert settings.retrieval.max_vector_distance == 0.85
+    assert settings.retrieval.allow_preliminary_native_search is False
     assert settings.retrieval.telegram_only_approved_literal is True
     assert settings.telegram.allow_group_chats is False
     assert settings.telegram.max_global_concurrent_updates == 8

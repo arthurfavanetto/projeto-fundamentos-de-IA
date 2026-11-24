@@ -52,18 +52,14 @@ def render_structured_answer_text(
     references: Sequence[str],
     observations: Sequence[str],
 ) -> str:
-    """Monta representação textual com os 4 blocos conceituais claramente separados."""
+    """Monta representação textual com blocos separados, sem nunca expor conteúdo preliminar."""
+    del preliminary_excerpt  # Excertos preliminares não revisados nunca são exibidos
     sections: list[str] = []
 
     if normative_text is not None:
         sections.append(
             "=== TEXTO NORMATIVO (LITERAL VALIDADO — SQLite SSOT) ===\n"
             f"{normative_text}"
-        )
-    elif preliminary_excerpt is not None:
-        sections.append(
-            "=== LOCALIZAÇÃO PRELIMINAR (EXTRAÇÃO NÃO VALIDADA — NÃO É TRANSCRIÇÃO LITERAL) ===\n"
-            f"{preliminary_excerpt}"
         )
     else:
         sections.append(
@@ -99,27 +95,23 @@ class NormativeResponseFormatter:
         extra_observations: Sequence[str] = (),
         generation_model: str | None = None,
         used_fallback_without_llm: bool = False,
+        has_blocked_sources: bool = False,
         evidences_sent_to_llm: Sequence[str] = (),
         used_evidence_ids: Sequence[str] = (),
         discarded_citations: Sequence[str] = (),
         diagnostics: RetrievalDiagnostics | None = None,
     ) -> StructuredNormativeAnswer:
-        """Monta resposta final garantindo que `normative_text` só venha do SSOT aprovado."""
+        """Monta resposta final garantindo que somente evidências aprovadas sejam exibidas."""
         validated = [
             ev
             for ev in usable_evidences
             if ev.trust_level == EvidenceTrustLevel.VALIDATED_LITERAL
             and ev.literal_transcription_allowed
         ]
-        preliminary = [
-            ev
-            for ev in usable_evidences
-            if ev.trust_level == EvidenceTrustLevel.PRELIMINARY_UNREVIEWED
-        ]
+        suppressed_unapproved = len(usable_evidences) > len(validated)
 
         is_literal_validated = bool(validated)
-        is_preliminary_only = (not validated) and bool(preliminary)
-        found = bool(validated or preliminary)
+        found = bool(validated)
 
         normative_text: str | None = None
         if validated:
@@ -130,51 +122,10 @@ class NormativeResponseFormatter:
             ]
             normative_text = "\n\n---\n\n".join(normative_blocks)
 
-        preliminary_excerpt: str | None = None
-        if is_preliminary_only:
-            prelim_blocks = [
-                f"[LOCALIZAÇÃO PRELIMINAR — {ev.document_type} {ev.regulation_number} "
-                f"Emenda {ev.amendment_number} — Seção {ev.section_number} — NÃO VALIDADO]\n"
-                f"{ev.original_text}"
-                for ev in preliminary
-            ]
-            preliminary_excerpt = "\n\n---\n\n".join(prelim_blocks)
-
-        all_cited = [*validated, *preliminary, *blocked_evidences]
-        references = tuple(format_evidence_reference(ev) for ev in all_cited)
+        references = tuple(format_evidence_reference(ev) for ev in validated)
 
         observations: list[str] = list(extra_observations)
-        if is_preliminary_only:
-            pending_details = ", ".join(
-                f"{ev.document_type} {ev.regulation_number} seção {ev.section_number} "
-                f"(PDF {list(ev.pending_pdf_pages)})"
-                for ev in preliminary
-            )
-            observations.append(
-                "AVISO DE REVISÃO (review_on_demand): O dispositivo foi localizado em "
-                f"página(s) com verificação automática apenas ({pending_details}), ainda SEM "
-                "revisão humana. Este conteúdo NÃO constitui transcrição literal validada nem "
-                "interpretação oficial confirmada; valide as páginas antes de uso formal."
-            )
-
-        for ev in blocked_evidences:
-            if ev.trust_level == EvidenceTrustLevel.BLOCKED_OCR_PENDING:
-                observations.append(
-                    f"BLOQUEIO OCR: {ev.document_type} {ev.regulation_number} seção "
-                    f"{ev.section_number} depende de página(s) OCR pendentes de revisão manual "
-                    f"(PDF {list(ev.ocr_blocked_pdf_pages)}) e NÃO foi utilizada para fundamentar "
-                    "a resposta."
-                )
-            elif ev.trust_level == EvidenceTrustLevel.BLOCKED_REJECTED:
-                observations.append(
-                    f"BLOQUEIO REPROVAÇÃO: {ev.document_type} {ev.regulation_number} seção "
-                    f"{ev.section_number} abrange página(s) reprovada(s) "
-                    f"(PDF {list(ev.rejected_pdf_pages)}) e foi descartada."
-                )
-            elif ev.warning_message:
-                observations.append(ev.warning_message)
-
-        non_current = [ev for ev in (*validated, *preliminary) if ev.version_status != "current"]
+        non_current = [ev for ev in validated if ev.version_status != "current"]
         if non_current:
             versions_desc = ", ".join(
                 f"{ev.document_type} {ev.regulation_number} Emenda {ev.amendment_number} "
@@ -189,7 +140,7 @@ class NormativeResponseFormatter:
         deduped_observations = tuple(dict.fromkeys(observations))
         formatted_text = render_structured_answer_text(
             normative_text=normative_text,
-            preliminary_excerpt=preliminary_excerpt,
+            preliminary_excerpt=None,
             explanation=explanation,
             references=references,
             observations=deduped_observations,
@@ -199,15 +150,17 @@ class NormativeResponseFormatter:
             query=query,
             found=found,
             normative_text=normative_text,
-            preliminary_excerpt=preliminary_excerpt,
+            preliminary_excerpt=None,
             explanation=explanation,
             references=references,
             observations=deduped_observations,
-            evidences=tuple(usable_evidences),
-            blocked_evidences=tuple(blocked_evidences),
+            evidences=tuple(validated),
+            blocked_evidences=(),
             is_literal_validated=is_literal_validated,
-            is_preliminary_only=is_preliminary_only,
-            has_blocked_sources=bool(blocked_evidences),
+            is_preliminary_only=False,
+            has_blocked_sources=(
+                bool(has_blocked_sources) or bool(blocked_evidences) or suppressed_unapproved
+            ),
             generation_model=generation_model,
             used_fallback_without_llm=used_fallback_without_llm,
             formatted_text=formatted_text,

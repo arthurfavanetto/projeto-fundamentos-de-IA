@@ -124,16 +124,14 @@ def test_end_to_end_ingestion_idempotency_review_reopen_and_invalidation(tmp_pat
     assert res2.skipped_idempotent is True
     assert len(repo.list_versions("anac_rbac_43")) == 1
 
-    # 3. Antes da revisão humana, seção multi-página 43.3 (p.2-3) está localizada porém pendente
+    # 3. Antes da revisão humana global, seção 43.3 permanece bloqueada sem expor texto
     before_review = get_sec_uc.execute(document_id="anac_rbac_43", section_number="43.3")
-    assert before_review.found is True
-    assert before_review.section is not None
-    assert before_review.section.pdf_pages == (2, 3)
-    assert before_review.section.printed_pages == ("10/25", "11/25")
-    assert before_review.section.literal_transcription_allowed is False
-    assert before_review.section.pending_pdf_pages == (2, 3)
+    assert before_review.found is False
+    assert before_review.section is None
+    assert before_review.blocked_by_document_approval is True
+    assert before_review.pending_pdf_pages == (1, 2, 3, 4)
 
-    # 4. Aprova somente página 2 -> seção 43.3 continua bloqueada pois página 3 ainda pendente
+    # 4. Aprova somente página 2 -> continua bloqueado globalmente
     validate_uc.execute(
         PageReviewRequestDTO(
             document_id="anac_rbac_43",
@@ -145,11 +143,12 @@ def test_end_to_end_ingestion_idempotency_review_reopen_and_invalidation(tmp_pat
         )
     )
     partial_review = get_sec_uc.execute(document_id="anac_rbac_43", section_number="43.3")
-    assert partial_review.section is not None
-    assert partial_review.section.literal_transcription_allowed is False
-    assert partial_review.section.pending_pdf_pages == (3,)
+    assert partial_review.found is False
+    assert partial_review.section is None
+    assert partial_review.blocked_by_document_approval is True
+    assert partial_review.pending_pdf_pages == (1, 3, 4)
 
-    # 5. Aprova seção 43.3 completa (cobre páginas 2 e 3) -> liberada para transcrição literal!
+    # 5. Aprovar apenas a seção 43.3 (p. 2 e 3) AINDA mantém a versão bloqueada (p. 1 e p. 4 OCR)!
     rev_result = validate_uc.execute(
         PageReviewRequestDTO(
             document_id="anac_rbac_43",
@@ -163,10 +162,11 @@ def test_end_to_end_ingestion_idempotency_review_reopen_and_invalidation(tmp_pat
     assert len(rev_result.exported_review_paths) == 2
     assert all(Path(p).is_file() for p in rev_result.exported_review_paths)
 
-    after_review = get_sec_uc.execute(document_id="anac_rbac_43", section_number="43.3")
-    assert after_review.section is not None
-    assert after_review.section.literal_transcription_allowed is True
-    assert after_review.section.pending_pdf_pages == ()
+    still_blocked = get_sec_uc.execute(document_id="anac_rbac_43", section_number="43.3")
+    assert still_blocked.found is False
+    assert still_blocked.section is None
+    assert still_blocked.blocked_by_document_approval is True
+    assert still_blocked.pending_pdf_pages == (1, 4)
 
     # 6. Verifica modo WAL, integridade referencial, backup online e persistência pós-reabertura
     with sqlite3.connect(repo.db_path) as conn:
@@ -187,11 +187,12 @@ def test_end_to_end_ingestion_idempotency_review_reopen_and_invalidation(tmp_pat
     # 7. Alteração no texto de uma página na mesma versão invalida a aprovação anterior!
     original_pages = repo.get_pages(res1.version.version_id)
     altered_p2 = original_pages[1]
-    from rbac_assistant.domain.entities.regulatory_page import RegulatoryPage
+    from rbac_assistant.domain.entities.regulatory_page import (
+        RegulatoryPage,
+        compute_page_content_hash,
+    )
 
     new_text = altered_p2.original_text + "\n(Alteração simulada no texto da página 2)"
-    import hashlib
-
     modified_pages = list(original_pages)
     modified_pages[1] = RegulatoryPage(
         page_id=altered_p2.page_id,
@@ -202,7 +203,7 @@ def test_end_to_end_ingestion_idempotency_review_reopen_and_invalidation(tmp_pat
         normalized_text=new_text,
         extraction_method=altered_p2.extraction_method,
         validation_status=PageValidationStatus.NATIVE_QUALITY_CHECKED,
-        content_hash=hashlib.sha256(new_text.encode("utf-8")).hexdigest(),
+        content_hash=compute_page_content_hash(new_text),
     )
     invalidations = repo.save_version_ingestion(
         document=res1.document,
@@ -228,6 +229,154 @@ def test_end_to_end_ingestion_idempotency_review_reopen_and_invalidation(tmp_pat
     p2_after_inv = repo.get_page(altered_p2.page_id)
     assert p2_after_inv is not None
     assert p2_after_inv.validation_status == PageValidationStatus.NATIVE_QUALITY_CHECKED
+
+
+@pytest.mark.integration
+def test_reprocessing_table_only_change_invalidates_human_approval_and_unchanged_preserves_it(
+    tmp_path: Path,
+) -> None:
+    """Alterar apenas uma célula de tabela (mantendo original_text idêntico) invalida aprovação."""
+    from dataclasses import replace
+
+    from rbac_assistant.domain.ports.pdf_extractor_port import (
+        ExtractedPageData,
+        ExtractedTableData,
+    )
+
+    base_dir = tmp_path / "documents_table_inv"
+    repo = SqliteDocumentRepository(base_dir / "catalog.sqlite3")
+    repo.initialize()
+    store = LocalFileDocumentStore(documents_dir=base_dir)
+    store.ensure_directories()
+    catalog = CatalogService(repo)
+    validation = ValidationService(policy=ValidationPolicy.REVIEW_ON_DEMAND)
+
+    pdf_path = create_synthetic_rbac_pdf(tmp_path / "rbac43_table_inv.pdf")
+    base_extracted = PdfPlumberExtractorAdapter().extract_pages(pdf_path, min_native_chars=40)
+    assert len(base_extracted) == 3
+    assert len(base_extracted[2].tables) == 1
+
+    class _ControllablePdfExtractor:
+        def __init__(self, pages: list[ExtractedPageData]) -> None:
+            self.pages = pages
+
+        def extract_pages(
+            self,
+            pdf_path: Path,
+            *,
+            min_native_chars: int = 50,
+            max_pages: int = 1000,
+        ) -> list[ExtractedPageData]:
+            del pdf_path, min_native_chars, max_pages
+            return list(self.pages)
+
+    extractor = _ControllablePdfExtractor(base_extracted)
+    ingestion_svc = IngestionService(
+        repository=repo,
+        file_store=store,
+        pdf_extractor=extractor,
+        quality_checker=TextQualityChecker(),
+        validation_service=validation,
+        structure_strategies=(AnacRbacStructureStrategy(), GenericStructureStrategy()),
+        local_source=LocalFileSourceAdapter(),
+    )
+    validate_uc = ValidatePageUseCase(
+        repository=repo,
+        catalog_service=catalog,
+        validation_service=validation,
+        file_store=store,
+    )
+    get_sec_uc = GetNormativeSectionUseCase(
+        repository=repo,
+        catalog_service=catalog,
+        validation_service=validation,
+    )
+    doc_dto = RegisterDocumentDTO(
+        document_id="anac_rbac_43_tbl",
+        authority="ANAC",
+        document_type=DocumentType.RBAC,
+        regulation_number="43",
+        document_title="RBAC 43 Sintético (Teste de Hash de Tabela)",
+        amendment_number="05",
+        version_status=VersionStatus.CURRENT,
+    )
+
+    # 1. Ingestão inicial e aprovação global de todas as 3 páginas
+    first = ingestion_svc.ingest(IngestionRequestDTO(document=doc_dto, source_uri=str(pdf_path)))
+    validate_uc.execute(
+        PageReviewRequestDTO(
+            document_id="anac_rbac_43_tbl",
+            version_id=first.version.version_id,
+            reviewer="revisor_tabelas",
+            decision=ReviewDecision.APPROVE,
+            confirmed=True,
+            page_numbers=(1, 2, 3),
+            comments="Todas as páginas e tabelas conferidas.",
+        )
+    )
+    ok_before = get_sec_uc.execute(document_id="anac_rbac_43_tbl", section_number="43.9")
+    assert ok_before.found is True and ok_before.section is not None
+    assert ok_before.section.literal_transcription_allowed is True
+
+    # 2. Reprocessamento sem alteração de texto nem tabela -> preserva 100% das aprovações!
+    unchanged = ingestion_svc.ingest(
+        IngestionRequestDTO(
+            document=doc_dto,
+            source_uri=str(pdf_path),
+            force_reprocess=True,
+        )
+    )
+    assert unchanged.invalidated_reviews == ()
+    assert all(
+        p.validation_status == PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION
+        for p in repo.get_pages(first.version.version_id)
+    )
+
+    # 3. Altera APENAS 1 célula da tabela da página 3, mantendo original_text 100% idêntico!
+    p3_orig = base_extracted[2]
+    orig_rows = p3_orig.tables[0].rows
+    edited_rows = (
+        orig_rows[0],
+        ("01", "Inspeção extraordinária (editada)", orig_rows[1][2]),
+        *orig_rows[2:],
+    )
+    altered_p3 = replace(
+        p3_orig,
+        tables=(ExtractedTableData(pdf_page_number=3, rows=edited_rows),),
+    )
+    extractor.pages = [base_extracted[0], base_extracted[1], altered_p3]
+
+    reprocessed = ingestion_svc.ingest(
+        IngestionRequestDTO(
+            document=doc_dto,
+            source_uri=str(pdf_path),
+            force_reprocess=True,
+        )
+    )
+    assert len(reprocessed.invalidated_reviews) == 1
+    assert reprocessed.invalidated_reviews[0].decision == ReviewDecision.INVALIDATED_BY_REPROCESSING
+    assert reprocessed.invalidated_reviews[0].page_id.endswith("::p0003")
+
+    pages_after = {p.pdf_page_number: p for p in repo.get_pages(first.version.version_id)}
+    assert pages_after[1].validation_status == (
+        PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION
+    )
+    assert pages_after[2].validation_status == (
+        PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION
+    )
+    assert pages_after[3].validation_status != (
+        PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION
+    )
+
+    # Como a p. 3 perdeu aprovação, TODA a versão (inclusive 43.1 na p. 2) volta ao bloqueio!
+    blocked_after_table_edit = get_sec_uc.execute(
+        document_id="anac_rbac_43_tbl",
+        section_number="43.1",
+    )
+    assert blocked_after_table_edit.found is False
+    assert blocked_after_table_edit.section is None
+    assert blocked_after_table_edit.blocked_by_document_approval is True
+    assert blocked_after_table_edit.pending_pdf_pages == (3,)
 
 
 @pytest.mark.integration
@@ -327,16 +476,39 @@ def test_multidocument_extensibility_second_fictional_regulation_and_versions(
     assert res_999.units_created > 0
     assert res_700.units_created == 2
 
-    # Aprova seção 999.3 somente no documento fictício — não afeta RBAC 43!
+    # Aprova TODAS as páginas do documento fictício 999 e da Resolução 700 — não afeta RBAC 43!
     validate_uc.execute(
         PageReviewRequestDTO(
             document_id="test_fictional_rbac_999",
             reviewer="Engenheiro QA",
             decision=ReviewDecision.APPROVE,
             confirmed=True,
-            section_number="999.3",
+            page_numbers=(1, 2, 3),
         )
     )
+    validate_uc.execute(
+        PageReviewRequestDTO(
+            document_id="test_fictional_res_700",
+            reviewer="Engenheiro QA",
+            decision=ReviewDecision.APPROVE,
+            confirmed=True,
+            page_numbers=(1,),
+        )
+    )
+    # Aprova integralmente apenas a Emenda 04 do RBAC 43 (Emenda 05 permanece pendente!)
+    validate_uc.execute(
+        PageReviewRequestDTO(
+            document_id="anac_rbac_43",
+            version_id=repo.list_versions("anac_rbac_43")[0].version_id
+            if repo.list_versions("anac_rbac_43")[0].amendment_number == "04"
+            else repo.list_versions("anac_rbac_43")[1].version_id,
+            reviewer="Engenheiro QA",
+            decision=ReviewDecision.APPROVE,
+            confirmed=True,
+            page_numbers=(1, 2, 3),
+        )
+    )
+
     sec_999 = get_sec_uc.execute(document_id="test_fictional_rbac_999", section_number="999.3")
     sec_43_current = get_sec_uc.execute(document_id="anac_rbac_43", section_number="43.3")
     sec_43_hist = get_sec_uc.execute(
@@ -344,12 +516,13 @@ def test_multidocument_extensibility_second_fictional_regulation_and_versions(
     )
     sec_res = get_sec_uc.execute(document_id="test_fictional_res_700", section_number="Art. 1º")
 
+    assert sec_999.found is True
     assert sec_999.section is not None and sec_999.section.literal_transcription_allowed is True
-    assert sec_43_current.section is not None
-    assert sec_43_current.section.amendment_number == "05"
-    assert sec_43_current.section.literal_transcription_allowed is False
-    assert sec_43_hist.section is not None
+    assert sec_43_current.found is False
+    assert sec_43_current.section is None
+    assert sec_43_current.blocked_by_document_approval is True
+    assert sec_43_hist.found is True and sec_43_hist.section is not None
     assert sec_43_hist.section.amendment_number == "04"
     assert "Emenda 04" in sec_43_hist.section.original_text
-    assert sec_res.section is not None
+    assert sec_res.found is True and sec_res.section is not None
     assert "Art. 1º" in sec_res.section.original_text

@@ -332,10 +332,8 @@ def main(argv: list[str] | None = None) -> int:
         regulation_number=args.regulation,
         amendment_number=args.amendment,
         only_current_version=not args.include_historical and not args.amendment,
-        only_approved_literal=args.only_approved,
-        include_preliminary_native=(
-            settings.retrieval.allow_preliminary_native_search and not args.only_approved
-        ),
+        only_approved_literal=True,
+        include_preliminary_native=False,
     )
 
     try:

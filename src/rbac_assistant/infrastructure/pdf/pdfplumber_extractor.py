@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 from pathlib import Path
 from typing import Any
 
 import pdfplumber
 
+from rbac_assistant.domain.entities.regulatory_page import compute_page_content_hash
 from rbac_assistant.domain.exceptions import InvalidPdfError
 from rbac_assistant.domain.ports.pdf_extractor_port import (
     ExtractedPageData,
@@ -130,8 +130,11 @@ class PdfPlumberExtractorAdapter:
                     normalized_text = normalize_auxiliary_text(original_text)
                     lines = original_text.splitlines()
                     printed_page = detect_printed_page_number(lines)
-                    content_hash = hashlib.sha256(original_text.encode("utf-8")).hexdigest()
                     tables = _extract_tables(page, idx)
+                    content_hash = compute_page_content_hash(
+                        original_text,
+                        tuple(table.rows for table in tables),
+                    )
                     image_count = len(getattr(page, "images", []) or [])
                     coords = _extract_coordinates_summary(page)
                     needs_ocr = len(normalized_text) < min_native_chars

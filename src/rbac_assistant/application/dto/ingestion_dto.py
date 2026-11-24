@@ -106,3 +106,7 @@ class SectionLookupResultDTO:
     section: NormativeSection | None = None
     auxiliary_unreviewed_available: bool = False
     message: str = ""
+    blocked_by_document_approval: bool = False
+    pending_pdf_pages: tuple[int, ...] = ()
+    rejected_pdf_pages: tuple[int, ...] = ()
+    missing_pdf_pages: tuple[int, ...] = ()

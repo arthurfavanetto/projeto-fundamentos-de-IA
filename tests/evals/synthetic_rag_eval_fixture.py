@@ -476,6 +476,10 @@ def build_synthetic_eval_environment(
         official_url="https://example.test/eval/rbac-43",
     )
 
+    p43_1 = (
+        "REGULAMENTO BRASILEIRO DA AVIAÇÃO CIVIL — RBAC nº 43 — Emenda 05\n"
+        "Capa e Sumário Administrativo (Fixture Sintética)."
+    )
     p43_2 = (
         "43.1 Aplicabilidade\n"
         "(a) Este regulamento estabelece regras que regem a manutenção, manutenção preventiva, "
@@ -504,21 +508,9 @@ def build_synthetic_eval_environment(
         "(a)(1)(i) Data de conclusão do serviço, nome completo, assinatura e número da licença "
         "ANAC do responsável técnico."
     )
-    p43_5 = (
-        "43.11 Conteúdo, formato e disposição dos registros de inspeções de 100 horas e anuais\n"
-        "(a) A pessoa que aprova ou reprova uma aeronave em inspeção de 100 horas ou inspeção "
-        "anual deve emitir lista formal de discrepâncias de aeronavegabilidade."
-    )
-    p43_6 = (
-        "43.13 Regras de execução de manutenção (página OCR pendente)\n"
-        "(a) Cada pessoa executando manutenção deve utilizar métodos, técnicas e práticas "
-        "aceitáveis previstos no manual do fabricante e ferramentas calibradas."
-    )
-    p43_7 = (
-        "43.15 Regras adicionais de execução para inspeções em helicópteros\n"
-        "(a) Inspeções periódicas de rotores principais e rotores de cauda exigem verificação "
-        "dimensional específica (página reprovada na revisão humana)."
-    )
+    p43_5 = "Página administrativa reservada 5/10 (RBAC 43 Sintético Emenda 05)."
+    p43_6 = "Página administrativa reservada 6/10 (RBAC 43 Sintético Emenda 05)."
+    p43_7 = "Página administrativa reservada 7/10 (RBAC 43 Sintético Emenda 05)."
     p43_8 = (
         "Apêndice A Grandes alterações, grandes reparos e manutenção preventiva\n"
         "(a) Classifica-se como grande reparo qualquer reparo estrutural na célula ou fuselagem "
@@ -533,11 +525,18 @@ def build_synthetic_eval_environment(
         amendment_number="05",
         version_status=VersionStatus.CURRENT,
         source_hash=_sha("eval_rbac_43_v05"),
-        page_count=7,
+        page_count=8,
         pdf_filename="eval_rbac_43_emd05.pdf",
         official_url="https://example.test/eval/rbac-43-emd05",
     )
     pages_43_05 = [
+        _make_page(
+            version_id=v43_05.version_id,
+            pdf_page_number=1,
+            printed_page="1/10",
+            text=p43_1,
+            status=PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
+        ),
         _make_page(
             version_id=v43_05.version_id,
             pdf_page_number=2,
@@ -564,22 +563,21 @@ def build_synthetic_eval_environment(
             pdf_page_number=5,
             printed_page="5/10",
             text=p43_5,
-            status=PageValidationStatus.NATIVE_QUALITY_CHECKED,
+            status=PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
         ),
         _make_page(
             version_id=v43_05.version_id,
             pdf_page_number=6,
             printed_page="6/10",
             text=p43_6,
-            status=PageValidationStatus.PENDING_MANUAL_REVIEW,
-            method=ExtractionMethod.OCR_FALLBACK,
+            status=PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
         ),
         _make_page(
             version_id=v43_05.version_id,
             pdf_page_number=7,
             printed_page="7/10",
             text=p43_7,
-            status=PageValidationStatus.REJECTED,
+            status=PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
         ),
         _make_page(
             version_id=v43_05.version_id,
@@ -696,30 +694,6 @@ def build_synthetic_eval_environment(
         ),
         _make_unit(
             version_id=v43_05.version_id,
-            section_number="43.11",
-            title="Registros de inspeções de 100 horas e anuais",
-            text=p43_5,
-            page_numbers=(5,),
-            order_index=5,
-        ),
-        _make_unit(
-            version_id=v43_05.version_id,
-            section_number="43.13",
-            title="Regras de execução de manutenção",
-            text=p43_6,
-            page_numbers=(6,),
-            order_index=6,
-        ),
-        _make_unit(
-            version_id=v43_05.version_id,
-            section_number="43.15",
-            title="Regras adicionais para helicópteros",
-            text=p43_7,
-            page_numbers=(7,),
-            order_index=7,
-        ),
-        _make_unit(
-            version_id=v43_05.version_id,
             section_number="Apêndice A",
             title="Grandes alterações, grandes reparos e manutenção preventiva",
             text=p43_8,
@@ -730,7 +704,7 @@ def build_synthetic_eval_environment(
     ]
     _save_bundle(doc=doc_43, ver=v43_05, pages=pages_43_05, units=units_43_05)
 
-    # RBAC 43 Emenda 04 (histórica)
+    # RBAC 43 Emenda 04 (histórica, 100% aprovada)
     p43_04_txt = (
         "43.3 Pessoas autorizadas a executar manutenção (Emenda 04 histórica)\n"
         "(a) Sob a redação histórica anterior da Emenda 04, o registro em formulário físico "
@@ -742,7 +716,7 @@ def build_synthetic_eval_environment(
         amendment_number="04",
         version_status=VersionStatus.HISTORICAL,
         source_hash=_sha("eval_rbac_43_v04"),
-        page_count=1,
+        page_count=2,
         pdf_filename="eval_rbac_43_emd04.pdf",
         official_url="https://example.test/eval/rbac-43-emd04",
     )
@@ -752,11 +726,18 @@ def build_synthetic_eval_environment(
         pages=[
             _make_page(
                 version_id=v43_04.version_id,
+                pdf_page_number=1,
+                printed_page="1/8",
+                text="Capa RBAC 43 Sintético Emenda 04.",
+                status=PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
+            ),
+            _make_page(
+                version_id=v43_04.version_id,
                 pdf_page_number=2,
                 printed_page="2/8",
                 text=p43_04_txt,
                 status=PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
-            )
+            ),
         ],
         units=[
             _make_unit(
@@ -771,7 +752,7 @@ def build_synthetic_eval_environment(
     )
 
     # ------------------------------------------------------------------
-    # Documento 2: RBAC 145 Sintético (Emenda 06 vigente — numeração sobreposta!)
+    # Documento 2: RBAC 145 Sintético (Emenda 06 vigente — 100% aprovado)
     # ------------------------------------------------------------------
     doc_145 = RegulatoryDocument(
         document_id="eval_rbac_145",
@@ -790,7 +771,7 @@ def build_synthetic_eval_environment(
         amendment_number="06",
         version_status=VersionStatus.CURRENT,
         source_hash=_sha("eval_rbac_145_v06"),
-        page_count=4,
+        page_count=5,
         pdf_filename="eval_rbac_145_emd06.pdf",
         official_url="https://example.test/eval/rbac-145-emd06",
     )
@@ -823,6 +804,13 @@ def build_synthetic_eval_environment(
         doc=doc_145,
         ver=v145_06,
         pages=[
+            _make_page(
+                version_id=v145_06.version_id,
+                pdf_page_number=1,
+                printed_page="1/12",
+                text="Capa RBAC 145 Sintético Emenda 06.",
+                status=PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
+            ),
             _make_page(
                 version_id=v145_06.version_id,
                 pdf_page_number=2,
@@ -1012,6 +1000,106 @@ def build_synthetic_eval_environment(
         ],
     )
 
+    # ------------------------------------------------------------------
+    # Documentos 5, 6 e 7: Versões sintéticas NÃO aprovadas globalmente
+    # (governança: nativa pendente, OCR pendente e página reprovada —
+    # página 1 aprovada + página 2 bloqueada para provar que aprovação parcial nunca libera!)
+    # ------------------------------------------------------------------
+    gov_specs = (
+        (
+            "eval_rbac_44",
+            "44",
+            "44.11",
+            "Registros de inspeções de 100 horas e anuais",
+            (
+                "44.11 Conteúdo, formato e disposição dos registros de inspeções de 100 horas\n"
+                "(a) A pessoa que aprova ou reprova uma aeronave em inspeção de 100 horas ou "
+                "inspeção anual deve emitir lista formal de discrepâncias de aeronavegabilidade."
+            ),
+            PageValidationStatus.NATIVE_QUALITY_CHECKED,
+            ExtractionMethod.NATIVE_PDF,
+        ),
+        (
+            "eval_rbac_45",
+            "45",
+            "45.13",
+            "Regras de execução de manutenção",
+            (
+                "45.13 Regras de execução de manutenção (página OCR pendente)\n"
+                "(a) Cada pessoa executando manutenção deve utilizar métodos, técnicas e práticas "
+                "aceitáveis previstos no manual do fabricante e ferramentas calibradas."
+            ),
+            PageValidationStatus.PENDING_MANUAL_REVIEW,
+            ExtractionMethod.OCR_FALLBACK,
+        ),
+        (
+            "eval_rbac_46",
+            "46",
+            "46.15",
+            "Regras adicionais para helicópteros",
+            (
+                "46.15 Regras adicionais de execução para inspeções em helicópteros\n"
+                "(a) Inspeções periódicas de rotores principais e rotores de cauda exigem "
+                "verificação dimensional específica (página reprovada na revisão humana)."
+            ),
+            PageValidationStatus.REJECTED,
+            ExtractionMethod.NATIVE_PDF,
+        ),
+    )
+    for gov_doc_id, gov_reg, gov_sec, gov_title, gov_text, gov_status, gov_method in gov_specs:
+        gov_doc = RegulatoryDocument(
+            document_id=gov_doc_id,
+            authority="ANAC",
+            document_type=DocumentType.RBAC,
+            regulation_number=gov_reg,
+            document_title=f"RBAC {gov_reg} Sintético de Governança (Não Aprovado)",
+            document_status=DocumentStatus.ACTIVE,
+            version_status=VersionStatus.CURRENT,
+            amendment_number="01",
+            official_url=f"https://example.test/eval/rbac-{gov_reg}",
+        )
+        gov_ver = DocumentVersion(
+            version_id=f"{gov_doc_id}_v01",
+            document_id=gov_doc_id,
+            amendment_number="01",
+            version_status=VersionStatus.CURRENT,
+            source_hash=_sha(f"{gov_doc_id}_v01"),
+            page_count=2,
+            pdf_filename=f"{gov_doc_id}_emd01.pdf",
+            official_url=f"https://example.test/eval/rbac-{gov_reg}-emd01",
+        )
+        _save_bundle(
+            doc=gov_doc,
+            ver=gov_ver,
+            pages=[
+                _make_page(
+                    version_id=gov_ver.version_id,
+                    pdf_page_number=1,
+                    printed_page="1/2",
+                    text=f"Capa RBAC {gov_reg} Sintético (página 1 aprovada isoladamente).",
+                    status=PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
+                ),
+                _make_page(
+                    version_id=gov_ver.version_id,
+                    pdf_page_number=2,
+                    printed_page="2/2",
+                    text=gov_text,
+                    status=gov_status,
+                    method=gov_method,
+                ),
+            ],
+            units=[
+                _make_unit(
+                    version_id=gov_ver.version_id,
+                    section_number=gov_sec,
+                    title=gov_title,
+                    text=gov_text,
+                    page_numbers=(2,),
+                    order_index=1,
+                )
+            ],
+        )
+
     indexing = IndexingService(
         repository=repo,
         catalog_service=catalog,
@@ -1019,6 +1107,7 @@ def build_synthetic_eval_environment(
         vector_store=vector_store,
         embedding_port=embedder,
         default_collection_name=collection_name,
+        validation_service=validation,
     )
     for doc_id, ver_id in (
         ("eval_rbac_43", "eval_rbac_43_v05"),
