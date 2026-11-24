@@ -25,7 +25,11 @@ from rbac_assistant.application.services.validation_service import (
     ValidationService,
 )
 from rbac_assistant.domain.entities.document_version import DocumentVersion
-from rbac_assistant.domain.entities.normative_unit import StructureStatus
+from rbac_assistant.domain.entities.normative_unit import (
+    NormativeTable,
+    StructureStatus,
+    resolve_section_tables,
+)
 from rbac_assistant.domain.entities.rag import (
     EvidenceDecisionDiagnostic,
     EvidenceTrustLevel,
@@ -575,11 +579,13 @@ class HybridNormativeRetriever:
         )
 
         usable_evidences: list[FusedEvidence] = []
+        blocked_integrity_evidences: list[FusedEvidence] = []
         evidence_decisions: list[EvidenceDecisionDiagnostic] = []
         seen_sections: set[tuple[str, str]] = set()
         # Cache efêmero restrito a uma única chamada `retrieve()` (zero estado persistente).
         docs_cache: dict[str, RegulatoryDocument | None] = {}
         versions_cache: dict[str, DocumentVersion | None] = {}
+        all_tables_cache: dict[str, list[NormativeTable]] = {}
 
         for acc in fused:
             hydrated_chunk = chunks_by_id.get(acc.chunk_id)
@@ -609,6 +615,7 @@ class HybridNormativeRetriever:
                 docs_cache=docs_cache,
                 versions_cache=versions_cache,
                 all_pages_cache=all_pages_cache,
+                all_tables_cache=all_tables_cache,
                 doc_assessments=doc_assessments,
             )
             if evidence is None:
@@ -651,6 +658,25 @@ class HybridNormativeRetriever:
                     )
                 )
             else:
+                is_ownership_block = bool(
+                    evidence.warning_message
+                    and "PROPRIEDADE TABULAR BLOQUEADA" in evidence.warning_message
+                )
+                is_integrity_block = bool(
+                    evidence.warning_message
+                    and "INTEGRIDADE TABULAR BLOQUEADA" in evidence.warning_message
+                )
+                is_table_block = is_ownership_block or is_integrity_block
+                if is_table_block:
+                    blocked_integrity_evidences.append(evidence)
+                    if evidence.warning_message:
+                        warnings.append(evidence.warning_message)
+                if is_ownership_block:
+                    block_reason = "excluded:table_ownership_blocked"
+                elif is_integrity_block:
+                    block_reason = "excluded:table_integrity_failed"
+                else:
+                    block_reason = "excluded:global_document_approval_required"
                 evidence_decisions.append(
                     EvidenceDecisionDiagnostic(
                         chunk_id=evidence.chunk_id,
@@ -662,7 +688,7 @@ class HybridNormativeRetriever:
                         pdf_pages=evidence.pdf_pages,
                         trust_level=evidence.trust_level.value,
                         included=False,
-                        reason="excluded:global_document_approval_required",
+                        reason=block_reason,
                     )
                 )
 
@@ -753,7 +779,7 @@ class HybridNormativeRetriever:
             query=clean_query,
             resolved_references=resolved_refs,
             evidences=tuple(usable_evidences),
-            blocked_evidences=(),
+            blocked_evidences=tuple(blocked_integrity_evidences),
             lexical_hits_count=len(lexical_pairs),
             vector_hits_count=vector_hits_count,
             structural_hits_count=structural_hits,
@@ -1086,6 +1112,7 @@ class HybridNormativeRetriever:
         docs_cache: dict[str, RegulatoryDocument | None] | None = None,
         versions_cache: dict[str, DocumentVersion | None] | None = None,
         all_pages_cache: dict[str, list[RegulatoryPage]] | None = None,
+        all_tables_cache: dict[str, list[NormativeTable]] | None = None,
         doc_assessments: dict[str, DocumentVersionValidationAssessment] | None = None,
     ) -> FusedEvidence | None:
         """Recupera texto literal e valida aprovação global ao vivo diretamente do SQLite (SSOT)."""
@@ -1163,6 +1190,23 @@ class HybridNormativeRetriever:
             document_assessment=doc_assessment,
         )
 
+        # Hidrata tabelas/formulários validando propriedade e integridade separadamente
+        if all_tables_cache is not None and version.version_id in all_tables_cache:
+            version_tables = all_tables_cache[version.version_id]
+        else:
+            version_tables = self._repository.list_tables(version.version_id)
+            if all_tables_cache is not None:
+                all_tables_cache[version.version_id] = version_tables
+        page_num_set = set(page_numbers)
+        raw_page_tables = [t for t in version_tables if t.pdf_page_number in page_num_set]
+
+        target_unit_id = primary_unit.unit_id if primary_unit is not None else chunk.unit_id
+        section_tables, ownership_issues, table_integrity_issues = resolve_section_tables(
+            page_tables=raw_page_tables,
+            unit_id=target_unit_id,
+            section_number=chunk.section_number,
+        )
+
         rejected_pages = tuple(
             p.pdf_page_number
             for p in pages
@@ -1173,14 +1217,40 @@ class HybridNormativeRetriever:
             p.printed_page_number or f"PDF {p.pdf_page_number}" for p in pages
         ) or chunk.printed_pages
 
-        if assessment.literal_transcription_allowed:
+        effective_warning = assessment.warning_message
+        effective_allowed = assessment.literal_transcription_allowed
+        if ownership_issues:
+            trust_level = EvidenceTrustLevel.BLOCKED_UNVERIFIED
+            effective_allowed = False
+            effective_warning = (
+                f"PROPRIEDADE TABULAR BLOQUEADA ({chunk.section_number}): "
+                "Há tabela na página sem associação proprietária única e confiável; "
+                "resposta bloqueada para evitar atribuição indevida entre seções "
+                f"({'; '.join(ownership_issues[:3])})."
+            )
+            hydrated_tables: tuple[NormativeTable, ...] = ()
+        elif table_integrity_issues:
+            trust_level = EvidenceTrustLevel.BLOCKED_UNVERIFIED
+            effective_allowed = False
+            effective_warning = (
+                f"INTEGRIDADE TABULAR BLOQUEADA ({chunk.section_number}): "
+                "A estrutura tabular desta seção apresentou inconsistência e foi bloqueada "
+                "para evitar apresentação de valores sem cabeçalhos ou associação confiável "
+                f"({'; '.join(table_integrity_issues[:3])})."
+            )
+            hydrated_tables = ()
+        elif assessment.literal_transcription_allowed:
             trust_level = EvidenceTrustLevel.VALIDATED_LITERAL
+            hydrated_tables = section_tables
         elif rejected_pages:
             trust_level = EvidenceTrustLevel.BLOCKED_REJECTED
+            hydrated_tables = ()
         elif assessment.ocr_blocked_pdf_pages:
             trust_level = EvidenceTrustLevel.BLOCKED_OCR_PENDING
+            hydrated_tables = ()
         else:
             trust_level = EvidenceTrustLevel.BLOCKED_UNVERIFIED
+            hydrated_tables = ()
 
         return FusedEvidence(
             chunk_id=chunk.chunk_id,
@@ -1204,7 +1274,7 @@ class HybridNormativeRetriever:
             printed_pages=printed_pages,
             page_statuses=page_statuses,
             trust_level=trust_level,
-            literal_transcription_allowed=assessment.literal_transcription_allowed,
+            literal_transcription_allowed=effective_allowed,
             rrf_score=acc.score,
             matched_sources=tuple(acc.sources or ()),
             pending_pdf_pages=assessment.pending_pdf_pages,
@@ -1214,7 +1284,8 @@ class HybridNormativeRetriever:
             vector_rank=acc.vector_rank,
             structural_rank=acc.structural_rank,
             rerank_score=acc.rerank_score,
-            warning_message=assessment.warning_message,
+            warning_message=effective_warning,
+            tables=hydrated_tables,
         )
 
     @staticmethod

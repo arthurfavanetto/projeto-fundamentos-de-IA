@@ -30,10 +30,16 @@ _RUNNING_HEADER_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 _SUBPART_RE = re.compile(r"^SUBPARTE\s+([A-Z0-9-]+)(?:\s*[-–—]\s*(.*))?$", re.IGNORECASE)
-_APPENDIX_BANNER_RE = re.compile(
+# Banner real de apêndice ANAC (sempre em CAIXA ALTA: "APÊNDICE A DO RBAC 43").
+# Evita falso positivo em prosa que inicia linha com "Apêndice D deste regulamento...".
+_APPENDIX_BANNER_STRICT_RE = re.compile(
+    r"^AP[ÊE]NDICE\s+([A-Z0-9-]+)(?:\s+DO\s+RBAC\s+(?:[nN][º°]?\s*)?\d+)?(?:\s+(.*))?$"
+)
+_APPENDIX_TOC_RE = re.compile(
     r"^AP[ÊE]NDICE\s+([A-Z0-9-]+)(?:\s+DO\s+RBAC\s+(?:n[º°]?\s*)?\d+)?(.*)$",
     re.IGNORECASE,
 )
+_RESERVED_LINE_RE = re.compile(r"^\[reservado\]\.?$", re.IGNORECASE)
 _PARAGRAPH_RE = re.compile(r"^\(([a-z])\)(?:-[A-Z])?\s+")
 _INCISO_RE = re.compile(r"^\((\d+)\)(?:-[A-Z])?\s+")
 _ALINEA_RE = re.compile(r"^\(([ivxlcdm]+)\)\s+")
@@ -42,6 +48,19 @@ _CROSS_REF_RE = re.compile(
     r"\b(?:RBAC|RBHA|IS)\s*(?:n[º°]?\s*)?(\d+(?:-[A-Z0-9]+)?)"
     r"|\b(?:se[çc][ãa]o|par[áa]grafo)\s+([A-Z]?\d+\.\d+(?:-[A-Z0-9]+)?(?:\([a-z0-9]+\))*)",
     re.IGNORECASE,
+)
+
+_ROMAN_VALUES: dict[str, int] = {
+    "i": 1,
+    "v": 5,
+    "x": 10,
+    "l": 50,
+    "c": 100,
+    "d": 500,
+    "m": 1000,
+}
+_VALID_ROMAN_RE = re.compile(
+    r"^m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$"
 )
 
 
@@ -58,6 +77,7 @@ class _SectionBuffer:
     subpart: str
     unit_type: NormativeUnitType
     lines: list[_LineEntry] = field(default_factory=list)
+    title_line_count: int = 1
 
 
 def _is_running_chrome(line: str) -> bool:
@@ -72,6 +92,85 @@ def _build_section_regex(regulation_number: str) -> re.Pattern[str]:
     return re.compile(
         rf"^([A-Z]?{escaped_reg}\.\d+(?:-[A-Z0-9]+)?)\s+([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ\[].+)$"
     )
+
+
+def _match_appendix_banner(line: str) -> re.Match[str] | None:
+    """Identifica cabeçalho real de apêndice em caixa alta (sem casar prosa corrida)."""
+    stripped = line.strip()
+    match = _APPENDIX_BANNER_STRICT_RE.match(stripped)
+    if match is None:
+        return None
+    tail = (match.group(2) or "").strip()
+    if tail and any(ch.islower() for ch in tail):
+        return None
+    return match
+
+
+def _is_uppercase_banner_line(line: str) -> bool:
+    """Identifica linhas de subtítulo em CAIXA ALTA logo após um banner de Apêndice."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    letters = [ch for ch in stripped if ch.isalpha()]
+    return bool(letters) and all(ch.isupper() for ch in letters)
+
+
+def _roman_to_int(token: str) -> int | None:
+    """Converte numeral romano minúsculo canônico para inteiro positivo (ou None)."""
+    clean = token.strip().lower()
+    if not clean or not _VALID_ROMAN_RE.match(clean):
+        return None
+    total = 0
+    prev = 0
+    for ch in reversed(clean):
+        val = _ROMAN_VALUES[ch]
+        if val < prev:
+            total -= val
+        else:
+            total += val
+            prev = val
+    return total if total > 0 else None
+
+
+def _reconstruct_multiline_title(
+    initial_title: str,
+    following_entries: Sequence[_LineEntry],
+    section_re: re.Pattern[str],
+) -> tuple[str, int]:
+    """Reconstrói títulos de seção ANAC quebrados em múltiplas linhas sem absorver corpo."""
+    title_parts = [initial_title.strip()]
+    consumed = 0
+
+    for entry in following_entries[:6]:
+        cand = entry.text.strip()
+        if not cand:
+            break
+        if (
+            _PARAGRAPH_RE.match(cand)
+            or _INCISO_RE.match(cand)
+            or _ALINEA_RE.match(cand)
+            or _SUBITEM_RE.match(cand)
+            or section_re.match(cand)
+            or _SUBPART_RE.match(cand)
+            or _match_appendix_banner(cand)
+            or _RESERVED_LINE_RE.match(cand)
+        ):
+            break
+
+        joined_so_far = " ".join(title_parts)
+        has_open_paren = joined_so_far.count("(") > joined_so_far.count(")")
+        starts_lowercase = cand[0].islower()
+        starts_editorial_paren = cand.startswith("(") and not (
+            _PARAGRAPH_RE.match(cand) or _INCISO_RE.match(cand) or _ALINEA_RE.match(cand)
+        )
+
+        if has_open_paren or starts_lowercase or starts_editorial_paren:
+            title_parts.append(cand)
+            consumed += 1
+        else:
+            break
+
+    return " ".join(title_parts), 1 + consumed
 
 
 def _extract_references(unit_id: str, text: str) -> tuple[NormativeReference, ...]:
@@ -111,7 +210,7 @@ def _looks_like_toc_section(
     """Identifica se um cabeçalho de seção ainda pertence ao Sumário (TOC) inicial.
 
     Um cabeçalho no corpo regulatório ou (a) repete um número já listado no sumário, ou
-    (b) é seguido em até 4 linhas (título quebrado) por parágrafo `(a)` / texto de corpo
+    (b) é seguido em até 6 linhas (título quebrado) por parágrafo `(a)` / texto de corpo
     com frase completa (terminada em ponto) antes da próxima seção.
     """
     match = section_re.match(lines[idx].text.strip())
@@ -131,12 +230,12 @@ def _looks_like_toc_section(
     between: list[str] = []
     for candidate in lines[idx + 1 : idx + 7]:
         text = candidate.text.strip()
-        if section_re.match(text) or _APPENDIX_BANNER_RE.match(text) or _SUBPART_RE.match(text):
+        if section_re.match(text) or _APPENDIX_TOC_RE.match(text) or _SUBPART_RE.match(text):
             break
         between.append(text)
 
     # Se há parágrafo normativo "(a) ..." ou "[Reservado]" ou frase normativa com ponto final
-    # e mais de 60 caracteres, já é corpo regulatório (ex.: documentos sintéticos sem sumário).
+    # e mais de 50 caracteres, já é corpo regulatório (ex.: documentos sintéticos sem sumário).
     if "[Reservado]" in current:
         return False
     for line in between:
@@ -195,6 +294,7 @@ class AnacRbacStructureStrategy:
                 sub_code = subpart_match.group(1).strip()
                 sub_title = (subpart_match.group(2) or "").strip()
                 current_subpart = f"Subparte {sub_code}" + (f" — {sub_title}" if sub_title else "")
+                current_buffer = None
                 idx += 1
                 continue
 
@@ -226,15 +326,53 @@ class AnacRbacStructureStrategy:
                 idx += 1
                 continue
 
-            if _APPENDIX_BANNER_RE.match(stripped):
+            app_match = _match_appendix_banner(stripped)
+            if app_match is not None:
                 if not entered_body:
                     idx += 1
                     continue
-                upcoming = [ln.text.strip() for ln in all_lines[idx + 1 : idx + 4]]
-                if any(section_re.match(u) for u in upcoming):
-                    current_subpart = stripped
-                    idx += 1
+
+                # Encerra a seção anterior para impedir vazamento do banner do apêndice seguinte
+                current_buffer = None
+                app_code = app_match.group(1).strip()
+                current_subpart = stripped
+                banner_idx = idx + 1
+
+                # Caso especial: apêndice integralmente reservado (ex.: APÊNDICE C / [RESERVADO])
+                if banner_idx < len(all_lines) and _RESERVED_LINE_RE.match(
+                    all_lines[banner_idx].text.strip()
+                ):
+                    reserved_entry = all_lines[banner_idx]
+                    buffers.append(
+                        _SectionBuffer(
+                            section_number=f"Apêndice {app_code}",
+                            title=reserved_entry.text.strip(),
+                            subpart=current_subpart,
+                            unit_type=NormativeUnitType.APPENDIX,
+                            lines=[entry, reserved_entry],
+                            title_line_count=2,
+                        )
+                    )
+                    idx = banner_idx + 1
                     continue
+
+                # Avança eventuais linhas de subtítulo em CAIXA ALTA do banner até a seção X43.1
+                while banner_idx < len(all_lines):
+                    next_stripped = all_lines[banner_idx].text.strip()
+                    if (
+                        section_re.match(next_stripped)
+                        or _SUBPART_RE.match(next_stripped)
+                        or _match_appendix_banner(next_stripped) is not None
+                        or _RESERVED_LINE_RE.match(next_stripped)
+                    ):
+                        break
+                    if _is_uppercase_banner_line(next_stripped):
+                        banner_idx += 1
+                    else:
+                        break
+
+                idx = banner_idx
+                continue
 
             if current_buffer is not None:
                 current_buffer.lines.append(entry)
@@ -274,6 +412,16 @@ class AnacRbacStructureStrategy:
         order_counter = 0
 
         for sec_buf in buffers:
+            # Reconstrói títulos de seção quebrados em múltiplas linhas sem alterar `original_text`
+            if sec_buf.title_line_count == 1 and len(sec_buf.lines) > 1:
+                full_title, title_lines = _reconstruct_multiline_title(
+                    sec_buf.title,
+                    sec_buf.lines[1:],
+                    section_re,
+                )
+                sec_buf.title = full_title
+                sec_buf.title_line_count = title_lines
+
             sec_orig = "\n".join(e.text for e in sec_buf.lines)
             sec_norm = normalize_auxiliary_text(sec_orig)
             sec_pages = tuple(sorted({e.pdf_page_number for e in sec_buf.lines}))
@@ -287,9 +435,12 @@ class AnacRbacStructureStrategy:
             sec_hash = hashlib.sha256(sec_orig.encode("utf-8")).hexdigest()
             refs = _extract_references(sec_unit_id, sec_orig)
 
+            has_reserved_marker = bool(
+                re.search(r"\[reservado\]", sec_orig, flags=re.IGNORECASE)
+            )
             sec_status = (
                 StructureStatus.PARSED
-                if (len(sec_buf.lines) > 1 or "[Reservado]" in sec_orig) and not is_duplicate
+                if (len(sec_buf.lines) > 1 or has_reserved_marker) and not is_duplicate
                 else StructureStatus.PENDING_VALIDATION
             )
 
@@ -341,6 +492,7 @@ class AnacRbacStructureStrategy:
         order = start_order
         current_paragraph = ""
         current_inciso = ""
+        current_alinea_num = 0
         current_sub_type: NormativeUnitType | None = None
         current_item_label = ""
         current_lines: list[_LineEntry] = []
@@ -377,21 +529,45 @@ class AnacRbacStructureStrategy:
             )
             order += 1
 
-        for entry in sec_buf.lines[1:]:
+        start_idx = max(1, sec_buf.title_line_count)
+        for entry in sec_buf.lines[start_idx:]:
             stripped = entry.text.strip()
             par_match = _PARAGRAPH_RE.match(stripped)
             inc_match = _INCISO_RE.match(stripped)
             ali_match = _ALINEA_RE.match(stripped)
             sub_match = _SUBITEM_RE.match(stripped)
 
-            is_alinea = (
-                ali_match is not None
-                and bool(current_inciso)
-                and (ali_match.group(1) != "i" or current_paragraph != "(h)")
-            )
+            is_alinea = False
+            matched_roman_val: int | None = None
+            if ali_match is not None and bool(current_inciso):
+                roman_token = ali_match.group(1)
+                roman_val = _roman_to_int(roman_token)
+                if roman_val is not None:
+                    if par_match is None:
+                        # Numerais romanos com 2+ letras ((ii), (iii), (iv)...) são sempre alíneas
+                        is_alinea = True
+                        matched_roman_val = roman_val
+                    elif roman_val == current_alinea_num + 1:
+                        # Caractere único ambíguo ((i), (v), (x), (l), (c), (d), (m)):
+                        # só é alínea quando segue exatamente a sequência romana ativa e não
+                        # inicia o próximo parágrafo alfabético em caixa alta.
+                        next_expected_par = (
+                            chr(ord(current_paragraph[1]) + 1)
+                            if len(current_paragraph) == 3 and current_paragraph[1].isalpha()
+                            else ""
+                        )
+                        rest_text = stripped[ali_match.end() :].lstrip()
+                        starts_like_paragraph = bool(
+                            rest_text
+                            and (rest_text[0].isupper() or rest_text.startswith("["))
+                        )
+                        if not (roman_token == next_expected_par and starts_like_paragraph):
+                            is_alinea = True
+                            matched_roman_val = roman_val
 
-            if is_alinea and ali_match:
+            if is_alinea and ali_match is not None and matched_roman_val is not None:
                 flush_current()
+                current_alinea_num = matched_roman_val
                 current_sub_type = NormativeUnitType.ALINEA
                 current_item_label = f"({current_inciso})({ali_match.group(1)})"
                 current_lines = [entry]
@@ -399,12 +575,14 @@ class AnacRbacStructureStrategy:
                 flush_current()
                 current_paragraph = f"({par_match.group(1)})"
                 current_inciso = ""
+                current_alinea_num = 0
                 current_sub_type = NormativeUnitType.PARAGRAPH
                 current_item_label = ""
                 current_lines = [entry]
             elif inc_match:
                 flush_current()
                 current_inciso = inc_match.group(1)
+                current_alinea_num = 0
                 current_sub_type = NormativeUnitType.INCISO
                 current_item_label = f"({current_inciso})"
                 current_lines = [entry]

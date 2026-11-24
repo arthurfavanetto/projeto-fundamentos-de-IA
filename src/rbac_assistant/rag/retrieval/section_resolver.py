@@ -6,38 +6,39 @@ import re
 
 from rbac_assistant.domain.entities.rag import ResolvedStructuralRef
 
-# Ex.: "RBAC 43.3", "RBAC nº 43.9(a)(1)(i)", "RBAC 43 seção 43.3(b)", "43.1-I"
+# Ex.: "RBAC 43.3", "RBAC nº 43.9(a)(1)(i)", "RBAC 43 seção 43.3(b)", "RBAC 43 F43.1(a)(1)"
 _RBAC_SECTION_RE = re.compile(
     r"\bRBAC\s*(?:n[º°.]?\s*)?(?P<reg>\d{1,3})\s*"
-    r"(?:(?:,\s*)?(?:se[çc][ãa]o|sec\.?)\s*)?"
-    r"(?P<sec>(?P=reg)\.\d+[A-Za-z0-9\-]*)\s*"
+    r"(?:(?:,\s*)?(?:se[çc][ãa]o|sec\.?|ap[êe]ndice)\s*)?"
+    r"(?P<sec>[A-Z]?(?P=reg)\.\d+[A-Za-z0-9\-]*)\s*"
     r"(?:\((?P<par>[a-z])\))?\s*"
     r"(?:\((?P<item>\d+|[ivx]+)\))?\s*"
     r"(?:\((?P<subitem>[ivx]+|[A-Z]|\d+)\))?",
     re.IGNORECASE,
 )
 
-# Ex.: "RBAC 43.3", "RBAC 43.9(a)(1)(i)" (forma curta)
+# Ex.: "RBAC 43.3", "RBAC 43.9(a)(1)(i)", "RBAC F43.1" (forma curta)
 _RBAC_DOT_RE = re.compile(
-    r"\bRBAC\s*(?:n[º°.]?\s*)?(?P<sec>(?P<reg>\d{1,3})\.\d+[A-Za-z0-9\-]*)"
+    r"\bRBAC\s*(?:n[º°.]?\s*)?(?P<sec>(?:[A-Za-z](?=\d{2,3}\.))?(?P<reg>\d{1,3})\.\d+[A-Za-z0-9\-]*)"
     r"(?:\((?P<par>[a-z])\))?"
     r"(?:\((?P<item>\d+|[ivx]+)\))?"
     r"(?:\((?P<subitem>[ivx]+|[A-Z]|\d+)\))?",
     re.IGNORECASE,
 )
 
-# Ex.: "seção 43.3", "seção 145.109(a)(1)(i)", ou token isolado "43.3(a)(1)"
+# Ex.: "seção 43.3", "seção 145.109(a)(1)(i)", "43.3(a)(1)", "F43.1(a)(1)", "E43.1"
 _STANDALONE_SECTION_RE = re.compile(
-    r"(?:\bse[çc][ãa]o\s+)?\b(?P<sec>(?P<reg>\d{1,3})\.\d+[A-Za-z0-9\-]*)"
+    r"(?:\bse[çc][ãa]o\s+)?(?<![A-Za-z0-9])"
+    r"(?P<sec>(?:[A-Za-z](?=\d{2,3}\.))?(?P<reg>\d{1,3})\.\d+[A-Za-z0-9\-]*)"
     r"(?:\((?P<par>[a-z])\))?"
     r"(?:\((?P<item>\d+|[ivx]+)\))?"
     r"(?:\((?P<subitem>[ivx]+|[A-Z]|\d+)\))?",
     re.IGNORECASE,
 )
 
-# Ex.: "Apêndice A", "Apêndice B do RBAC 43"
+# Ex.: "Apêndice A", "Apêndice B do RBAC 43", "Apêndice F do RBAC nº 43"
 _APPENDIX_RE = re.compile(
-    r"\b(?P<sec>Ap[êe]ndice\s+[A-Z0-9]+(?:\s*-\s*[A-Z0-9]+)?)"
+    r"\b(?P<sec>Ap[êe]ndice\s+(?P<code>[A-Z0-9]+(?:\s*-\s*[A-Z0-9]+)?))"
     r"(?:\s+(?:do|da|de)\s+RBAC\s*(?:n[º°.]?\s*)?(?P<reg>\d{1,3}))?",
     re.IGNORECASE,
 )
@@ -110,6 +111,7 @@ def extract_regulation_hint(query: str) -> tuple[str | None, str | None]:
 def resolve_structural_references(query: str) -> tuple[ResolvedStructuralRef, ...]:
     """Extrai referências estruturais explícitas da consulta em ordem de prioridade."""
     amendment = extract_amendment_hint(query)
+    _, hinted_reg = extract_regulation_hint(query)
     refs: list[ResolvedStructuralRef] = []
     seen: set[tuple[str | None, str | None, str | None, str | None, str | None]] = set()
 
@@ -160,7 +162,12 @@ def resolve_structural_references(query: str) -> tuple[ResolvedStructuralRef, ..
 
     for match in _APPENDIX_RE.finditer(query):
         sec_clean = re.sub(r"\s+", " ", match.group("sec")).strip()
-        _add(match.group(0), match.group("reg"), sec_clean)
+        reg_num = match.group("reg") or hinted_reg
+        _add(match.group(0), reg_num, sec_clean)
+        code = match.group("code").strip().upper()
+        if reg_num and len(code) == 1 and code.isalpha():
+            # Em RBACs da ANAC, Apêndice X normalmente corresponde à seção X<reg>.1 (ex.: F43.1)
+            _add(match.group(0), reg_num, f"{code}{reg_num}.1")
 
     for match in _ARTICLE_RE.finditer(query):
         sec_raw = re.sub(r"^Artigo\b", "Art.", match.group("sec"), flags=re.IGNORECASE)

@@ -526,3 +526,128 @@ def test_multidocument_extensibility_second_fictional_regulation_and_versions(
     assert "Emenda 04" in sec_43_hist.section.original_text
     assert sec_res.found is True and sec_res.section is not None
     assert "Art. 1º" in sec_res.section.original_text
+
+
+@pytest.mark.integration
+def test_reprocessing_with_altered_table_metadata_or_ownership_invalidates_review(
+    tmp_path: Path,
+) -> None:
+    """Blocker 1 (#13): alterar metadado de tabela (sem mudar texto/rows) invalida revisão."""
+    from dataclasses import replace
+
+    from rbac_assistant.domain.entities.normative_unit import TableCellGeometry
+    from rbac_assistant.domain.ports.pdf_extractor_port import ExtractedPageData
+
+    pdf_path = create_synthetic_rbac_pdf(tmp_path / "rbac43_meta_hash.pdf")
+    base_dir = tmp_path / "documents_meta_hash"
+    base_extracted = PdfPlumberExtractorAdapter().extract_pages(pdf_path, min_native_chars=40)
+
+    class _MutableMetaExtractor:
+        def __init__(self, pages: list[ExtractedPageData]) -> None:
+            self.pages = pages
+
+        def extract_pages(
+            self,
+            pdf_path_arg: Path,
+            *,
+            min_native_chars: int = 80,
+            max_pages: int | None = None,
+        ) -> list[ExtractedPageData]:
+            del pdf_path_arg, min_native_chars, max_pages
+            return list(self.pages)
+
+    extractor = _MutableMetaExtractor(base_extracted)
+    repo = SqliteDocumentRepository(base_dir / "catalog.sqlite3")
+    repo.initialize()
+    store = LocalFileDocumentStore(documents_dir=base_dir)
+    store.ensure_directories()
+    catalog = CatalogService(repo)
+    validation = ValidationService(policy=ValidationPolicy.STRICT_ALL_PAGES)
+    ingestion_svc = IngestionService(
+        repository=repo,
+        file_store=store,
+        pdf_extractor=extractor,
+        quality_checker=TextQualityChecker(),
+        validation_service=validation,
+        structure_strategies=(AnacRbacStructureStrategy(), GenericStructureStrategy()),
+        local_source=LocalFileSourceAdapter(),
+    )
+    validate_uc = ValidatePageUseCase(
+        repository=repo,
+        catalog_service=catalog,
+        validation_service=validation,
+        file_store=store,
+    )
+    get_sec_uc = GetNormativeSectionUseCase(
+        repository=repo,
+        catalog_service=catalog,
+        validation_service=validation,
+    )
+    doc_dto = RegisterDocumentDTO(
+        document_id="anac_rbac_43_meta_hash",
+        authority="ANAC",
+        document_type=DocumentType.RBAC,
+        regulation_number="43",
+        document_title="Manutenção Aeronáutica",
+        amendment_number="05",
+        version_status=VersionStatus.CURRENT,
+    )
+
+    try:
+        first = ingestion_svc.ingest(
+            IngestionRequestDTO(document=doc_dto, source_uri=str(pdf_path))
+        )
+        validate_uc.execute(
+            PageReviewRequestDTO(
+                document_id=doc_dto.document_id,
+                version_id=first.version.version_id,
+                reviewer="revisor_meta",
+                decision=ReviewDecision.APPROVE,
+                confirmed=True,
+                page_numbers=(1, 2, 3),
+                comments="Aprovação completa inicial.",
+            )
+        )
+        assert get_sec_uc.execute(document_id=doc_dto.document_id, section_number="43.9").found
+
+        # Altera SOMENTE metadados estruturais na p. 3 (caption, header_row_count, col_span),
+        # mantendo original_text e rows 100% IDÊNTICOS!
+        p3_orig = base_extracted[2]
+        t0 = p3_orig.tables[0]
+        altered_cells = (
+            TableCellGeometry(
+                row_index=0, col_index=0, row_span=1, col_span=2, text=t0.rows[0][0]
+            ),
+            *t0.cells[1:],
+        )
+        altered_tbl = replace(
+            t0,
+            caption="TABELA ALTERADA SEM MUDAR ROWS",
+            header_row_count=2,
+            cells=altered_cells,
+            has_merged_cells=True,
+        )
+        extractor.pages = [
+            base_extracted[0],
+            base_extracted[1],
+            replace(p3_orig, tables=(altered_tbl,)),
+        ]
+
+        reproc = ingestion_svc.ingest(
+            IngestionRequestDTO(
+                document=doc_dto,
+                source_uri=str(pdf_path),
+                force_reprocess=True,
+            )
+        )
+        assert len(reproc.invalidated_reviews) == 1
+        assert reproc.invalidated_reviews[0].decision == ReviewDecision.INVALIDATED_BY_REPROCESSING
+        assert reproc.invalidated_reviews[0].page_id.endswith("::p0003")
+
+        # Como p. 3 foi invalidada, o bloqueio global do PR #19 bloqueia TODAS as seções
+        blocked = get_sec_uc.execute(document_id=doc_dto.document_id, section_number="43.1")
+        assert blocked.found is False
+        assert blocked.blocked_by_document_approval is True
+        assert blocked.pending_pdf_pages == (3,)
+    finally:
+        repo.close()

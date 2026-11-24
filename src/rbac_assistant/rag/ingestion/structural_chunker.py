@@ -22,6 +22,7 @@ from rbac_assistant.domain.entities.regulatory_page import PageValidationStatus,
 from rbac_assistant.domain.ports.validation_port import ParsedUnitRecord
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+_NORMATIVE_PARAGRAPH_START_RE = re.compile(r"^\([a-z]\)(?:-[A-Z])?\s+")
 
 
 def _slugify(value: str) -> str:
@@ -166,7 +167,7 @@ class StructuralNormativeChunker:
         )
 
     def _split_preserving_boundaries(self, text: str) -> list[str]:
-        """Mantém a unidade inteira se couber na janela; caso contrário, divide em quebras."""
+        """Mantém a unidade inteira se couber; caso contrário divide em fronteiras de parágrafo."""
         cleaned = text.strip()
         if not cleaned:
             return []
@@ -174,30 +175,52 @@ class StructuralNormativeChunker:
             return [text]
 
         lines = text.splitlines(keepends=True)
+        # Agrupa linhas em blocos de parágrafo `(a)`, `(b)`, ... preservando 100% dos chars
+        blocks: list[str] = []
+        block_lines: list[str] = []
+        for line in lines:
+            if block_lines and _NORMATIVE_PARAGRAPH_START_RE.match(line.lstrip()):
+                blocks.append("".join(block_lines))
+                block_lines = [line]
+            else:
+                block_lines.append(line)
+        if block_lines:
+            blocks.append("".join(block_lines))
+
         slices: list[str] = []
         current_parts: list[str] = []
         current_len = 0
 
-        for line in lines:
-            if len(line) > self._max_chunk_chars:
-                if current_parts:
-                    slices.append("".join(current_parts))
-                    current_parts = []
-                    current_len = 0
-                for start in range(0, len(line), self._max_chunk_chars):
-                    slices.append(line[start : start + self._max_chunk_chars])
+        def _flush_current() -> None:
+            nonlocal current_parts, current_len
+            if current_parts:
+                slices.append("".join(current_parts))
+                current_parts = []
+                current_len = 0
+
+        for block in blocks:
+            if len(block) > self._max_chunk_chars:
+                _flush_current()
+                # Bloco único maior que o limite: divide em quebras de linha preservando tudo
+                for line in block.splitlines(keepends=True):
+                    if len(line) > self._max_chunk_chars:
+                        _flush_current()
+                        for start in range(0, len(line), self._max_chunk_chars):
+                            slices.append(line[start : start + self._max_chunk_chars])
+                        continue
+                    if current_parts and current_len + len(line) > self._max_chunk_chars:
+                        _flush_current()
+                    current_parts.append(line)
+                    current_len += len(line)
+                _flush_current()
                 continue
 
-            if current_parts and current_len + len(line) > self._max_chunk_chars:
-                slices.append("".join(current_parts))
-                current_parts = [line]
-                current_len = len(line)
-            else:
-                current_parts.append(line)
-                current_len += len(line)
+            if current_parts and current_len + len(block) > self._max_chunk_chars:
+                _flush_current()
+            current_parts.append(block)
+            current_len += len(block)
 
-        if current_parts:
-            slices.append("".join(current_parts))
+        _flush_current()
         return slices
 
     @staticmethod

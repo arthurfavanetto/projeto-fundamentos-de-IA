@@ -17,6 +17,7 @@ Regras:
 from __future__ import annotations
 
 import asyncio
+import re
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ from rbac_assistant.application.services.catalog_service import CatalogService
 from rbac_assistant.application.services.chat_service import NormativeChatService
 from rbac_assistant.application.services.indexing_service import IndexingService
 from rbac_assistant.application.use_cases.check_system_status import CheckSystemStatusUseCase
-from rbac_assistant.domain.entities.rag import SearchFilter
+from rbac_assistant.domain.entities.rag import SearchFilter, StructuredNormativeAnswer
 from rbac_assistant.domain.exceptions import AuditWriteError, DomainError
 from rbac_assistant.domain.ports.audit_port import AuditEvent, AuditPort
 from rbac_assistant.interfaces.telegram.message_splitter import MessageSplitter
@@ -52,6 +53,50 @@ SUPPORTED_COMMANDS: tuple[str, ...] = (
 )
 
 _MAX_TRACKED_USER_SEMAPHORES = 2048
+
+# Política determinística de intenção para texto livre:
+# 1. Pedido explícito de explicação/interpretação -> aciona explicação separada via Gemini.
+# 2. Pedido literal/transcrição -> somente texto literal e referência (zero Gemini).
+# 3. Pergunta analítica inequívoca (com '?' ou estrutura interrogativa clara) -> explicação.
+# 4. Consulta ambígua, citação isolada ou termos soltos -> prioriza evidência literal (zero Gemini).
+_EXPLICIT_EXPLANATION_RE = re.compile(
+    r"\b(?:expliqu\w*|explica[çc][ãa]o|resum\w*|interpret\w*|esclare[çc]\w*|"
+    r"o\s+que\s+significa|significa\s+o\s+qu[êe]|como\s+funciona|"
+    r"qual\s+a\s+diferen[çc]a|diferen[çc]a\s+entre|quando\s+se\s+aplica)\b",
+    re.IGNORECASE,
+)
+_LITERAL_ONLY_REQUEST_RE = re.compile(
+    r"\b(?:transcrev\w*|transcri[çc][ãa]o|texto\s+literal|texto\s+exato|"
+    r"texto\s+integral|ipsis\s+litteris|literalmente|reproduz\w*|copi[ae]\w*|"
+    r"(?:mostr[ae]|exib[ae]|traga|envi[ae]|qual\s+(?:[ée]\s+)?o)\s+o?\s*texto\b|"
+    r"ler?\s+a\s+se[çc][ãa]o|cit[ae]\s+literal\w*)\b",
+    re.IGNORECASE,
+)
+_ANALYTICAL_QUESTION_RE = re.compile(
+    r"(?:^\s*(?:quem|como|quando|por\s+que|por\s+qu[êe]|quais|qual|onde|"
+    r"pode|podem|deve|devem|precisa|precisam|[ée]\s+obrigat[óo]rio|"
+    r"[ée]\s+permitido|[ée]\s+poss[íi]vel)\b.*\?\s*$|"
+    r"\b(?:quem\s+pode|como\s+deve|quando\s+deve|por\s+que\s+|quais\s+s[ãa]o\s+os\s+requisitos)\b)",
+    re.IGNORECASE,
+)
+
+
+def should_generate_explanation_for_free_text(text: str) -> bool:
+    """Decide deterministicamente se uma consulta livre exige explicação IA separada.
+
+    Retorna `False` (somente transcrição literal + referência, sem chamar Gemini) para:
+    - pedidos de transcrição literal;
+    - citações normativas diretas (ex.: `RBAC 43.3`, `F43.1`, `Apêndice E`);
+    - consultas curtas ou ambíguas sem intenção explicativa clara.
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        return False
+    if _EXPLICIT_EXPLANATION_RE.search(cleaned):
+        return True
+    if _LITERAL_ONLY_REQUEST_RE.search(cleaned):
+        return False
+    return bool(_ANALYTICAL_QUESTION_RE.search(cleaned))
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,55 +383,60 @@ class TelegramCommandRouter:
                 )
         return "\n".join(lines)
 
-    def _handle_rbac(self, args_text: str, *, actor_id: str, role: OperatorRole) -> str:
+    def _handle_rbac(
+        self, args_text: str, *, actor_id: str, role: OperatorRole
+    ) -> str | StructuredNormativeAnswer:
         if not args_text:
             return "Uso: /rbac <seção ou referência>\nExemplo: /rbac 43.3 ou /rbac RBAC 43.9(a)"
         query = args_text if "rbac" in args_text.lower() else f"RBAC {args_text}"
-        answer = self._chat_service.ask(
+        return self._chat_service.ask(
             question=query,
             filters=self._default_search_filter(),
             generate_explanation=False,
             actor_id=actor_id,
             actor_role=role.value,
         )
-        return answer.formatted_text
 
-    def _handle_buscar(self, args_text: str, *, actor_id: str, role: OperatorRole) -> str:
+    def _handle_buscar(
+        self, args_text: str, *, actor_id: str, role: OperatorRole
+    ) -> str | StructuredNormativeAnswer:
         if not args_text:
             return "Uso: /buscar <termo ou assunto>\nExemplo: /buscar manutencao preventiva"
-        answer = self._chat_service.ask(
+        return self._chat_service.ask(
             question=args_text,
             filters=self._default_search_filter(),
             generate_explanation=False,
             actor_id=actor_id,
             actor_role=role.value,
         )
-        return answer.formatted_text
 
-    def _handle_explicar(self, args_text: str, *, actor_id: str, role: OperatorRole) -> str:
+    def _handle_explicar(
+        self, args_text: str, *, actor_id: str, role: OperatorRole
+    ) -> str | StructuredNormativeAnswer:
         if not args_text:
             return (
                 "Uso: /explicar <seção ou pergunta>\n"
                 "Exemplo: /explicar 43.3 ou /explicar Quem pode executar manutenção preventiva?"
             )
-        answer = self._chat_service.ask(
+        return self._chat_service.ask(
             question=args_text,
             filters=self._default_search_filter(),
             generate_explanation=True,
             actor_id=actor_id,
             actor_role=role.value,
         )
-        return answer.formatted_text
 
-    def _handle_free_text(self, text: str, *, actor_id: str, role: OperatorRole) -> str:
-        answer = self._chat_service.ask(
+    def _handle_free_text(
+        self, text: str, *, actor_id: str, role: OperatorRole
+    ) -> StructuredNormativeAnswer:
+        wants_explanation = should_generate_explanation_for_free_text(text)
+        return self._chat_service.ask(
             question=text,
             filters=self._default_search_filter(),
-            generate_explanation=True,
+            generate_explanation=wants_explanation,
             actor_id=actor_id,
             actor_role=role.value,
         )
-        return answer.formatted_text
 
     def _dispatch_sync(
         self,
@@ -396,7 +446,7 @@ class TelegramCommandRouter:
         user_id: int,
         actor_id: str,
         role: OperatorRole,
-    ) -> str:
+    ) -> str | StructuredNormativeAnswer:
         if command == "/start":
             return self._handle_start(role)
         if command == "/help":
@@ -509,16 +559,15 @@ class TelegramCommandRouter:
         user_semaphore = self._get_user_semaphore(authorized_uid)
         async with self._global_semaphore, user_semaphore:
             try:
+                raw_reply: object
                 if run_sync is not None:
-                    raw_reply = str(
-                        run_sync(
-                            self._dispatch_sync,
-                            command=command,
-                            args_text=args_text,
-                            user_id=authorized_uid,
-                            actor_id=actor_id,
-                            role=authorized_role,
-                        )
+                    raw_reply = run_sync(
+                        self._dispatch_sync,
+                        command=command,
+                        args_text=args_text,
+                        user_id=authorized_uid,
+                        actor_id=actor_id,
+                        role=authorized_role,
                     )
                 else:
                     raw_reply = await asyncio.wait_for(
@@ -539,8 +588,13 @@ class TelegramCommandRouter:
                     role=authorized_role.value,
                     details={"command": command},
                 )
+                messages = (
+                    self._splitter.split_normative_answer(raw_reply)
+                    if isinstance(raw_reply, StructuredNormativeAnswer)
+                    else self._splitter.split(str(raw_reply))
+                )
                 return TelegramResponse(
-                    messages=self._splitter.split(raw_reply),
+                    messages=messages,
                     command=command,
                 )
             except TimeoutError:

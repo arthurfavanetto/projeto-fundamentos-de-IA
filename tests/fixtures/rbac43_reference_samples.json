@@ -4,13 +4,14 @@
   "amendment_number": "05",
   "official_url": "https://www.anac.gov.br/assuntos/legislacao/legislacao-1/rbha-e-rbac/rbac/rbac-43",
   "source_url": "https://pergamum.anac.gov.br/pergamum/vinculos/RBAC43EMD05.pdf",
-  "verified_at": "2026-11-20T22:55:00Z",
+  "verified_at": "2026-11-24T22:00:00Z",
   "expected_sha256": "5026d2da87fc3f55c61a6b5a20dd1f50d52a1367a8550897f3864074e1a46472",
   "expected_total_pages": 32,
-  "expected_root_sections_count": 19,
+  "expected_root_sections_count": 20,
   "samples": [
     {
       "section_number": "43.1",
+      "expected_title": "Aplicabilidade",
       "expected_pdf_pages": [2],
       "expected_printed_pages": ["2/32"],
       "expected_verbatim_fragments": [
@@ -23,6 +24,7 @@
     },
     {
       "section_number": "43.1-I",
+      "expected_title": "Definições",
       "expected_pdf_pages": [2, 3],
       "expected_printed_pages": ["2/32", "3/32"],
       "expected_verbatim_fragments": [
@@ -33,7 +35,19 @@
       ]
     },
     {
+      "section_number": "43.3",
+      "expected_title": "Pessoas autorizadas a executar manutenção, manutenção preventiva, reconstrução e alteração",
+      "expected_pdf_pages": [3, 4, 5, 6],
+      "expected_printed_pages": ["3/32", "4/32", "5/32", "6/32"],
+      "expected_verbatim_fragments": [
+        "43.3 Pessoas autorizadas a executar manutenção, manutenção preventiva, reconstrução e",
+        "alteração",
+        "(a) Somente uma pessoa em conformidade com o previsto nesta seção e na seção 43.17 pode"
+      ]
+    },
+    {
       "section_number": "43.12",
+      "expected_title": "Registros de manutenção – falsificação, reprodução ou alteração",
       "expected_pdf_pages": [11],
       "expected_printed_pages": ["11/32"],
       "expected_verbatim_fragments": [
@@ -44,7 +58,21 @@
       ]
     },
     {
+      "section_number": "43.13",
+      "expected_title": "Regras de execução (geral)",
+      "expected_pdf_pages": [11, 12],
+      "expected_printed_pages": ["11/32", "12/32"],
+      "expected_verbatim_fragments": [
+        "43.13 Regras de execução (geral)",
+        "no art. 120 da Lei nº 7565, de 19 de dezembro de 1986,"
+      ],
+      "forbidden_fragments": [
+        "Lei no 7565"
+      ]
+    },
+    {
       "section_number": "43.16",
+      "expected_title": "Limitações de aeronavegabilidade",
       "expected_pdf_pages": [13],
       "expected_printed_pages": ["13/32"],
       "expected_verbatim_fragments": [
@@ -52,6 +80,90 @@
         "Cada pessoa que estiver executando uma inspeção ou outra manutenção especificada em uma seção",
         "conforme especificações operativas emitidas segundo os RBAC nº 121 ou 135 ou,",
         "(Redação dada pela Resolução nº 612, de 09.03.2021)"
+      ]
+    },
+    {
+      "section_number": "B43.1",
+      "expected_title": "Registros de grandes reparos e grandes alterações",
+      "expected_pdf_pages": [21, 22],
+      "expected_printed_pages": ["21/32", "22/32"],
+      "expected_verbatim_fragments": [
+        "B43.1 Registros de grandes reparos e grandes alterações",
+        "Nome da Organização de Manutenção Nº Tel",
+        "Detalhes pertinentes ao reparo constam da ordem de serviço n°_______ (anexa)"
+      ],
+      "forbidden_fragments": [
+        "No Tel",
+        "APÊNDICE C DO RBAC 43"
+      ]
+    },
+    {
+      "section_number": "Apêndice C",
+      "expected_title": "[RESERVADO]",
+      "expected_pdf_pages": [23],
+      "expected_printed_pages": ["23/32"],
+      "expected_verbatim_fragments": [
+        "APÊNDICE C DO RBAC 43",
+        "[RESERVADO]"
+      ]
+    },
+    {
+      "section_number": "D43.1",
+      "expected_title": "Objetivos e detalhes de itens a serem incluídos nas inspeções anuais e inspeções de 100 horas (conforme aplicável para aeronaves específicas)",
+      "expected_pdf_pages": [23, 24, 25],
+      "expected_printed_pages": ["23/32", "24/32", "25/32"],
+      "expected_verbatim_fragments": [
+        "D43.1 Objetivos e detalhes de itens a serem incluídos nas inspeções anuais e inspeções de 100",
+        "horas (conforme aplicável para aeronaves específicas)"
+      ],
+      "forbidden_fragments": [
+        "TESTES E INSPEÇÕES DO SISTEMA DO ALTÍMETRO"
+      ]
+    },
+    {
+      "section_number": "E43.1",
+      "expected_title": "Testes e inspeções do sistema do altímetro",
+      "expected_pdf_pages": [26, 27, 28, 29, 30],
+      "expected_printed_pages": ["26/32", "27/32", "28/32", "29/32", "30/32"],
+      "expected_verbatim_fragments": [
+        "E43.1 Testes e inspeções do sistema do altímetro",
+        "TABELA I",
+        "TABELA II",
+        "Vazamento da caixa ± 100 30,48",
+        "1.000 304,8 +70 +21,3",
+        "30,99 1.049,5 +974 296,9"
+      ],
+      "forbidden_fragments": [
+        "TESTES E INSPEÇÕES NO TRANSPONDER",
+        "±70",
+        "±21,3",
+        "±531",
+        "±893",
+        "±974"
+      ]
+    },
+    {
+      "section_number": "F43.1",
+      "expected_title": "Testes e inspeções no transponder",
+      "expected_pdf_pages": [31, 32],
+      "expected_printed_pages": ["31/32", "32/32"],
+      "expected_verbatim_fragments": [
+        "F43.1 Testes e inspeções no transponder",
+        "frequência de resposta do sistema é de 1.090±3 MHz.",
+        "frequência de resposta é 1.090±3 MHz.",
+        "resposta de 1.090±1 MHz",
+        "a frequência de resposta é 1.090±1 MHz.",
+        "com uma razão de 235±5 interrogações por",
+        "do receptor do sistema é -73±4 dBm ou que para",
+        "(tipo P6), é -74±3 dBm usando um equipamento",
+        "(iii) utilizando um sinal irradiado; e",
+        "(k) Registros. Atender à seção 43.9 do RBAC 43 no que diz respeito ao conteúdo, forma e"
+      ],
+      "forbidden_fragments": [
+        "1.090+3 MHz",
+        "235+5 interrogações",
+        "-73+4 dBm",
+        "-74+3 dBm"
       ]
     }
   ]

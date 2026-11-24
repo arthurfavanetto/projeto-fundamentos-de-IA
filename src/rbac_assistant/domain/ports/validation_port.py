@@ -50,6 +50,12 @@ class TextQualityCheckerPort(Protocol):
         original_text: str,
         normalized_text: str,
         min_chars: int = 50,
+        unresolved_glyph_anomalies: Sequence[str] = (),
+        correction_issues: Sequence[str] = (),
+        tables: Sequence[NormativeTable] = (),
+        table_ownership_issues: Sequence[str] = (),
+        expected_incoming_open_parens: int = 0,
+        allow_outgoing_open_parens: int = 0,
     ) -> QualityMetrics:
         """Avalia qualidade e integridade de página extraída (não equivale a revisão humana)."""
 

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import structlog
 
+from rbac_assistant.domain.entities.normative_unit import render_structured_table
 from rbac_assistant.domain.entities.rag import (
     EvidenceTrustLevel,
     FusedEvidence,
@@ -161,13 +162,42 @@ class NormativeChatService:
                 has_blocked = True
                 blocked_count = max(len(retrieval.blocked_version_ids), 1)
             elif retrieval.blocked_evidences:
-                explanation = (
-                    "Não há conteúdo normativo autorizado para responder a esta consulta: "
-                    "as páginas correspondentes não possuem aprovação integral para "
-                    "transcrição literal. Por segurança e fidelidade normativa, nenhum excerto "
-                    "pendente é exibido nem enviado ao modelo generativo."
+                has_table_ownership_block = any(
+                    ev.warning_message
+                    and "PROPRIEDADE TABULAR BLOQUEADA" in ev.warning_message
+                    for ev in retrieval.blocked_evidences
                 )
-                outcome = "refused_blocked_only"
+                has_table_integrity_block = any(
+                    ev.warning_message
+                    and "INTEGRIDADE TABULAR BLOQUEADA" in ev.warning_message
+                    for ev in retrieval.blocked_evidences
+                )
+                if has_table_ownership_block:
+                    explanation = (
+                        "Não foi possível apresentar esta seção com garantia de fidelidade "
+                        "literal: há tabela na página sem associação proprietária única e "
+                        "confiável à unidade normativa consultada. Por política fail-closed, "
+                        "o assistente bloqueia a resposta e não aciona o modelo generativo."
+                    )
+                    outcome = "refused_table_ownership_blocked"
+                elif has_table_integrity_block:
+                    explanation = (
+                        "Não foi possível apresentar esta seção com garantia de fidelidade "
+                        "literal: a tabela ou formulário normativo associado apresentou falha de "
+                        "integridade estrutural (ex.: ausência de cabeçalhos/unidades ou colunas "
+                        "inconsistentes). Por política fail-closed, o assistente recusa exibir "
+                        "valores tabulares potencialmente ambíguos e não aciona o modelo "
+                        "generativo."
+                    )
+                    outcome = "refused_table_integrity_failed"
+                else:
+                    explanation = (
+                        "Não há conteúdo normativo autorizado para responder a esta consulta: "
+                        "as páginas correspondentes não possuem aprovação integral para "
+                        "transcrição literal. Por segurança e fidelidade normativa, nenhum excerto "
+                        "pendente é exibido nem enviado ao modelo generativo."
+                    )
+                    outcome = "refused_blocked_only"
                 has_blocked = True
                 blocked_count = len(retrieval.blocked_evidences)
             else:
@@ -285,11 +315,18 @@ class NormativeChatService:
             evidence_map[ev_id] = ev
             evidences_sent_labels.append(f"{ev_id}:{ev.chunk_id}")
             header = format_evidence_reference(ev)
+            ev_text_for_llm = ev.original_text
+            if ev.tables:
+                rendered_tbls = "\n\n".join(
+                    rendered for tbl in ev.tables if (rendered := render_structured_table(tbl))
+                )
+                if rendered_tbls:
+                    ev_text_for_llm = f"{ev_text_for_llm}\n\n{rendered_tbls}"
             block, flagged = self._prompt_guard.wrap_evidence_for_prompt(
                 index=idx,
                 header=header,
                 trust_label=ev.trust_level.value,
-                text=ev.original_text,
+                text=ev_text_for_llm,
                 evidence_id=ev_id,
                 chunk_id=ev.chunk_id,
             )

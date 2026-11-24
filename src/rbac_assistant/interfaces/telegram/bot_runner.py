@@ -34,6 +34,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
+    Defaults,
     MessageHandler,
     filters,
 )
@@ -330,6 +331,7 @@ class TelegramBotRunner:
             app = (
                 ApplicationBuilder()
                 .token(self._token)
+                .defaults(Defaults(parse_mode=None))
                 .concurrent_updates(True)
                 .build()
             )

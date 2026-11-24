@@ -61,6 +61,108 @@ def test_text_quality_checker_detects_clean_and_corrupted_text() -> None:
 
 
 @pytest.mark.unit
+def test_text_quality_checker_blocks_unbalanced_parentheses_and_validates_cross_page() -> None:
+    """Blocker 3: parênteses desequilibrados reprovam qualidade automatizada (fail-closed)."""
+    from rbac_assistant.infrastructure.pdf.text_quality_checker import (
+        analyze_parentheses_balance,
+        compute_cross_page_parentheses_context,
+    )
+
+    checker = TextQualityChecker()
+    val_svc = ValidationService(policy=ValidationPolicy.STRICT_ALL_PAGES)
+
+    # 1. Parênteses equilibrados -> aprovado na validação automatizada
+    balanced = "43.3 Pessoas autorizadas (a)(1)(i) a executar manutenção (conforme RBAC 43)."
+    q_ok = checker.evaluate(original_text=balanced, normalized_text=balanced, min_chars=20)
+    assert q_ok.unbalanced_parentheses is False
+    assert q_ok.passed_automated_checks is True
+    assert q_ok.issues == ()
+
+    # 2. Parêntese aberto sem fechamento -> BLOQUEIA qualidade automatizada e não gera aprovação
+    unclosed = "43.3 Pessoas autorizadas (a) a executar manutenção (conforme o RBAC 43."
+    q_unclosed = checker.evaluate(original_text=unclosed, normalized_text=unclosed, min_chars=20)
+    assert q_unclosed.unbalanced_parentheses is True
+    assert q_unclosed.passed_automated_checks is False
+    assert any("parêntese" in i.lower() for i in q_unclosed.issues)
+    status_unclosed = val_svc.determine_initial_page_status(
+        extraction_method=ExtractionMethod.NATIVE_PDF,
+        quality_metrics=q_unclosed,
+    )
+    assert status_unclosed == PageValidationStatus.PENDING_REVIEW
+    assert status_unclosed != PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION
+
+    # 3. Parêntese de fechamento sem abertura -> BLOQUEIA
+    extra_close = "43.3 Pessoas autorizadas a executar manutenção preventiva) conforme norma."
+    q_close = checker.evaluate(
+        original_text=extra_close, normalized_text=extra_close, min_chars=20
+    )
+    assert q_close.unbalanced_parentheses is True
+    assert q_close.passed_automated_checks is False
+
+    # 4. Parênteses invertidos ')(' (mesma contagem, mas pilha negativa!) -> BLOQUEIA
+    inverted = "43.3 Texto com parênteses invertidos ) em manutenção preventiva ( anômala."
+    is_unbal, _end_depth, inv_issue = analyze_parentheses_balance(inverted)
+    assert is_unbal is True and inv_issue is not None
+    q_inv = checker.evaluate(original_text=inverted, normalized_text=inverted, min_chars=20)
+    assert q_inv.unbalanced_parentheses is True
+    assert q_inv.passed_automated_checks is False
+
+    # 5a. Parêntese legítimo atravessando fronteira de página e fechado na página seguinte -> OK
+    cross_pages_ok = [
+        "43.12 Registros de manutenção (inclui descrição da aeronave na página seguinte",
+        "e número de série conforme modelo oficial ANAC) devidamente arquivados.",
+    ]
+    ctx_ok = compute_cross_page_parentheses_context(cross_pages_ok)
+    assert ctx_ok == [(0, 1), (1, 0)]
+    for txt, (inc, out) in zip(cross_pages_ok, ctx_ok, strict=True):
+        q_cross = checker.evaluate(
+            original_text=txt,
+            normalized_text=txt,
+            min_chars=20,
+            expected_incoming_open_parens=inc,
+            allow_outgoing_open_parens=out,
+        )
+        assert q_cross.unbalanced_parentheses is False
+        assert q_cross.passed_automated_checks is True
+
+    # 5b. Parêntese aberto sem fechamento em todo o documento -> NÃO autoriza saída -> BLOQUEIA
+    cross_pages_broken = [
+        "43.12 Registros de manutenção (aberto sem fechamento no documento inteiro",
+        "segunda página sem nenhum parêntese de fechamento correspondente.",
+    ]
+    ctx_broken = compute_cross_page_parentheses_context(cross_pages_broken)
+    assert ctx_broken == [(0, 0), (0, 0)]
+    q_broken_p1 = checker.evaluate(
+        original_text=cross_pages_broken[0],
+        normalized_text=cross_pages_broken[0],
+        min_chars=20,
+        expected_incoming_open_parens=ctx_broken[0][0],
+        allow_outgoing_open_parens=ctx_broken[0][1],
+    )
+    assert q_broken_p1.unbalanced_parentheses is True
+    assert q_broken_p1.passed_automated_checks is False
+
+    # 6. Falha de propriedade tabular e anomalia crítica -> nunca gera aprovação humana
+    q_own = checker.evaluate(
+        original_text=balanced,
+        normalized_text=balanced,
+        min_chars=20,
+        table_ownership_issues=("Tabela sem proprietário confirmado",),
+    )
+    assert q_own.passed_automated_checks is False
+    init_status = val_svc.determine_initial_page_status(
+        extraction_method=ExtractionMethod.NATIVE_PDF,
+        quality_metrics=q_own,
+    )
+    assert init_status == PageValidationStatus.PENDING_REVIEW
+    assert init_status not in (
+        PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
+        PageValidationStatus.MANUALLY_APPROVED,
+        PageValidationStatus.NATIVE_QUALITY_CHECKED,
+    )
+
+
+@pytest.mark.unit
 def test_validation_service_distinguishes_native_quality_checked_from_human_approval() -> None:
     svc = ValidationService(policy=ValidationPolicy.REVIEW_ON_DEMAND)
     p1 = _make_page(num=2, status=PageValidationStatus.NATIVE_QUALITY_CHECKED)

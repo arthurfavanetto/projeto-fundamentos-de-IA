@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
+from rbac_assistant.domain.entities.normative_unit import NormativeTable
 from rbac_assistant.domain.entities.regulatory_document import DocumentType, VersionStatus
 from rbac_assistant.domain.entities.regulatory_page import PageValidationStatus
 
@@ -231,6 +232,7 @@ class FusedEvidence:
     structural_rank: int | None = None
     rerank_score: float | None = None
     warning_message: str | None = None
+    tables: tuple[NormativeTable, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +277,8 @@ class StructuredNormativeAnswer:
     used_evidence_ids: tuple[str, ...] = ()
     discarded_citations: tuple[str, ...] = ()
     diagnostics: RetrievalDiagnostics | None = None
+    literal_excerpts: tuple[str, ...] = ()
+    structured_tables_text: str | None = None
 
     def __post_init__(self) -> None:
         if self.normative_text is not None and not self.is_literal_validated:
