@@ -160,3 +160,45 @@ def test_docker_contracts_enforce_pinning_non_root_and_network_isolation(repo_ro
         assert svc["logging"]["driver"] == "json-file"
         assert svc["logging"]["options"]["max-size"] == "10m"
         assert svc["logging"]["options"]["max-file"] == "5"
+
+
+@pytest.mark.unit
+def test_dockerignore_excludes_private_access_config_and_secrets_preserving_runtime_configs(
+    repo_root: Path,
+) -> None:
+    dockerignore_lines = [
+        line.strip()
+        for line in (repo_root / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    entries = set(dockerignore_lines)
+
+    # Arquivo operacional privado e demais segredos/dados locais devem ficar fora do build context
+    required_exclusions = {
+        "config/access_control.yaml",
+        ".env",
+        ".env.*",
+        "data/",
+        "logs/",
+        "*.pdf",
+        "*.log",
+        "*.jsonl",
+    }
+    assert required_exclusions.issubset(entries)
+
+    # A pasta config inteira NÃO pode ser excluída (arquivos de runtime/avaliações são copiados)
+    forbidden_broad_exclusions = {"config", "config/", "config/*", "config/**"}
+    assert entries.isdisjoint(forbidden_broad_exclusions)
+
+    # Dockerfile realiza COPY explícito apenas dos artefatos versionados de config/
+    app_df = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+    assert "config/settings.yaml" in app_df
+    assert "config/regulations_catalog.yaml" in app_df
+    assert "config/prompts" in app_df
+    assert "config/evaluations" in app_df
+    assert "access_control.yaml" not in app_df
+    assert "COPY --chown=10001:10001 config ./config" not in app_df
+
+    # Compose continua montando ./config:/app/config:ro em runtime (independente do .dockerignore)
+    compose = yaml.safe_load((repo_root / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert "./config:/app/config:ro" in compose["services"]["rbac-bot"]["volumes"]

@@ -21,6 +21,7 @@ htmlcov/
 # Segredos e dados locais (injetados via env/volumes em runtime)
 .env
 .env.*
+config/access_control.yaml
 data/
 logs/
 *.pdf
