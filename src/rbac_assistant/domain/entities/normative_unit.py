@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -11,6 +12,15 @@ from rbac_assistant.domain.exceptions import UnvalidatedPageBlockedError
 
 _PURE_NUMERIC_CELL_RE = re.compile(r"^[+\-±]?\s*\d+(?:[.,]\d+)*$")
 _CID_TOKEN_RE = re.compile(r"\(cid:\d+\)", re.IGNORECASE)
+
+
+class TableOwnershipStatus(StrEnum):
+    """Estado explícito da associação proprietária de uma tabela a uma unidade normativa."""
+
+    CONFIRMED = "confirmed"
+    PAGE_GLOBAL = "page_global"
+    AMBIGUOUS = "ambiguous"
+    UNASSIGNED = "unassigned"
 
 
 class ExtractionMethod(StrEnum):
@@ -167,7 +177,7 @@ class TableCellGeometry:
 
 @dataclass(frozen=True, slots=True)
 class NormativeTable:
-    """Tabela ou formulário normativo preservando células, geometria e fidelidade estrutural."""
+    """Tabela ou formulário normativo preservando células, geometria e associação proprietária."""
 
     table_id: str
     version_id: str
@@ -182,9 +192,13 @@ class NormativeTable:
     has_merged_cells: bool = False
     visual_layout_preserved: bool = True
     layout_fidelity_note: str = ""
+    ownership_status: str = ""
+    owner_section_number: str = ""
+    ownership_note: str = ""
 
     def metadata_to_dict(self) -> dict[str, object]:
-        """Serializa metadados estruturais e geométricos da tabela para JSON."""
+        """Serializa metadados estruturais, geométricos e de propriedade da tabela para JSON."""
+        eff_ownership = effective_table_ownership_status(self).value
         return {
             "bbox": list(self.bbox) if self.bbox is not None else None,
             "cells": [cell.to_dict() for cell in self.cells],
@@ -193,7 +207,133 @@ class NormativeTable:
             "has_merged_cells": self.has_merged_cells,
             "visual_layout_preserved": self.visual_layout_preserved,
             "layout_fidelity_note": self.layout_fidelity_note,
+            "ownership_status": eff_ownership,
+            "owner_section_number": self.owner_section_number,
+            "ownership_note": self.ownership_note,
         }
+
+
+def effective_table_ownership_status(table: NormativeTable) -> TableOwnershipStatus:
+    """Determina o estado efetivo de propriedade da tabela (nunca infere `page_global`)."""
+    raw = table.ownership_status.strip().lower()
+    if raw:
+        try:
+            return TableOwnershipStatus(raw)
+        except ValueError:
+            return TableOwnershipStatus.AMBIGUOUS
+    if table.unit_id and table.unit_id.strip():
+        return TableOwnershipStatus.CONFIRMED
+    return TableOwnershipStatus.UNASSIGNED
+
+
+def validate_table_ownership(table: NormativeTable) -> tuple[str, ...]:
+    """Valida exclusivamente a confiabilidade da associação proprietária (fail-closed)."""
+    status = effective_table_ownership_status(table)
+    has_unit_id = bool(table.unit_id and table.unit_id.strip())
+    if status == TableOwnershipStatus.CONFIRMED:
+        if not has_unit_id:
+            return (
+                f"Tabela '{table.table_id}' (p.{table.pdf_page_number}) marcada como "
+                "'confirmed' sem unit_id proprietário válido.",
+            )
+        return ()
+    if status == TableOwnershipStatus.PAGE_GLOBAL:
+        if has_unit_id:
+            return (
+                f"Tabela '{table.table_id}' (p.{table.pdf_page_number}) marcada como "
+                "'page_global', porém vinculada a unit_id específico.",
+            )
+        return ()
+    if status == TableOwnershipStatus.AMBIGUOUS:
+        detail = f" ({table.ownership_note})" if table.ownership_note else ""
+        return (
+            f"Tabela '{table.table_id}' (p.{table.pdf_page_number}) possui associação "
+            f"proprietária ambígua{detail}.",
+        )
+    detail = f" ({table.ownership_note})" if table.ownership_note else ""
+    return (
+        f"Tabela '{table.table_id}' (p.{table.pdf_page_number}) sem associação "
+        f"proprietária confiável (unassigned){detail}.",
+    )
+
+
+def resolve_section_tables(
+    *,
+    page_tables: Sequence[NormativeTable],
+    unit_id: str | None,
+    section_number: str,
+) -> tuple[tuple[NormativeTable, ...], tuple[str, ...], tuple[str, ...]]:
+    """Resolve tabelas pertencentes à seção separando validação de propriedade e integridade.
+
+    Retorna `(tabelas_validas_da_secao, bloqueios_propriedade, bloqueios_integridade)`.
+    Regras fail-closed:
+    - Tabelas com `ownership_status='confirmed'` de OUTRA unidade na mesma página são ignoradas
+      (jamais vazam para a seção errada).
+    - Tabelas sem proprietário confiável (`unassigned` ou `ambiguous`, inclusive legado com
+      `unit_id=None` sem marcação explícita `page_global`) bloqueiam a resposta da página.
+    - Integridade estrutural (`validate_table_integrity`) é verificada separadamente e nunca
+      substitui a validação de propriedade.
+    """
+    owned_candidates: list[NormativeTable] = []
+    ownership_issues: list[str] = []
+    target_uid = (unit_id or "").strip()
+    target_sec = section_number.strip().lower()
+
+    for tbl in page_tables:
+        status = effective_table_ownership_status(tbl)
+        tbl_uid = (tbl.unit_id or "").strip()
+        tbl_sec = tbl.owner_section_number.strip().lower()
+
+        if status == TableOwnershipStatus.CONFIRMED:
+            if not tbl_uid:
+                ownership_issues.append(
+                    f"Tabela '{tbl.table_id}' (p.{tbl.pdf_page_number}) marcada como "
+                    "'confirmed' sem unit_id proprietário."
+                )
+                continue
+            if target_uid and tbl_uid != target_uid:
+                # Pertence estritamente a outra unidade normativa na mesma página
+                continue
+            if not target_uid:
+                if tbl_sec and tbl_sec != target_sec:
+                    continue
+                if not tbl_sec:
+                    ownership_issues.append(
+                        f"Tabela '{tbl.table_id}' (p.{tbl.pdf_page_number}) não pôde ter "
+                        f"propriedade confirmada para a seção '{section_number}'."
+                    )
+                    continue
+            if tbl_sec and tbl_sec != target_sec:
+                ownership_issues.append(
+                    f"Tabela '{tbl.table_id}' (p.{tbl.pdf_page_number}) possui divergência "
+                    f"de proprietário (unit_id={tbl_uid!r}, owner_section="
+                    f"{tbl.owner_section_number!r} vs seção consultada {section_number!r})."
+                )
+                continue
+            owned_candidates.append(tbl)
+        elif status == TableOwnershipStatus.PAGE_GLOBAL:
+            if tbl_uid:
+                ownership_issues.append(
+                    f"Tabela '{tbl.table_id}' (p.{tbl.pdf_page_number}) marcada como "
+                    "'page_global' com unit_id preenchido."
+                )
+                continue
+            owned_candidates.append(tbl)
+        else:
+            # UNASSIGNED ou AMBIGUOUS: nunca associa automaticamente nem descarta em silêncio
+            detail = f" — {tbl.ownership_note}" if tbl.ownership_note else ""
+            ownership_issues.append(
+                f"Tabela '{tbl.table_id}' (p.{tbl.pdf_page_number}) com propriedade "
+                f"'{status.value}' bloqueia uso confiável na seção '{section_number}'{detail}."
+            )
+
+    integrity_issues: list[str] = []
+    for tbl in owned_candidates:
+        integrity_issues.extend(validate_table_integrity(tbl))
+
+    if ownership_issues or integrity_issues:
+        return ((), tuple(ownership_issues), tuple(integrity_issues))
+    return (tuple(owned_candidates), (), ())
 
 
 def validate_table_integrity(table: NormativeTable) -> tuple[str, ...]:

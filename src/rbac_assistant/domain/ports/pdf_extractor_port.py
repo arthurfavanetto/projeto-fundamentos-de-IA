@@ -44,6 +44,9 @@ class ExtractedTableData:
     has_merged_cells: bool = False
     visual_layout_preserved: bool = True
     layout_fidelity_note: str = ""
+    ownership_status: str = "unassigned"
+    owner_unit_id: str | None = None
+    owner_section_number: str = ""
 
 
 @dataclass(frozen=True, slots=True)

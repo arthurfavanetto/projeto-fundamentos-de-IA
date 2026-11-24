@@ -9,6 +9,7 @@ from rbac_assistant.domain.entities.normative_unit import (
     NormativeSection,
     NormativeUnitType,
     StructureStatus,
+    resolve_section_tables,
 )
 from rbac_assistant.domain.entities.regulatory_document import ValidationPolicy
 from rbac_assistant.domain.ports.document_repository_port import DocumentRepositoryPort
@@ -94,7 +95,25 @@ class GetNormativeSectionUseCase:
         page_numbers = sorted({p for u in units for p in u.page_numbers})
         pages_by_num = {p.pdf_page_number: p for p in all_version_pages}
         pages = [pages_by_num[p_num] for p_num in page_numbers if p_num in pages_by_num]
-        tables = tuple(self._repository.list_tables(version.version_id, page_numbers=page_numbers))
+        raw_page_tables = self._repository.list_tables(
+            version.version_id, page_numbers=page_numbers
+        )
+        tables, ownership_issues, integrity_issues = resolve_section_tables(
+            page_tables=raw_page_tables,
+            unit_id=primary.unit_id,
+            section_number=primary.section_number,
+        )
+        if ownership_issues or integrity_issues:
+            block_details = "; ".join([*ownership_issues, *integrity_issues][:3])
+            return SectionLookupResultDTO(
+                found=False,
+                section=None,
+                auxiliary_unreviewed_available=False,
+                message=(
+                    f"Seção '{primary.section_number}' bloqueada por política fail-closed de "
+                    f"tabelas: {block_details}"
+                ),
+            )
         references = tuple(primary.references)
 
         structure_status = (

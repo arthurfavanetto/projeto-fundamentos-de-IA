@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 from rbac_assistant.domain.entities.normative_unit import render_structured_table
@@ -23,6 +24,17 @@ _TRUST_LABELS: dict[EvidenceTrustLevel, str] = {
 }
 
 EXTERNAL_EXCERPT_SEPARATOR = "\n\n[SEPARADOR EXTERNO ENTRE TRECHOS NORMATIVOS]\n\n"
+LITERAL_START_MARKER = "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>"
+LITERAL_END_MARKER = "<<<FIM_TRANSCRIÇÃO_LITERAL>>>"
+_LITERAL_EXTRACT_RE = re.compile(
+    re.escape(LITERAL_START_MARKER) + r"\n(.*?)\n" + re.escape(LITERAL_END_MARKER),
+    re.DOTALL,
+)
+
+
+def extract_literal_excerpts_from_text(rendered_text: str) -> tuple[str, ...]:
+    """Extrai exatamente os trechos normativos autoritativos delimitados no texto renderizado."""
+    return tuple(match.group(1) for match in _LITERAL_EXTRACT_RE.finditer(rendered_text))
 
 
 def format_evidence_reference(evidence: FusedEvidence) -> str:
@@ -55,6 +67,8 @@ def render_structured_answer_text(
     references: Sequence[str],
     observations: Sequence[str],
     structured_tables_text: str | None = None,
+    include_explanation_block: bool = True,
+    explanation_heading: str = "=== EXPLICAÇÃO (GERADA POR IA) ===",
 ) -> str:
     """Monta representação textual com blocos separados, sem nunca expor conteúdo preliminar."""
     del preliminary_excerpt  # Excertos preliminares não revisados nunca são exibidos
@@ -77,7 +91,8 @@ def render_structured_answer_text(
             f"{structured_tables_text}"
         )
 
-    sections.append(f"=== EXPLICAÇÃO (GERADA POR IA) ===\n{explanation}")
+    if include_explanation_block and explanation:
+        sections.append(f"{explanation_heading}\n{explanation}")
 
     if references:
         ref_lines = "\n".join(f"- {ref}" for ref in references)
@@ -128,7 +143,8 @@ class NormativeResponseFormatter:
         if validated:
             normative_blocks = [
                 f"[IDENTIFICAÇÃO EXTERNA — {ev.document_type} {ev.regulation_number} | "
-                f"Emenda {ev.amendment_number} | Seção {ev.section_number}]\n{ev.original_text}"
+                f"Emenda {ev.amendment_number} | Seção {ev.section_number}]\n"
+                f"{LITERAL_START_MARKER}\n{ev.original_text}\n{LITERAL_END_MARKER}"
                 for ev in validated
             ]
             normative_text = EXTERNAL_EXCERPT_SEPARATOR.join(normative_blocks)
@@ -167,6 +183,17 @@ class NormativeResponseFormatter:
             )
 
         deduped_observations = tuple(dict.fromkeys(observations))
+
+        # Em consultas puramente literais sem solicitação ao LLM, não inclui bloco de IA
+        is_literal_only_no_llm = (
+            found and used_fallback_without_llm and generation_model is None
+        )
+        include_explanation_block = not is_literal_only_no_llm
+        explanation_heading = (
+            "=== EXPLICAÇÃO (GERADA POR IA) ==="
+            if found
+            else "=== INFORMAÇÃO / RECUSA FUNDAMENTADA ==="
+        )
         formatted_text = render_structured_answer_text(
             normative_text=normative_text,
             preliminary_excerpt=None,
@@ -174,6 +201,8 @@ class NormativeResponseFormatter:
             references=references,
             observations=deduped_observations,
             structured_tables_text=structured_tables_text,
+            include_explanation_block=include_explanation_block,
+            explanation_heading=explanation_heading,
         )
 
         return StructuredNormativeAnswer(

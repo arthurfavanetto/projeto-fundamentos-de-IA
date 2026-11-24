@@ -4,41 +4,168 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
-from rbac_assistant.domain.entities.normative_unit import ExtractionMethod
+from rbac_assistant.domain.entities.normative_unit import (
+    ExtractionMethod,
+    NormativeTable,
+    effective_table_ownership_status,
+)
+
+CANONICAL_PAGE_HASH_SCHEMA_VERSION = "page_canonical_v2"
+
+
+def _canonical_number(value: float) -> float:
+    num = float(value)
+    if not math.isfinite(num):
+        raise ValueError(f"Coordenada geométrica inválida para hash canônico: {value!r}")
+    rounded = round(num, 2)
+    return 0.0 if rounded == 0.0 else rounded
+
+
+def _canonical_bbox(
+    bbox: tuple[float, float, float, float] | Sequence[float] | None,
+) -> list[float] | None:
+    if bbox is None:
+        return None
+    if len(bbox) != 4:
+        raise ValueError(f"bbox inválido para hash canônico: esperado 4 valores, obtido {bbox!r}")
+    return [_canonical_number(v) for v in bbox]
+
+
+def _canonicalize_table_entry(table: object, order_index: int) -> dict[str, Any]:
+    """Serializa uma tabela estruturada ou matriz bruta em representação canônica determinística.
+
+    Exclui explicitamente identificadores aleatórios/internos de banco (`table_id`) e timestamps.
+    """
+    if hasattr(table, "rows") and not isinstance(table, (str, bytes)):
+        raw_rows = getattr(table, "rows", ())
+        canonical_rows = [[str(cell) for cell in row] for row in raw_rows]
+        row_count = len(canonical_rows)
+        col_count = len(canonical_rows[0]) if canonical_rows else 0
+        header_row_count = int(getattr(table, "header_row_count", 1))
+        table_kind = str(getattr(table, "table_kind", "data_table"))
+        caption = str(getattr(table, "caption", ""))
+        has_merged_cells = bool(getattr(table, "has_merged_cells", False))
+        visual_layout_preserved = bool(getattr(table, "visual_layout_preserved", True))
+        layout_fidelity_note = str(getattr(table, "layout_fidelity_note", ""))
+        bbox = _canonical_bbox(getattr(table, "bbox", None))
+
+        if isinstance(table, NormativeTable):
+            ownership_status = effective_table_ownership_status(table).value
+            owner_unit_id = table.unit_id if table.unit_id else None
+            owner_section_number = str(table.owner_section_number)
+        else:
+            raw_uid = getattr(table, "owner_unit_id", getattr(table, "unit_id", None))
+            owner_unit_id = str(raw_uid) if raw_uid else None
+            raw_own = str(getattr(table, "ownership_status", "")).strip().lower()
+            ownership_status = raw_own or ("confirmed" if owner_unit_id else "unassigned")
+            owner_section_number = str(getattr(table, "owner_section_number", ""))
+
+        raw_cells = getattr(table, "cells", ()) or ()
+        canonical_cells = [
+            {
+                "bbox": _canonical_bbox(getattr(c, "bbox", None)),
+                "col_index": int(getattr(c, "col_index", 0)),
+                "col_span": int(getattr(c, "col_span", 1)),
+                "is_empty": bool(getattr(c, "is_empty", False)),
+                "row_index": int(getattr(c, "row_index", 0)),
+                "row_span": int(getattr(c, "row_span", 1)),
+                "text": str(getattr(c, "text", "")),
+            }
+            for c in sorted(
+                raw_cells,
+                key=lambda item: (
+                    int(getattr(item, "row_index", 0)),
+                    int(getattr(item, "col_index", 0)),
+                ),
+            )
+        ]
+    else:
+        # Compatibilidade com matrizes brutas `Sequence[Sequence[str]]`
+        canonical_rows = [
+            [str(cell) for cell in row]
+            for row in table  # type: ignore[attr-defined]
+        ]
+        row_count = len(canonical_rows)
+        col_count = len(canonical_rows[0]) if canonical_rows else 0
+        header_row_count = 1 if row_count > 0 else 0
+        table_kind = "data_table"
+        caption = ""
+        has_merged_cells = False
+        visual_layout_preserved = True
+        layout_fidelity_note = ""
+        bbox = None
+        ownership_status = "unassigned"
+        owner_unit_id = None
+        owner_section_number = ""
+        canonical_cells = []
+
+    hdr_slice_end = max(0, min(header_row_count, row_count))
+    return {
+        "bbox": bbox,
+        "caption": caption,
+        "cells": canonical_cells,
+        "col_count": col_count,
+        "has_merged_cells": has_merged_cells,
+        "header_row_count": header_row_count,
+        "header_rows": canonical_rows[:hdr_slice_end],
+        "layout_fidelity_note": layout_fidelity_note,
+        "order_index": order_index,
+        "owner_section_number": owner_section_number,
+        "owner_unit_id": owner_unit_id,
+        "ownership_status": ownership_status,
+        "row_count": row_count,
+        "rows": canonical_rows,
+        "table_kind": table_kind,
+        "visual_layout_preserved": visual_layout_preserved,
+    }
+
+
+def build_canonical_page_hash_payload(
+    original_text: str,
+    tables: Sequence[object] = (),
+) -> dict[str, Any]:
+    """Constrói payload JSON canônico (`page_canonical_v2`) para texto e estrutura tabular."""
+    canonical_tables = [
+        _canonicalize_table_entry(table, order_index=idx) for idx, table in enumerate(tables)
+    ]
+    return {
+        "original_text": original_text,
+        "schema_version": CANONICAL_PAGE_HASH_SCHEMA_VERSION,
+        "table_count": len(canonical_tables),
+        "tables": canonical_tables,
+    }
 
 
 def compute_page_content_hash(
     original_text: str,
-    tables: Sequence[Sequence[Sequence[str]]] = (),
+    tables: Sequence[object] = (),
 ) -> str:
-    """Calcula fingerprint SHA-256 determinístico combinando `original_text` e tabelas.
+    """Calcula fingerprint SHA-256 canônico (`page_canonical_v2`) do texto e estrutura tabular.
 
     Garantias de integridade:
-    - Utiliza exclusivamente `original_text` (nunca `normalized_text`) e a estrutura
-      exata das tabelas extraídas da página.
-    - Preserva Unicode integral (`ensure_ascii=False`), fronteiras de células, ordem de
-      tabelas, ordem de linhas, ordem de colunas e células vazias via JSON canônico UTF-8.
-    - Independente do `source_hash` binário do PDF.
+    - Utiliza exclusivamente `original_text` (nunca `normalized_text`), sem normalização genérica.
+    - Inclui versão explícita de esquema (`page_canonical_v2`), contagem/ordem visual de tabelas,
+      dimensões, células vazias, fronteiras, cabeçalhos, `header_row_count`, `row_span`,
+      `col_span`, células mescladas, `table_kind`, legenda, associação proprietária e geometria.
+    - Exclui IDs aleatórios de banco, timestamps e metadados instáveis.
+    - Serialização JSON canônica UTF-8 (`ensure_ascii=False`, `sort_keys=True`, `allow_nan=False`).
     """
-    canonical_tables = [
-        [[str(cell) for cell in row] for row in table_rows]
-        for table_rows in tables
-    ]
-    payload = json.dumps(
-        {
-            "original_text": original_text,
-            "tables": canonical_tables,
-        },
+    payload = build_canonical_page_hash_payload(original_text, tables)
+    serialized = json.dumps(
+        payload,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
+        allow_nan=False,
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 class PageValidationStatus(StrEnum):

@@ -298,6 +298,9 @@ def _deserialize_table_row(row: sqlite3.Row) -> NormativeTable:
         has_merged_cells=bool(meta.get("has_merged_cells", False)),
         visual_layout_preserved=bool(meta.get("visual_layout_preserved", True)),
         layout_fidelity_note=str(meta.get("layout_fidelity_note", "")),
+        ownership_status=str(meta.get("ownership_status", "")),
+        owner_section_number=str(meta.get("owner_section_number", "")),
+        ownership_note=str(meta.get("ownership_note", "")),
     )
 
 

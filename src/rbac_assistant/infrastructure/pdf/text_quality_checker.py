@@ -3,8 +3,9 @@
 IMPORTANTE: Este verificador produz a classificação automatizada
 `native_quality_checked` — jamais deve ser confundido com revisão humana.
 Sob política fail-closed, qualquer anomalia de codificação, glifo não resolvido,
-falha de correção verificada ou corrupção estrutural de tabela bloqueia a marcação
-`passed_automated_checks=True` e mantém a página em `pending_review`.
+parênteses desequilibrados, falha de correção verificada ou falha estrutural/de
+propriedade tabular bloqueia `passed_automated_checks=True` e mantém a página
+em `pending_review`.
 """
 
 from __future__ import annotations
@@ -39,6 +40,91 @@ _SUSPICIOUS_ORDINAL_RE = re.compile(
 )
 
 
+def analyze_parentheses_balance(
+    text: str,
+    *,
+    expected_incoming_open: int = 0,
+    allow_outgoing_open: int = 0,
+) -> tuple[bool, int, str | None]:
+    """Audita equilíbrio de parênteses via pilha determinística (inclusive entre páginas).
+
+    Retorna `(unbalanced, end_depth, issue_message)`.
+    Regras fail-closed:
+    - Qualquer `)` que leve a pilha abaixo de 0 (mesmo considerando `expected_incoming_open`)
+      é sempre considerado desequilíbrio.
+    - Qualquer `(` remanescente ao final (`end_depth > 0`) é considerado desequilíbrio, salvo
+      quando a continuidade entre páginas foi verificada globalmente no documento e
+      `end_depth == allow_outgoing_open`.
+    """
+    if expected_incoming_open < 0 or allow_outgoing_open < 0:
+        return (
+            True,
+            expected_incoming_open,
+            "Contexto inválido de continuidade de parênteses entre páginas.",
+        )
+
+    depth = expected_incoming_open
+    min_depth = depth
+    open_count = 0
+    close_count = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+            open_count += 1
+        elif ch == ")":
+            depth -= 1
+            close_count += 1
+            if depth < min_depth:
+                min_depth = depth
+
+    if min_depth < 0:
+        return (
+            True,
+            depth,
+            "Parêntese de fechamento ')' sem abertura correspondente "
+            f"({open_count} '(' vs {close_count} ')', saldo mínimo {min_depth}).",
+        )
+    if depth == 0:
+        return (False, 0, None)
+    if allow_outgoing_open > 0 and depth == allow_outgoing_open:
+        return (False, depth, None)
+    return (
+        True,
+        depth,
+        "Parêntese aberto '(' sem fechamento correspondente "
+        f"({open_count} '(' vs {close_count} ')', saldo final +{depth}).",
+    )
+
+
+def compute_cross_page_parentheses_context(
+    page_texts: Sequence[str],
+) -> list[tuple[int, int]]:
+    """Calcula contexto `(incoming_open, outgoing_open)` entre páginas somente se equilibrado.
+
+    Se o documento completo apresentar qualquer `)` sem abertura ou saldo final `!= 0`, retorna
+    `[(0, 0), ...]` para todas as páginas (fail-closed: ambiguidade não resolvida bloqueia).
+    """
+    if not page_texts:
+        return []
+
+    depth = 0
+    per_page: list[tuple[int, int]] = []
+    for text in page_texts:
+        incoming = depth
+        for ch in text:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth < 0:
+                    return [(0, 0) for _ in page_texts]
+        per_page.append((incoming, depth))
+
+    if depth != 0:
+        return [(0, 0) for _ in page_texts]
+    return per_page
+
+
 class TextQualityChecker:
     """Implementação de `TextQualityCheckerPort` para páginas extraídas nativamente."""
 
@@ -51,6 +137,9 @@ class TextQualityChecker:
         unresolved_glyph_anomalies: Sequence[str] = (),
         correction_issues: Sequence[str] = (),
         tables: Sequence[NormativeTable] = (),
+        table_ownership_issues: Sequence[str] = (),
+        expected_incoming_open_parens: int = 0,
+        allow_outgoing_open_parens: int = 0,
     ) -> QualityMetrics:
         issues: list[str] = []
 
@@ -112,17 +201,18 @@ class TextQualityChecker:
             table_issues.extend(validate_table_integrity(tbl))
         issues.extend(table_issues)
 
+        for own_issue in table_ownership_issues:
+            issues.append(f"Associação proprietária de tabela bloqueada: {own_issue}")
+
         has_portuguese_accents = bool(_PT_ACCENTS_RE.search(original_text))
 
-        open_parens = original_text.count("(")
-        close_parens = original_text.count(")")
-        # Pequena tolerância para parênteses que atravessam quebra de página
-        unbalanced_parentheses = abs(open_parens - close_parens) > 2
-        if unbalanced_parentheses:
-            issues.append(
-                f"Desbalanceamento acentuado de parênteses "
-                f"({open_parens} '(' vs {close_parens} ')')."
-            )
+        unbalanced_parentheses, _end_depth, paren_issue = analyze_parentheses_balance(
+            original_text,
+            expected_incoming_open=expected_incoming_open_parens,
+            allow_outgoing_open=allow_outgoing_open_parens,
+        )
+        if unbalanced_parentheses and paren_issue is not None:
+            issues.append(paren_issue)
 
         passed = (
             not is_empty_or_incomplete
@@ -136,6 +226,8 @@ class TextQualityChecker:
             and not unresolved_glyph_anomalies
             and not correction_issues
             and not table_issues
+            and not table_ownership_issues
+            and not unbalanced_parentheses
         )
 
         return QualityMetrics(

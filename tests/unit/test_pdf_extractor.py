@@ -180,13 +180,228 @@ def test_page_content_hash_incorporates_original_text_and_table_structure(tmp_pa
     h_no_tables = compute_page_content_hash(base_text, ())
     assert len({h_boundary_1, h_boundary_2, h_empty_cell, h_no_tables}) == 4
 
-    # 5. PdfPlumberExtractorAdapter inclui as tabelas extraídas no content_hash da página 3
+    # 5. PdfPlumberExtractorAdapter inclui metadados completos das tabelas no content_hash da p. 3
     pdf_path = create_synthetic_rbac_pdf(tmp_path / "rbac43_table_hash.pdf")
     pages = PdfPlumberExtractorAdapter().extract_pages(pdf_path, min_native_chars=40)
     p3 = pages[2]
     assert len(p3.tables) == 1
-    assert p3.content_hash == compute_page_content_hash(
+    assert p3.content_hash == compute_page_content_hash(p3.original_text, p3.tables)
+    assert p3.content_hash != compute_page_content_hash(
         p3.original_text,
         tuple(t.rows for t in p3.tables),
     )
     assert p3.content_hash != compute_page_content_hash(p3.original_text, ())
+
+
+@pytest.mark.unit
+def test_canonical_page_hash_v2_covers_all_table_metadata_and_determinism() -> None:
+    """Blocker 1: todo metadado estrutural/semântico/proprietário de tabela altera o hash v2."""
+    from dataclasses import replace
+
+    from rbac_assistant.domain.entities.normative_unit import (
+        NormativeTable,
+        TableCellGeometry,
+        TableOwnershipStatus,
+    )
+    from rbac_assistant.domain.entities.regulatory_page import (
+        CANONICAL_PAGE_HASH_SCHEMA_VERSION,
+        build_canonical_page_hash_payload,
+        compute_page_content_hash,
+    )
+    from rbac_assistant.domain.ports.pdf_extractor_port import ExtractedTableData
+
+    base_text = "E43.1 Testes do altímetro — tolerância ± 100 pés e +70 pés."
+    base_cells = (
+        TableCellGeometry(
+            row_index=0,
+            col_index=0,
+            row_span=1,
+            col_span=1,
+            text="TESTE",
+            bbox=(10.0, 10.0, 90.0, 25.0),
+        ),
+        TableCellGeometry(
+            row_index=0,
+            col_index=1,
+            row_span=1,
+            col_span=2,
+            text="TOLERÂNCIA",
+            bbox=(90.0, 10.0, 210.0, 25.0),
+        ),
+        TableCellGeometry(
+            row_index=1,
+            col_index=0,
+            row_span=1,
+            col_span=1,
+            text="",
+            is_empty=True,
+            bbox=(10.0, 25.0, 90.0, 40.0),
+        ),
+        TableCellGeometry(
+            row_index=1,
+            col_index=1,
+            row_span=1,
+            col_span=1,
+            text="(pés)",
+            bbox=(90.0, 25.0, 150.0, 40.0),
+        ),
+        TableCellGeometry(
+            row_index=1,
+            col_index=2,
+            row_span=1,
+            col_span=1,
+            text="(m)",
+            bbox=(150.0, 25.0, 210.0, 40.0),
+        ),
+        TableCellGeometry(
+            row_index=2,
+            col_index=0,
+            row_span=1,
+            col_span=1,
+            text="Vazamento",
+            bbox=(10.0, 40.0, 90.0, 55.0),
+        ),
+        TableCellGeometry(
+            row_index=2,
+            col_index=1,
+            row_span=1,
+            col_span=1,
+            text="± 100",
+            bbox=(90.0, 40.0, 150.0, 55.0),
+        ),
+        TableCellGeometry(
+            row_index=2,
+            col_index=2,
+            row_span=1,
+            col_span=1,
+            text="",
+            is_empty=True,
+            bbox=(150.0, 40.0, 210.0, 55.0),
+        ),
+    )
+    base_rows = (
+        ("TESTE", "TOLERÂNCIA", ""),
+        ("", "(pés)", "(m)"),
+        ("Vazamento", "± 100", ""),
+    )
+    base_tbl = NormativeTable(
+        table_id="tbl_random_a",
+        version_id="ver_a",
+        unit_id="ver::E43.1",
+        pdf_page_number=29,
+        rows=base_rows,
+        caption="TABELA II — Tolerância do Teste",
+        bbox=(10.0, 10.0, 210.0, 55.0),
+        cells=base_cells,
+        header_row_count=2,
+        table_kind="data_table",
+        has_merged_cells=True,
+        visual_layout_preserved=True,
+        layout_fidelity_note="",
+        ownership_status=TableOwnershipStatus.CONFIRMED.value,
+        owner_section_number="E43.1",
+    )
+
+    payload = build_canonical_page_hash_payload(base_text, (base_tbl,))
+    assert payload["schema_version"] == CANONICAL_PAGE_HASH_SCHEMA_VERSION
+    assert payload["table_count"] == 1
+    h_base = compute_page_content_hash(base_text, (base_tbl,))
+
+    # 12. Conteúdo estruturalmente idêntico produz o mesmo hash (ignora table_id / version_id)
+    same_tbl_diff_db_id = replace(base_tbl, table_id="tbl_random_z", version_id="ver_z")
+    assert compute_page_content_hash(base_text, (same_tbl_diff_db_id,)) == h_base
+
+    same_as_extracted = ExtractedTableData(
+        pdf_page_number=29,
+        rows=base_rows,
+        caption="TABELA II — Tolerância do Teste",
+        bbox=(10.0, 10.0, 210.0, 55.0),
+        cells=base_cells,
+        header_row_count=2,
+        table_kind="data_table",
+        has_merged_cells=True,
+        visual_layout_preserved=True,
+        layout_fidelity_note="",
+        ownership_status=TableOwnershipStatus.CONFIRMED.value,
+        owner_unit_id="ver::E43.1",
+        owner_section_number="E43.1",
+    )
+    assert compute_page_content_hash(base_text, (same_as_extracted,)) == h_base
+
+    # 1. Alteração de texto de célula altera o hash
+    cell_text_mod = replace(
+        base_tbl,
+        rows=(base_rows[0], base_rows[1], ("Vazamento", "± 101", "")),
+    )
+    assert compute_page_content_hash(base_text, (cell_text_mod,)) != h_base
+
+    # 2. Alteração de cabeçalho altera o hash
+    header_mod = replace(
+        base_tbl,
+        rows=(("ENSAIO", "TOLERÂNCIA", ""), base_rows[1], base_rows[2]),
+    )
+    assert compute_page_content_hash(base_text, (header_mod,)) != h_base
+
+    # 3. Alteração de header_row_count altera o hash
+    hdr_count_mod = replace(base_tbl, header_row_count=1)
+    assert compute_page_content_hash(base_text, (hdr_count_mod,)) != h_base
+
+    # 4. Alteração de row_span altera o hash
+    row_span_cells = (replace(base_cells[0], row_span=2), *base_cells[1:])
+    row_span_tbl = replace(base_tbl, cells=row_span_cells)
+    assert compute_page_content_hash(base_text, (row_span_tbl,)) != h_base
+
+    # 5. Alteração de col_span altera o hash
+    col_span_cells = (base_cells[0], replace(base_cells[1], col_span=1), *base_cells[2:])
+    col_span_tbl = replace(base_tbl, cells=col_span_cells)
+    assert compute_page_content_hash(base_text, (col_span_tbl,)) != h_base
+
+    # 6. Alteração de célula vazia para preenchida altera o hash
+    filled_empty = replace(
+        base_tbl,
+        rows=(base_rows[0], base_rows[1], ("Vazamento", "± 100", "30,48")),
+        cells=(
+            *base_cells[:-1],
+            replace(base_cells[-1], text="30,48", is_empty=False),
+        ),
+    )
+    assert compute_page_content_hash(base_text, (filled_empty,)) != h_base
+
+    # 7. Alteração de geometria relevante (bbox da tabela e bbox de célula) altera o hash
+    bbox_tbl_mod = replace(base_tbl, bbox=(10.0, 10.0, 220.0, 55.0))
+    assert compute_page_content_hash(base_text, (bbox_tbl_mod,)) != h_base
+    bbox_cell_mod = replace(
+        base_tbl,
+        cells=(replace(base_cells[0], bbox=(10.0, 10.0, 95.0, 25.0)), *base_cells[1:]),
+    )
+    assert compute_page_content_hash(base_text, (bbox_cell_mod,)) != h_base
+
+    # 8. Alteração de table_kind altera o hash
+    kind_mod = replace(base_tbl, table_kind="form")
+    assert compute_page_content_hash(base_text, (kind_mod,)) != h_base
+
+    # 9. Alteração de legenda (caption) altera o hash
+    caption_mod = replace(base_tbl, caption="TABELA III — Tolerância do Teste")
+    assert compute_page_content_hash(base_text, (caption_mod,)) != h_base
+
+    # 10. Alteração de associação proprietária (unit_id, owner_section_number, ownership_status)
+    owner_uid_mod = replace(base_tbl, unit_id="ver::F43.1")
+    owner_sec_mod = replace(base_tbl, owner_section_number="F43.1")
+    owner_status_mod = replace(base_tbl, ownership_status=TableOwnershipStatus.AMBIGUOUS.value)
+    assert compute_page_content_hash(base_text, (owner_uid_mod,)) != h_base
+    assert compute_page_content_hash(base_text, (owner_sec_mod,)) != h_base
+    assert compute_page_content_hash(base_text, (owner_status_mod,)) != h_base
+
+    # 11. Alteração da ordem de linhas, colunas e ordem visual das tabelas altera o hash
+    row_swap = replace(base_tbl, rows=(base_rows[0], base_rows[2], base_rows[1]))
+    col_swap = replace(
+        base_tbl,
+        rows=tuple((r[1], r[0], r[2]) for r in base_rows),
+    )
+    assert compute_page_content_hash(base_text, (row_swap,)) != h_base
+    assert compute_page_content_hash(base_text, (col_swap,)) != h_base
+
+    tbl_b = replace(base_tbl, caption="TABELA I")
+    assert compute_page_content_hash(base_text, (base_tbl, tbl_b)) != compute_page_content_hash(
+        base_text, (tbl_b, base_tbl)
+    )

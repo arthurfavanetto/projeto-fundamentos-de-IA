@@ -28,7 +28,7 @@ from rbac_assistant.domain.entities.document_version import DocumentVersion
 from rbac_assistant.domain.entities.normative_unit import (
     NormativeTable,
     StructureStatus,
-    validate_table_integrity,
+    resolve_section_tables,
 )
 from rbac_assistant.domain.entities.rag import (
     EvidenceDecisionDiagnostic,
@@ -658,14 +658,25 @@ class HybridNormativeRetriever:
                     )
                 )
             else:
-                is_table_block = bool(
+                is_ownership_block = bool(
+                    evidence.warning_message
+                    and "PROPRIEDADE TABULAR BLOQUEADA" in evidence.warning_message
+                )
+                is_integrity_block = bool(
                     evidence.warning_message
                     and "INTEGRIDADE TABULAR BLOQUEADA" in evidence.warning_message
                 )
+                is_table_block = is_ownership_block or is_integrity_block
                 if is_table_block:
                     blocked_integrity_evidences.append(evidence)
                     if evidence.warning_message:
                         warnings.append(evidence.warning_message)
+                if is_ownership_block:
+                    block_reason = "excluded:table_ownership_blocked"
+                elif is_integrity_block:
+                    block_reason = "excluded:table_integrity_failed"
+                else:
+                    block_reason = "excluded:global_document_approval_required"
                 evidence_decisions.append(
                     EvidenceDecisionDiagnostic(
                         chunk_id=evidence.chunk_id,
@@ -677,11 +688,7 @@ class HybridNormativeRetriever:
                         pdf_pages=evidence.pdf_pages,
                         trust_level=evidence.trust_level.value,
                         included=False,
-                        reason=(
-                            "excluded:table_integrity_failed"
-                            if is_table_block
-                            else "excluded:global_document_approval_required"
-                        ),
+                        reason=block_reason,
                     )
                 )
 
@@ -1183,7 +1190,7 @@ class HybridNormativeRetriever:
             document_assessment=doc_assessment,
         )
 
-        # Hidrata tabelas/formulários vinculados à seção e valida integridade (fail-closed)
+        # Hidrata tabelas/formulários validando propriedade e integridade separadamente
         if all_tables_cache is not None and version.version_id in all_tables_cache:
             version_tables = all_tables_cache[version.version_id]
         else:
@@ -1192,17 +1199,13 @@ class HybridNormativeRetriever:
                 all_tables_cache[version.version_id] = version_tables
         page_num_set = set(page_numbers)
         raw_page_tables = [t for t in version_tables if t.pdf_page_number in page_num_set]
-        section_tables: list[NormativeTable] = []
-        for tbl in raw_page_tables:
-            if primary_unit is not None and tbl.unit_id is not None:
-                if tbl.unit_id == primary_unit.unit_id:
-                    section_tables.append(tbl)
-            else:
-                section_tables.append(tbl)
 
-        table_integrity_issues: list[str] = []
-        for tbl in section_tables:
-            table_integrity_issues.extend(validate_table_integrity(tbl))
+        target_unit_id = primary_unit.unit_id if primary_unit is not None else chunk.unit_id
+        section_tables, ownership_issues, table_integrity_issues = resolve_section_tables(
+            page_tables=raw_page_tables,
+            unit_id=target_unit_id,
+            section_number=chunk.section_number,
+        )
 
         rejected_pages = tuple(
             p.pdf_page_number
@@ -1216,7 +1219,17 @@ class HybridNormativeRetriever:
 
         effective_warning = assessment.warning_message
         effective_allowed = assessment.literal_transcription_allowed
-        if table_integrity_issues:
+        if ownership_issues:
+            trust_level = EvidenceTrustLevel.BLOCKED_UNVERIFIED
+            effective_allowed = False
+            effective_warning = (
+                f"PROPRIEDADE TABULAR BLOQUEADA ({chunk.section_number}): "
+                "Há tabela na página sem associação proprietária única e confiável; "
+                "resposta bloqueada para evitar atribuição indevida entre seções "
+                f"({'; '.join(ownership_issues[:3])})."
+            )
+            hydrated_tables: tuple[NormativeTable, ...] = ()
+        elif table_integrity_issues:
             trust_level = EvidenceTrustLevel.BLOCKED_UNVERIFIED
             effective_allowed = False
             effective_warning = (
@@ -1225,10 +1238,10 @@ class HybridNormativeRetriever:
                 "para evitar apresentação de valores sem cabeçalhos ou associação confiável "
                 f"({'; '.join(table_integrity_issues[:3])})."
             )
-            hydrated_tables: tuple[NormativeTable, ...] = ()
+            hydrated_tables = ()
         elif assessment.literal_transcription_allowed:
             trust_level = EvidenceTrustLevel.VALIDATED_LITERAL
-            hydrated_tables = tuple(section_tables)
+            hydrated_tables = section_tables
         elif rejected_pages:
             trust_level = EvidenceTrustLevel.BLOCKED_REJECTED
             hydrated_tables = ()

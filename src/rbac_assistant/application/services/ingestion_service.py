@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from rbac_assistant.application.dto.ingestion_dto import (
@@ -17,6 +17,8 @@ from rbac_assistant.domain.entities.document_version import DocumentVersion, Ext
 from rbac_assistant.domain.entities.normative_unit import (
     ExtractionMethod,
     NormativeTable,
+    TableOwnershipStatus,
+    validate_table_ownership,
 )
 from rbac_assistant.domain.entities.regulatory_document import RegulatoryDocument
 from rbac_assistant.domain.entities.regulatory_page import (
@@ -34,11 +36,26 @@ from rbac_assistant.domain.ports.document_repository_port import DocumentReposit
 from rbac_assistant.domain.ports.document_source_port import DocumentSourcePort
 from rbac_assistant.domain.ports.file_store_port import FileStorePort
 from rbac_assistant.domain.ports.ocr_port import OCRPort
-from rbac_assistant.domain.ports.pdf_extractor_port import PDFExtractorPort
+from rbac_assistant.domain.ports.pdf_extractor_port import (
+    ExtractedPageData,
+    PDFExtractorPort,
+)
 from rbac_assistant.domain.ports.validation_port import (
     StructureParserStrategy,
     TextQualityCheckerPort,
 )
+from rbac_assistant.infrastructure.pdf.text_quality_checker import (
+    compute_cross_page_parentheses_context,
+)
+
+
+@dataclass(frozen=True)
+class _PageWorkItem:
+    ext_page: ExtractedPageData
+    orig_text: str
+    norm_text: str
+    method: ExtractionMethod
+    raw_tables: tuple[NormativeTable, ...]
 
 
 def build_version_id(document_id: str, amendment_number: str, source_hash: str) -> str:
@@ -192,9 +209,8 @@ class IngestionService:
             )
 
             now = datetime.now(UTC)
-            regulatory_pages: list[RegulatoryPage] = []
-            all_tables: list[NormativeTable] = []
             ocr_page_numbers: list[int] = []
+            page_work_items: list[_PageWorkItem] = []
 
             for ext_page in extracted_pages:
                 orig_text = ext_page.original_text
@@ -222,15 +238,16 @@ class IngestionService:
                     else:
                         method = ExtractionMethod.OCR_REQUIRED_UNAVAILABLE
 
-                page_tables: list[NormativeTable] = []
+                raw_page_tables: list[NormativeTable] = []
                 for t_idx, ext_table in enumerate(ext_page.tables):
                     t_hash = hashlib.sha256(
                         f"{version_id}:{ext_page.pdf_page_number}:{t_idx}".encode()
                     ).hexdigest()[:12]
-                    page_tables.append(
+                    raw_page_tables.append(
                         NormativeTable(
                             table_id=f"tbl_{t_hash}",
                             version_id=version_id,
+                            unit_id=ext_table.owner_unit_id,
                             pdf_page_number=ext_page.pdf_page_number,
                             rows=ext_table.rows,
                             caption=ext_table.caption,
@@ -241,60 +258,17 @@ class IngestionService:
                             has_merged_cells=ext_table.has_merged_cells,
                             visual_layout_preserved=ext_table.visual_layout_preserved,
                             layout_fidelity_note=ext_table.layout_fidelity_note,
+                            ownership_status=ext_table.ownership_status,
+                            owner_section_number=ext_table.owner_section_number,
                         )
                     )
-                all_tables.extend(page_tables)
-
-                content_hash = compute_page_content_hash(
-                    orig_text,
-                    tuple(table.rows for table in ext_page.tables),
-                )
-
-                unresolved_anomalies = tuple(
-                    f"{an.kind} ({an.text!r}) em '{an.context[:80]}'"
-                    for an in ext_page.glyph_anomalies
-                    if an.resolved_by_correction_id is None
-                )
-                quality = self._quality_checker.evaluate(
-                    original_text=orig_text,
-                    normalized_text=norm_text,
-                    min_chars=self._min_native_chars,
-                    unresolved_glyph_anomalies=unresolved_anomalies,
-                    correction_issues=ext_page.correction_issues,
-                    tables=page_tables,
-                )
-                initial_status = self._validation_service.determine_initial_page_status(
-                    extraction_method=method,
-                    quality_metrics=quality,
-                )
-
-                page_id = f"{version_id}::p{ext_page.pdf_page_number:04d}"
-                metadata = ExtractionMetadata(
-                    extraction_method=method,
-                    extraction_timestamp=now,
-                    extraction_version=self._extraction_version,
-                    content_hash=content_hash,
-                    quality_metrics=quality,
-                    page_width=ext_page.page_width,
-                    page_height=ext_page.page_height,
-                    table_count=len(ext_page.tables),
-                    image_count=ext_page.image_count,
-                    applied_corrections=ext_page.applied_corrections,
-                    glyph_anomalies=tuple(an.to_dict() for an in ext_page.glyph_anomalies),
-                )
-                regulatory_pages.append(
-                    RegulatoryPage(
-                        page_id=page_id,
-                        version_id=version_id,
-                        pdf_page_number=ext_page.pdf_page_number,
-                        printed_page_number=ext_page.printed_page_number,
-                        original_text=orig_text,
-                        normalized_text=norm_text,
-                        extraction_method=method,
-                        validation_status=initial_status,
-                        content_hash=content_hash,
-                        extraction_metadata=metadata,
-                        coordinates_summary=ext_page.coordinates_summary,
+                page_work_items.append(
+                    _PageWorkItem(
+                        ext_page=ext_page,
+                        orig_text=orig_text,
+                        norm_text=norm_text,
+                        method=method,
+                        raw_tables=tuple(raw_page_tables),
                     )
                 )
 
@@ -333,43 +307,195 @@ class IngestionService:
                 pdf_filename=fetched.filename,
                 pdf_storage_path=str(raw_pdf_path),
                 source_hash=fetched.file_hash,
-                page_count=len(regulatory_pages),
+                page_count=len(page_work_items),
                 imported_at=now,
                 last_verified_at=doc_dto.last_verified_at or now,
             )
+
+            # 1. Constrói páginas provisórias para o parsing estrutural de unidades
+            provisional_pages: list[RegulatoryPage] = []
+            provisional_tables: list[NormativeTable] = []
+            for item in page_work_items:
+                provisional_tables.extend(item.raw_tables)
+                provisional_pages.append(
+                    RegulatoryPage(
+                        page_id=f"{version_id}::p{item.ext_page.pdf_page_number:04d}",
+                        version_id=version_id,
+                        pdf_page_number=item.ext_page.pdf_page_number,
+                        printed_page_number=item.ext_page.printed_page_number,
+                        original_text=item.orig_text,
+                        normalized_text=item.norm_text,
+                        extraction_method=item.method,
+                        validation_status=self._validation_service.determine_initial_page_status(
+                            extraction_method=item.method,
+                            quality_metrics=self._quality_checker.evaluate(
+                                original_text=item.orig_text,
+                                normalized_text=item.norm_text,
+                                min_chars=self._min_native_chars,
+                            ),
+                        ),
+                        content_hash=compute_page_content_hash(item.orig_text, item.raw_tables),
+                        coordinates_summary=item.ext_page.coordinates_summary,
+                    )
+                )
 
             strategy = self._select_strategy(document)
             parsed_units = strategy.parse(
                 version_id=version_id,
                 regulation_number=document.regulation_number,
-                pages=regulatory_pages,
-                tables=all_tables,
+                pages=provisional_pages,
+                tables=provisional_tables,
             )
 
-            # Vincula cada tabela/formulário à unidade normativa raiz proprietária na página
+            # 2. Associa cada tabela/formulário à unidade proprietária com política fail-closed
             root_units = [u for u in parsed_units if u.parent_unit_id is None]
-            linked_tables: list[NormativeTable] = []
-            for tbl in all_tables:
-                page_roots = [u for u in root_units if tbl.pdf_page_number in u.page_numbers]
-                owner_unit_id: str | None = None
-                if len(page_roots) == 1:
-                    owner_unit_id = page_roots[0].unit_id
-                elif len(page_roots) > 1:
-                    cues = [
-                        c.splitlines()[0].strip()
-                        for row in tbl.rows[:3]
-                        for c in row
-                        if len(c.strip()) >= 3
-                    ]
-                    if tbl.caption:
-                        cues.insert(0, tbl.caption.split("—")[0].strip())
-                    matched_roots = [
-                        u for u in page_roots if any(cue in u.original_text for cue in cues)
-                    ]
-                    if len(matched_roots) == 1:
-                        owner_unit_id = matched_roots[0].unit_id
-                linked_tables.append(replace(tbl, unit_id=owner_unit_id))
-            all_tables = linked_tables
+            all_tables: list[NormativeTable] = []
+            linked_tables_by_page: dict[int, list[NormativeTable]] = {}
+
+            for item in page_work_items:
+                for tbl in item.raw_tables:
+                    if (
+                        tbl.ownership_status == TableOwnershipStatus.PAGE_GLOBAL.value
+                        and tbl.unit_id is None
+                    ):
+                        linked = tbl
+                    else:
+                        page_roots = [
+                            u for u in root_units if tbl.pdf_page_number in u.page_numbers
+                        ]
+                        if len(page_roots) == 1:
+                            owner = page_roots[0]
+                            linked = replace(
+                                tbl,
+                                unit_id=owner.unit_id,
+                                owner_section_number=owner.section_number,
+                                ownership_status=TableOwnershipStatus.CONFIRMED.value,
+                                ownership_note=(
+                                    f"Proprietário único na página PDF {tbl.pdf_page_number}: "
+                                    f"{owner.section_number}."
+                                ),
+                            )
+                        elif len(page_roots) > 1:
+                            cues = [
+                                c.splitlines()[0].strip()
+                                for row in tbl.rows[:3]
+                                for c in row
+                                if len(c.strip()) >= 4
+                            ]
+                            if tbl.caption:
+                                cues.insert(0, tbl.caption.split("—")[0].strip())
+                            matched_roots = [
+                                u
+                                for u in page_roots
+                                if any(cue in u.original_text for cue in cues)
+                            ]
+                            if len(matched_roots) == 1:
+                                owner = matched_roots[0]
+                                linked = replace(
+                                    tbl,
+                                    unit_id=owner.unit_id,
+                                    owner_section_number=owner.section_number,
+                                    ownership_status=TableOwnershipStatus.CONFIRMED.value,
+                                    ownership_note=(
+                                        f"Proprietário desambiguado por conteúdo literal na "
+                                        f"página PDF {tbl.pdf_page_number}: {owner.section_number}."
+                                    ),
+                                )
+                            else:
+                                cand_secs = [u.section_number for u in page_roots]
+                                linked = replace(
+                                    tbl,
+                                    unit_id=None,
+                                    owner_section_number="",
+                                    ownership_status=TableOwnershipStatus.AMBIGUOUS.value,
+                                    ownership_note=(
+                                        f"Associação ambígua na página PDF {tbl.pdf_page_number} "
+                                        f"entre múltiplas unidades candidatas {cand_secs}."
+                                    ),
+                                )
+                        else:
+                            linked = replace(
+                                tbl,
+                                unit_id=None,
+                                owner_section_number="",
+                                ownership_status=TableOwnershipStatus.UNASSIGNED.value,
+                                ownership_note=(
+                                    f"Nenhuma unidade raiz localizada na página PDF "
+                                    f"{tbl.pdf_page_number} para assumir propriedade da tabela."
+                                ),
+                            )
+                    all_tables.append(linked)
+                    linked_tables_by_page.setdefault(linked.pdf_page_number, []).append(linked)
+
+            # 3. Avalia continuidade global de parênteses entre páginas e calcula hash canônico v2
+            paren_contexts = compute_cross_page_parentheses_context(
+                [item.orig_text for item in page_work_items]
+            )
+            regulatory_pages: list[RegulatoryPage] = []
+
+            for item, (inc_parens, out_parens) in zip(
+                page_work_items, paren_contexts, strict=True
+            ):
+                p_num = item.ext_page.pdf_page_number
+                page_tables = linked_tables_by_page.get(p_num, [])
+
+                content_hash = compute_page_content_hash(item.orig_text, page_tables)
+                unresolved_anomalies = tuple(
+                    f"{an.kind} ({an.text!r}) em '{an.context[:80]}'"
+                    for an in item.ext_page.glyph_anomalies
+                    if an.resolved_by_correction_id is None
+                )
+                ownership_issues: list[str] = []
+                for tbl in page_tables:
+                    ownership_issues.extend(validate_table_ownership(tbl))
+
+                quality = self._quality_checker.evaluate(
+                    original_text=item.orig_text,
+                    normalized_text=item.norm_text,
+                    min_chars=self._min_native_chars,
+                    unresolved_glyph_anomalies=unresolved_anomalies,
+                    correction_issues=item.ext_page.correction_issues,
+                    tables=page_tables,
+                    table_ownership_issues=ownership_issues,
+                    expected_incoming_open_parens=inc_parens,
+                    allow_outgoing_open_parens=out_parens,
+                )
+                initial_status = self._validation_service.determine_initial_page_status(
+                    extraction_method=item.method,
+                    quality_metrics=quality,
+                )
+
+                page_id = f"{version_id}::p{p_num:04d}"
+                metadata = ExtractionMetadata(
+                    extraction_method=item.method,
+                    extraction_timestamp=now,
+                    extraction_version=self._extraction_version,
+                    content_hash=content_hash,
+                    quality_metrics=quality,
+                    page_width=item.ext_page.page_width,
+                    page_height=item.ext_page.page_height,
+                    table_count=len(page_tables),
+                    image_count=item.ext_page.image_count,
+                    applied_corrections=item.ext_page.applied_corrections,
+                    glyph_anomalies=tuple(
+                        an.to_dict() for an in item.ext_page.glyph_anomalies
+                    ),
+                )
+                regulatory_pages.append(
+                    RegulatoryPage(
+                        page_id=page_id,
+                        version_id=version_id,
+                        pdf_page_number=p_num,
+                        printed_page_number=item.ext_page.printed_page_number,
+                        original_text=item.orig_text,
+                        normalized_text=item.norm_text,
+                        extraction_method=item.method,
+                        validation_status=initial_status,
+                        content_hash=content_hash,
+                        extraction_metadata=metadata,
+                        coordinates_summary=item.ext_page.coordinates_summary,
+                    )
+                )
 
             extraction_run = ExtractionRun(
                 run_id=run_id,

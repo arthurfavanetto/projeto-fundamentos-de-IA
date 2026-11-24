@@ -24,8 +24,10 @@ from rbac_assistant.application.use_cases.ingest_document import IngestDocumentU
 from rbac_assistant.application.use_cases.validate_page import ValidatePageUseCase
 from rbac_assistant.domain.entities.normative_unit import (
     NormativeUnitType,
+    TableOwnershipStatus,
     render_structured_table,
     validate_table_integrity,
+    validate_table_ownership,
 )
 from rbac_assistant.domain.entities.regulatory_document import (
     DocumentType,
@@ -48,10 +50,10 @@ from rbac_assistant.interfaces.telegram.command_router import (
 )
 from rbac_assistant.interfaces.telegram.message_splitter import (
     MessageSplitter,
-    sanitize_telegram_text,
     strip_pagination_header,
     utf16_length,
 )
+from rbac_assistant.rag.generation.response_formatter import extract_literal_excerpts_from_text
 from rbac_assistant.rag.ingestion.structural_chunker import StructuralNormativeChunker
 from rbac_assistant.rag.retrieval.hybrid_retriever import HybridNormativeRetriever
 from rbac_assistant.security.access_control import AccessControl
@@ -289,7 +291,11 @@ def test_official_rbac43_emd05_verbatim_fidelity_when_pdf_available(
         assert len(all_tables) == 5
         for tbl in all_tables:
             assert validate_table_integrity(tbl) == ()
+            assert validate_table_ownership(tbl) == ()
             assert tbl.unit_id is not None
+            assert tbl.ownership_status == TableOwnershipStatus.CONFIRMED.value
+            expected_owner = "B43.1" if tbl.pdf_page_number == 21 else "E43.1"
+            assert tbl.owner_section_number == expected_owner
 
         p21_tables = [t for t in all_tables if t.pdf_page_number == 21]
         assert len(p21_tables) == 1
@@ -534,12 +540,25 @@ async def test_official_rbac43_emd05_telegram_end_to_end_in_isolated_tmp_db(
             for bad in must_not_contain:
                 assert bad not in reconstructed, f"Proibido {bad!r} em resposta de {cmd}"
 
-            # Confere igualdade exata contra o texto formatado pelo serviço (zero perda no split)
+            # Prova RAW caractere-a-caractere SEM sanitize_telegram_text nos dois lados!
             direct_ans = chat.ask(
                 question=f"RBAC {cmd.split(maxsplit=1)[1]}",
                 generate_explanation=False,
             )
-            assert reconstructed == sanitize_telegram_text(direct_ans.formatted_text)
+            assert reconstructed == direct_ans.formatted_text
+            assert "=== EXPLICAÇÃO (GERADA POR IA) ===" not in reconstructed
+            extracted_literals = extract_literal_excerpts_from_text(reconstructed)
+            assert extracted_literals == direct_ans.literal_excerpts
+            sec_num = cmd.split(maxsplit=1)[1]
+            sqlite_units = [
+                u
+                for u in repo.get_units_by_section(
+                    version_id=ver.version_id, section_number=sec_num
+                )
+                if u.parent_unit_id is None
+            ]
+            assert sqlite_units
+            assert sqlite_units[0].original_text in extracted_literals
         assert llm_spy.calls == 0
     finally:
         repo.close()
