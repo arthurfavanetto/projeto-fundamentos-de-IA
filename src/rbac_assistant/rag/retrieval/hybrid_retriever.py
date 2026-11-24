@@ -16,11 +16,14 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import structlog
 
-from rbac_assistant.application.services.validation_service import ValidationService
+from rbac_assistant.application.services.validation_service import (
+    DocumentVersionValidationAssessment,
+    ValidationService,
+)
 from rbac_assistant.domain.entities.document_version import DocumentVersion
 from rbac_assistant.domain.entities.normative_unit import StructureStatus
 from rbac_assistant.domain.entities.rag import (
@@ -52,7 +55,10 @@ from rbac_assistant.domain.exceptions import (
 )
 from rbac_assistant.domain.ports.document_repository_port import DocumentRepositoryPort
 from rbac_assistant.domain.ports.rag_ports import EmbeddingPort
-from rbac_assistant.domain.ports.vector_store_port import MetadataValue, VectorStorePort
+from rbac_assistant.domain.ports.vector_store_port import (
+    MetadataFilterValue,
+    VectorStorePort,
+)
 from rbac_assistant.rag.retrieval.reranker import DeterministicNormativeReranker, RerankInput
 from rbac_assistant.rag.retrieval.section_resolver import (
     amendments_match,
@@ -132,7 +138,7 @@ def fuse_candidates_rrf(
 
 
 class HybridNormativeRetriever:
-    """Recuperador híbrido com SSOT SQLite, ChromaDB, RRF e enforcement de revisão por página."""
+    """Recuperador híbrido com bloqueio global pré-recuperação, SSOT SQLite, ChromaDB e RRF."""
 
     def __init__(
         self,
@@ -162,7 +168,7 @@ class HybridNormativeRetriever:
         self._embedding_port = embedding_port
         self._collection_name = collection_name
         self._validation_service = validation_service or ValidationService(
-            policy=ValidationPolicy.REVIEW_ON_DEMAND
+            policy=ValidationPolicy.STRICT_ALL_PAGES
         )
         self._lexical_top_k = lexical_top_k
         self._semantic_top_k = semantic_top_k
@@ -187,7 +193,7 @@ class HybridNormativeRetriever:
         filters: SearchFilter | None = None,
         top_k: int | None = None,
     ) -> HybridRetrievalResult:
-        """Executa busca híbrida completa e hidrata evidências com validação ao vivo do SQLite."""
+        """Executa busca híbrida estritamente limitada a versões globalmente aprovadas."""
         clean_query = query.strip()
         if not clean_query:
             return HybridRetrievalResult(
@@ -201,8 +207,16 @@ class HybridNormativeRetriever:
                 ),
             )
 
+        resolved_refs = resolve_structural_references(clean_query)
+        base_filters = self._merge_query_hints(filters, clean_query, resolved_refs)
+        limit_final = top_k or self._final_top_k
+
+        # BLOQUEIO GLOBAL PRÉ-RECUPERAÇÃO (AO VIVO NO SQLITE):
+        # Avalia todas as versões candidatas antes de acionar busca estrutural, FTS5,
+        # embeddings ou ChromaDB. Nunca confia em metadados antigos de índices!
+        all_versions = self._repository.list_all_versions()
         total_chunks = self._repository.count_chunks()
-        if total_chunks == 0:
+        if not all_versions and total_chunks == 0:
             return HybridRetrievalResult(
                 query=clean_query,
                 index_empty=True,
@@ -212,15 +226,119 @@ class HybridNormativeRetriever:
                 ),
                 diagnostics=RetrievalDiagnostics(
                     query=clean_query,
+                    effective_filters=self._serialize_filters(base_filters),
+                    resolved_references=resolved_refs,
                     max_vector_distance=self._max_vector_distance,
                     reranker_enabled=self._enable_reranker,
                     adaptive_cutoff_enabled=self._enable_adaptive_cutoff,
                 ),
             )
 
-        resolved_refs = resolve_structural_references(clean_query)
-        effective_filters = self._merge_query_hints(filters, clean_query, resolved_refs)
-        limit_final = top_k or self._final_top_k
+        all_pages_cache: dict[str, list[RegulatoryPage]] = {}
+        doc_assessments: dict[str, DocumentVersionValidationAssessment] = {}
+        (
+            approved_version_ids,
+            blocked_versions,
+            matching_any_scope_approved_count,
+        ) = self._resolve_globally_approved_versions(
+            all_versions=all_versions,
+            effective_filters=base_filters,
+            all_pages_cache=all_pages_cache,
+            doc_assessments=doc_assessments,
+        )
+
+        # Curto-circuito ANTES de qualquer motor de busca (estrutural, lexical ou vetorial):
+        # Se nenhuma versão globalmente aprovada corresponder ao escopo, não executa buscas!
+        if not approved_version_ids:
+            warnings_empty: list[str] = []
+            blocked_by_approval = False
+            blocked_vids = tuple(v.version_id for _, v, _ in blocked_versions)
+            if blocked_versions:
+                blocked_by_approval = True
+                warnings_empty.append(
+                    "BLOQUEIO GLOBAL DE APROVAÇÃO DOCUMENTAL: A(s) versão(ões) documental(is) "
+                    "correspondente(s) ainda não tiveram todas as páginas revisadas e aprovadas "
+                    "para transcrição literal e foram excluídas antes da recuperação."
+                )
+            else:
+                ambiguity_warnings = self._detect_missing_current_version_ambiguity(
+                    effective_filters=base_filters,
+                    resolved_refs=resolved_refs,
+                    doc_assessments=doc_assessments,
+                    all_pages_cache=all_pages_cache,
+                )
+                warnings_empty.extend(ambiguity_warnings)
+                if (
+                    not ambiguity_warnings
+                    and total_chunks == 0
+                    and matching_any_scope_approved_count == 0
+                ):
+                    return HybridRetrievalResult(
+                        query=clean_query,
+                        resolved_references=resolved_refs,
+                        index_empty=True,
+                        warnings=(
+                            "Nenhum documento regulatório aprovado está indexado na base "
+                            "no momento.",
+                        ),
+                        diagnostics=RetrievalDiagnostics(
+                            query=clean_query,
+                            effective_filters=self._serialize_filters(base_filters),
+                            resolved_references=resolved_refs,
+                            max_vector_distance=self._max_vector_distance,
+                            reranker_enabled=self._enable_reranker,
+                            adaptive_cutoff_enabled=self._enable_adaptive_cutoff,
+                        ),
+                    )
+
+            return HybridRetrievalResult(
+                query=clean_query,
+                resolved_references=resolved_refs,
+                evidences=(),
+                blocked_evidences=(),
+                blocked_by_document_approval=blocked_by_approval,
+                blocked_version_ids=blocked_vids,
+                warnings=tuple(dict.fromkeys(warnings_empty)),
+                diagnostics=RetrievalDiagnostics(
+                    query=clean_query,
+                    effective_filters=self._serialize_filters(
+                        replace(base_filters, allowed_version_ids=())
+                    ),
+                    resolved_references=resolved_refs,
+                    max_vector_distance=self._max_vector_distance,
+                    version_ambiguity_detected=any(
+                        "AMBIGUIDADE DE VERSÃO" in w for w in warnings_empty
+                    ),
+                    reranker_enabled=self._enable_reranker,
+                    adaptive_cutoff_enabled=self._enable_adaptive_cutoff,
+                ),
+            )
+
+        effective_filters = replace(
+            base_filters,
+            only_approved_literal=True,
+            include_preliminary_native=False,
+            allowed_version_ids=tuple(approved_version_ids),
+        )
+
+        if total_chunks == 0:
+            return HybridRetrievalResult(
+                query=clean_query,
+                resolved_references=resolved_refs,
+                index_empty=True,
+                warnings=(
+                    "Nenhum documento regulatório está indexado na base no momento. "
+                    "Execute a indexação dos documentos aprovados antes de consultar.",
+                ),
+                diagnostics=RetrievalDiagnostics(
+                    query=clean_query,
+                    effective_filters=self._serialize_filters(effective_filters),
+                    resolved_references=resolved_refs,
+                    max_vector_distance=self._max_vector_distance,
+                    reranker_enabled=self._enable_reranker,
+                    adaptive_cutoff_enabled=self._enable_adaptive_cutoff,
+                ),
+            )
 
         candidates: list[RetrievalCandidate] = []
         warnings: list[str] = []
@@ -228,9 +346,9 @@ class HybridNormativeRetriever:
         lexical_diagnostics: list[LexicalHitDiagnostic] = []
         vector_diagnostics: list[VectorHitDiagnostic] = []
         vector_distance_by_chunk: dict[str, float] = {}
-        chroma_where_used: dict[str, MetadataValue] | None = None
+        chroma_where_used: dict[str, MetadataFilterValue] | None = None
 
-        # 1. Busca estrutural determinística exata (ex.: RBAC 43.3, 43.9(a)(1)(i))
+        # 1. Busca estrutural determinística exata restrita a versões globalmente aprovadas
         structural_hits = 0
         if self._enable_structural:
             for ref in resolved_refs:
@@ -257,7 +375,7 @@ class HybridNormativeRetriever:
                         )
                     )
 
-        # 2. Busca lexical SQLite FTS5 (BM25, tolerante a acentos)
+        # 2. Busca lexical SQLite FTS5 (BM25) restrita a versões globalmente aprovadas
         lexical_pairs: list[tuple[str, float]] = []
         if self._enable_lexical:
             lexical_pairs = self._repository.search_chunks_fts(
@@ -278,7 +396,7 @@ class HybridNormativeRetriever:
                     )
                 )
 
-        # 3. Busca semântica vetorial no ChromaDB (com filtro normalizado amendment_number_key)
+        # 3. Busca semântica vetorial no ChromaDB restrita a versões globalmente aprovadas
         vector_hits_count = 0
         vector_available = True
         if self._enable_vector and self._embedding_port is not None:
@@ -360,6 +478,8 @@ class HybridNormativeRetriever:
             ambiguity_warnings = self._detect_missing_current_version_ambiguity(
                 effective_filters=effective_filters,
                 resolved_refs=resolved_refs,
+                doc_assessments=doc_assessments,
+                all_pages_cache=all_pages_cache,
             )
             warnings.extend(ambiguity_warnings)
             diagnostics = RetrievalDiagnostics(
@@ -397,16 +517,18 @@ class HybridNormativeRetriever:
         for acc in fused:
             acc.vector_distance = vector_distance_by_chunk.get(acc.chunk_id)
 
-        # Quando há correspondência estrutural exata (ex.: "RBAC 43.3"), restringe os resultados
-        # às unidades estruturalmente correspondentes para evitar ruído de seções vizinhas
-        # (preservando os ranks lexicais/vetoriais fundidos via RRF nessas unidades).
         if structural_hits > 0:
             structural_only = [acc for acc in fused if acc.structural_rank is not None]
             if structural_only:
                 fused = structural_only
 
         chunk_ids = [item.chunk_id for item in fused]
-        chunks_by_id = {c.chunk_id: c for c in self._repository.get_chunks_by_ids(chunk_ids)}
+        approved_version_set = set(approved_version_ids)
+        chunks_by_id = {
+            c.chunk_id: c
+            for c in self._repository.get_chunks_by_ids(chunk_ids)
+            if c.version_id in approved_version_set
+        }
 
         # 4.1. Reranking determinístico leve opcional (sem LLM externo; nunca sobrepõe filtros)
         if self._enable_reranker and len(fused) > 1:
@@ -453,14 +575,11 @@ class HybridNormativeRetriever:
         )
 
         usable_evidences: list[FusedEvidence] = []
-        blocked_evidences: list[FusedEvidence] = []
         evidence_decisions: list[EvidenceDecisionDiagnostic] = []
         seen_sections: set[tuple[str, str]] = set()
-        # Cache efêmero restrito a uma única chamada `retrieve()` para eliminar consultas N+1
-        # repetidas ao SQLite (sem estado persistente entre consultas distintas).
+        # Cache efêmero restrito a uma única chamada `retrieve()` (zero estado persistente).
         docs_cache: dict[str, RegulatoryDocument | None] = {}
         versions_cache: dict[str, DocumentVersion | None] = {}
-        pages_cache: dict[tuple[str, tuple[int, ...]], list[RegulatoryPage]] = {}
 
         for acc in fused:
             hydrated_chunk = chunks_by_id.get(acc.chunk_id)
@@ -489,7 +608,8 @@ class HybridNormativeRetriever:
                 acc=acc,
                 docs_cache=docs_cache,
                 versions_cache=versions_cache,
-                pages_cache=pages_cache,
+                all_pages_cache=all_pages_cache,
+                doc_assessments=doc_assessments,
             )
             if evidence is None:
                 continue
@@ -511,7 +631,10 @@ class HybridNormativeRetriever:
                 continue
 
             seen_sections.add(section_key)
-            if evidence.trust_level == EvidenceTrustLevel.VALIDATED_LITERAL:
+            if (
+                evidence.trust_level == EvidenceTrustLevel.VALIDATED_LITERAL
+                and evidence.literal_transcription_allowed
+            ):
                 usable_evidences.append(evidence)
                 evidence_decisions.append(
                     EvidenceDecisionDiagnostic(
@@ -527,33 +650,7 @@ class HybridNormativeRetriever:
                         reason="included:validated_literal",
                     )
                 )
-            elif (
-                evidence.trust_level == EvidenceTrustLevel.PRELIMINARY_UNREVIEWED
-                and effective_filters.include_preliminary_native
-                and not effective_filters.only_approved_literal
-            ):
-                usable_evidences.append(evidence)
-                evidence_decisions.append(
-                    EvidenceDecisionDiagnostic(
-                        chunk_id=evidence.chunk_id,
-                        document_id=evidence.document_id,
-                        version_id=evidence.version_id,
-                        regulation_number=evidence.regulation_number,
-                        amendment_number=evidence.amendment_number,
-                        section_number=evidence.section_number,
-                        pdf_pages=evidence.pdf_pages,
-                        trust_level=evidence.trust_level.value,
-                        included=True,
-                        reason="included:preliminary_unreviewed_location_only",
-                    )
-                )
             else:
-                blocked_evidences.append(evidence)
-                excl_reason = (
-                    "excluded:only_approved_literal_required"
-                    if evidence.trust_level == EvidenceTrustLevel.PRELIMINARY_UNREVIEWED
-                    else f"excluded:{evidence.trust_level.value}"
-                )
                 evidence_decisions.append(
                     EvidenceDecisionDiagnostic(
                         chunk_id=evidence.chunk_id,
@@ -565,24 +662,21 @@ class HybridNormativeRetriever:
                         pdf_pages=evidence.pdf_pages,
                         trust_level=evidence.trust_level.value,
                         included=False,
-                        reason=excl_reason,
+                        reason="excluded:global_document_approval_required",
                     )
                 )
 
             if len(usable_evidences) >= limit_final:
                 break
 
-        # Prioriza evidências validadas sobre preliminares mantendo ordem de ranking em cada grupo
         usable_evidences.sort(
             key=lambda ev: (
-                0 if ev.trust_level == EvidenceTrustLevel.VALIDATED_LITERAL else 1,
                 -(ev.rerank_score if ev.rerank_score is not None else ev.rrf_score),
                 -ev.rrf_score,
             )
         )
 
-        # 4.2. Seleção adaptativa de contexto pertinente (evita enviar cauda ruidosa ao Gemini,
-        # mantendo todas as evidências comparáveis e reconstrução integral multi-página)
+        # 4.2. Seleção adaptativa de contexto pertinente
         if self._enable_adaptive_cutoff and structural_hits == 0 and len(usable_evidences) > 1:
             top_ev = usable_evidences[0]
             top_metric = (
@@ -628,11 +722,13 @@ class HybridNormativeRetriever:
             evidences=usable_evidences,
             effective_filters=effective_filters,
         )
-        if not usable_evidences and not blocked_evidences:
+        if not usable_evidences:
             ambiguity_warnings.extend(
                 self._detect_missing_current_version_ambiguity(
                     effective_filters=effective_filters,
                     resolved_refs=resolved_refs,
+                    doc_assessments=doc_assessments,
+                    all_pages_cache=all_pages_cache,
                 )
             )
         warnings.extend(ambiguity_warnings)
@@ -657,13 +753,98 @@ class HybridNormativeRetriever:
             query=clean_query,
             resolved_references=resolved_refs,
             evidences=tuple(usable_evidences),
-            blocked_evidences=tuple(blocked_evidences[:limit_final]),
+            blocked_evidences=(),
             lexical_hits_count=len(lexical_pairs),
             vector_hits_count=vector_hits_count,
             structural_hits_count=structural_hits,
             vector_search_available=vector_available,
             warnings=tuple(dict.fromkeys(warnings)),
             diagnostics=diagnostics,
+        )
+
+    def _resolve_globally_approved_versions(
+        self,
+        *,
+        all_versions: Sequence[DocumentVersion],
+        effective_filters: SearchFilter,
+        all_pages_cache: dict[str, list[RegulatoryPage]],
+        doc_assessments: dict[str, DocumentVersionValidationAssessment],
+    ) -> tuple[
+        list[str],
+        list[tuple[RegulatoryDocument, DocumentVersion, DocumentVersionValidationAssessment]],
+        int,
+    ]:
+        """Resolve ao vivo no SQLite as versões elegíveis (100% das páginas aprovadas)."""
+        catalog_docs = {doc.document_id: doc for doc in self._repository.search_documents()}
+        approved_ids: list[str] = []
+        blocked: list[
+            tuple[RegulatoryDocument, DocumentVersion, DocumentVersionValidationAssessment]
+        ] = []
+        total_approved_any_scope = 0
+
+        for version in all_versions:
+            doc = catalog_docs.get(version.document_id)
+            if doc is None:
+                continue
+            if not self._matches_catalog_scope(doc, version, effective_filters):
+                continue
+
+            pages = self._repository.get_pages(version.version_id)
+            all_pages_cache[version.version_id] = pages
+            assessment = self._validation_service.evaluate_document_version(
+                version=version,
+                pages=pages,
+            )
+            doc_assessments[version.version_id] = assessment
+            if assessment.literal_transcription_allowed:
+                approved_ids.append(version.version_id)
+                total_approved_any_scope += 1
+            else:
+                blocked.append((doc, version, assessment))
+
+        return approved_ids, blocked, total_approved_any_scope
+
+    @staticmethod
+    def _matches_catalog_scope(
+        document: RegulatoryDocument,
+        version: DocumentVersion,
+        filters: SearchFilter,
+    ) -> bool:
+        if filters.document_id and document.document_id != filters.document_id:
+            return False
+        if filters.authority and document.authority.lower() != filters.authority.lower():
+            return False
+        if filters.document_type is not None and document.document_type != filters.document_type:
+            return False
+        if (
+            filters.regulation_number
+            and document.regulation_number.strip().lower()
+            != filters.regulation_number.strip().lower()
+        ):
+            return False
+        if filters.version_id and version.version_id != filters.version_id:
+            return False
+        if filters.allowed_version_ids is not None and (
+            version.version_id not in filters.allowed_version_ids
+        ):
+            return False
+        if filters.amendment_number and not amendments_match(
+            version.amendment_number, filters.amendment_number
+        ):
+            return False
+        if (
+            not filters.amendment_number
+            and not filters.version_id
+            and filters.version_status is not None
+            and version.version_status != filters.version_status
+        ):
+            return False
+        return not (
+            not filters.amendment_number
+            and not filters.version_id
+            and filters.version_status is None
+            and filters.only_current_version
+            and version.version_status != VersionStatus.CURRENT
         )
 
     @staticmethod
@@ -708,6 +889,7 @@ class HybridNormativeRetriever:
                 if len(ref_regs) == 1:
                     regulation_number = next(iter(ref_regs))
 
+        # Política global obrigatória: sempre exige aprovação integral e bloqueia preliminares
         return SearchFilter(
             document_id=base.document_id,
             authority=base.authority,
@@ -717,13 +899,16 @@ class HybridNormativeRetriever:
             version_id=base.version_id,
             version_status=base.version_status,
             only_current_version=only_current,
-            only_approved_literal=base.only_approved_literal,
-            include_preliminary_native=base.include_preliminary_native,
+            only_approved_literal=True,
+            include_preliminary_native=False,
+            allowed_version_ids=base.allowed_version_ids,
         )
 
     @staticmethod
-    def _build_chroma_where(filters: SearchFilter) -> dict[str, MetadataValue] | None:
-        where: dict[str, MetadataValue] = {}
+    def _build_chroma_where(
+        filters: SearchFilter,
+    ) -> dict[str, MetadataFilterValue] | None:
+        where: dict[str, MetadataFilterValue] = {}
         if filters.document_id:
             where["document_id"] = filters.document_id
         if filters.authority:
@@ -734,6 +919,11 @@ class HybridNormativeRetriever:
             where["regulation_number"] = filters.regulation_number.strip()
         if filters.version_id:
             where["version_id"] = filters.version_id
+        elif filters.allowed_version_ids is not None:
+            if len(filters.allowed_version_ids) == 1:
+                where["version_id"] = filters.allowed_version_ids[0]
+            elif len(filters.allowed_version_ids) > 1:
+                where["version_id"] = list(filters.allowed_version_ids)
         if filters.amendment_number:
             # Aplica filtragem normalizada diretamente no ChromaDB ("5" == "05" == "005")
             # evitando desperdício de janela top_k com emendas concorrentes.
@@ -762,6 +952,8 @@ class HybridNormativeRetriever:
             )
         if filters.version_id:
             items.append(("version_id", filters.version_id))
+        if filters.allowed_version_ids is not None:
+            items.append(("allowed_version_ids", ",".join(filters.allowed_version_ids)))
         if filters.version_status is not None:
             items.append(("version_status", filters.version_status.value))
         items.append(("only_current_version", str(filters.only_current_version)))
@@ -818,8 +1010,10 @@ class HybridNormativeRetriever:
         *,
         effective_filters: SearchFilter,
         resolved_refs: Sequence[ResolvedStructuralRef],
+        doc_assessments: dict[str, DocumentVersionValidationAssessment] | None = None,
+        all_pages_cache: dict[str, list[RegulatoryPage]] | None = None,
     ) -> list[str]:
-        """Alerta quando existem versões não vigentes no catálogo, mas nenhuma marcada current."""
+        """Alerta quando existem versões aprovadas não vigentes, mas nenhuma marcada current."""
         if (
             not effective_filters.only_current_version
             or effective_filters.amendment_number
@@ -842,12 +1036,39 @@ class HybridNormativeRetriever:
             if target_regs and doc.regulation_number.strip().lower() not in target_regs:
                 continue
             versions = self._repository.list_versions(doc.document_id)
-            if not versions:
+            approved_versions: list[DocumentVersion] = []
+            for ver in versions:
+                assessment = (
+                    doc_assessments.get(ver.version_id) if doc_assessments is not None else None
+                )
+                if assessment is None:
+                    pages = (
+                        all_pages_cache.get(ver.version_id)
+                        if all_pages_cache is not None
+                        else None
+                    )
+                    if pages is None:
+                        pages = self._repository.get_pages(ver.version_id)
+                        if all_pages_cache is not None:
+                            all_pages_cache[ver.version_id] = pages
+                    assessment = self._validation_service.evaluate_document_version(
+                        version=ver,
+                        pages=pages,
+                    )
+                    if doc_assessments is not None:
+                        doc_assessments[ver.version_id] = assessment
+                if assessment.literal_transcription_allowed:
+                    approved_versions.append(ver)
+
+            if not approved_versions:
                 continue
-            has_current = any(v.version_status == VersionStatus.CURRENT for v in versions)
+            has_current = any(
+                v.version_status == VersionStatus.CURRENT for v in approved_versions
+            )
             if not has_current:
                 available = ", ".join(
-                    f"Emenda {v.amendment_number} ({v.version_status.value})" for v in versions
+                    f"Emenda {v.amendment_number} ({v.version_status.value})"
+                    for v in approved_versions
                 )
                 warnings.append(
                     f"AMBIGUIDADE DE VERSÃO: {doc.document_type.value} {doc.regulation_number} "
@@ -864,9 +1085,10 @@ class HybridNormativeRetriever:
         acc: _RrfAccumulator,
         docs_cache: dict[str, RegulatoryDocument | None] | None = None,
         versions_cache: dict[str, DocumentVersion | None] | None = None,
-        pages_cache: dict[tuple[str, tuple[int, ...]], list[RegulatoryPage]] | None = None,
+        all_pages_cache: dict[str, list[RegulatoryPage]] | None = None,
+        doc_assessments: dict[str, DocumentVersionValidationAssessment] | None = None,
     ) -> FusedEvidence | None:
-        """Recupera texto literal e status ao vivo das páginas diretamente do SQLite (SSOT)."""
+        """Recupera texto literal e valida aprovação global ao vivo diretamente do SQLite (SSOT)."""
         if docs_cache is not None and chunk.document_id in docs_cache:
             document = docs_cache[chunk.document_id]
         else:
@@ -882,6 +1104,28 @@ class HybridNormativeRetriever:
                 versions_cache[chunk.version_id] = version
 
         if document is None or version is None:
+            return None
+
+        if all_pages_cache is not None and version.version_id in all_pages_cache:
+            all_version_pages = all_pages_cache[version.version_id]
+        else:
+            all_version_pages = self._repository.get_pages(version.version_id)
+            if all_pages_cache is not None:
+                all_pages_cache[version.version_id] = all_version_pages
+
+        doc_assessment = (
+            doc_assessments.get(version.version_id) if doc_assessments is not None else None
+        )
+        if doc_assessment is None:
+            doc_assessment = self._validation_service.evaluate_document_version(
+                version=version,
+                pages=all_version_pages,
+            )
+            if doc_assessments is not None:
+                doc_assessments[version.version_id] = doc_assessment
+
+        # Defesa em profundidade: nunca hidrata evidência de versão sem aprovação global
+        if not doc_assessment.literal_transcription_allowed:
             return None
 
         units = self._repository.get_units_by_section(
@@ -909,18 +1153,14 @@ class HybridNormativeRetriever:
             structure_status = StructureStatus.PARSED
             title = chunk.title
 
-        page_key = (version.version_id, tuple(page_numbers))
-        if pages_cache is not None and page_key in pages_cache:
-            pages = pages_cache[page_key]
-        else:
-            pages = self._repository.get_pages(version.version_id, page_numbers=page_numbers)
-            if pages_cache is not None:
-                pages_cache[page_key] = pages
+        pages_by_num = {p.pdf_page_number: p for p in all_version_pages}
+        pages = [pages_by_num[p_num] for p_num in page_numbers if p_num in pages_by_num]
 
         assessment = self._validation_service.evaluate_section(
             section_number=chunk.section_number,
             pages=pages,
             structure_status=structure_status,
+            document_assessment=doc_assessment,
         )
 
         rejected_pages = tuple(
@@ -939,11 +1179,6 @@ class HybridNormativeRetriever:
             trust_level = EvidenceTrustLevel.BLOCKED_REJECTED
         elif assessment.ocr_blocked_pdf_pages:
             trust_level = EvidenceTrustLevel.BLOCKED_OCR_PENDING
-        elif (
-            assessment.aggregate_status == PageValidationStatus.NATIVE_QUALITY_CHECKED
-            and structure_status == StructureStatus.PARSED
-        ):
-            trust_level = EvidenceTrustLevel.PRELIMINARY_UNREVIEWED
         else:
             trust_level = EvidenceTrustLevel.BLOCKED_UNVERIFIED
 
@@ -999,6 +1234,10 @@ class HybridNormativeRetriever:
         ):
             return False
         if filters.version_id and evidence.version_id != filters.version_id:
+            return False
+        if filters.allowed_version_ids is not None and (
+            evidence.version_id not in filters.allowed_version_ids
+        ):
             return False
         if filters.amendment_number and not amendments_match(
             evidence.amendment_number, filters.amendment_number

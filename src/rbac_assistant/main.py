@@ -141,6 +141,7 @@ def build_telegram_router(
         embedding_port=indexing_embedding,
         default_collection_name=settings.vector_db.collection_name,
         audit_port=audit_adapter,
+        validation_service=validation_service,
     )
     retriever = HybridNormativeRetriever(
         repository=repository,

@@ -15,6 +15,7 @@ from rbac_assistant.domain.exceptions import (
 )
 from rbac_assistant.domain.ports.vector_store_port import (
     CollectionMetadata,
+    MetadataFilterValue,
     MetadataValue,
     VectorRecord,
     VectorSearchHit,
@@ -22,12 +23,20 @@ from rbac_assistant.domain.ports.vector_store_port import (
 
 
 def _format_chroma_where(
-    where: Mapping[str, MetadataValue] | None,
+    where: Mapping[str, MetadataFilterValue] | None,
 ) -> dict[str, Any] | None:
-    """Converte mapeamento plano em filtro compatível com ChromaDB 1.5.9 (`$and` multi-campo)."""
+    """Converte mapeamento em filtro compatível com ChromaDB 1.5.9 (`$and` e `$in`)."""
     if not where:
         return None
-    items = [{key: value} for key, value in where.items()]
+    items: list[dict[str, Any]] = []
+    for key, value in where.items():
+        if isinstance(value, (list, tuple)):
+            if len(value) == 1:
+                items.append({key: value[0]})
+            else:
+                items.append({key: {"$in": list(value)}})
+        else:
+            items.append({key: value})
     if len(items) == 1:
         return items[0]
     return {"$and": items}
@@ -329,7 +338,7 @@ class ChromaVectorStore:
         self,
         *,
         collection_name: str,
-        where: Mapping[str, MetadataValue],
+        where: Mapping[str, MetadataFilterValue],
     ) -> None:
         """Remove todos os registros que satisfaçam um filtro de metadados."""
         if not where:
@@ -362,7 +371,7 @@ class ChromaVectorStore:
         self,
         *,
         collection_name: str,
-        where: Mapping[str, MetadataValue] | None = None,
+        where: Mapping[str, MetadataFilterValue] | None = None,
     ) -> list[str]:
         """Lista os IDs de registros persistidos na coleção (opcionalmente filtrados)."""
         existing = self._try_get_existing_collection(collection_name)
@@ -388,7 +397,7 @@ class ChromaVectorStore:
         collection_name: str,
         query_embedding: Sequence[float],
         top_k: int = 5,
-        where: Mapping[str, MetadataValue] | None = None,
+        where: Mapping[str, MetadataFilterValue] | None = None,
     ) -> list[VectorSearchHit]:
         """Executa busca semântica vetorial filtrada por metadados."""
         try:

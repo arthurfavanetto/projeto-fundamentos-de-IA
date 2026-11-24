@@ -74,8 +74,8 @@ retrieval:
   max_vector_distance: 0.85
   only_current_amendment_by_default: true
   reconstruct_full_section_from_ssot: true
-  allow_preliminary_native_search: true
-  # Interface pública do Telegram restringe a recuperação exclusivamente a páginas aprovadas
+  allow_preliminary_native_search: false
+  # Interface pública do Telegram restringe a recuperação exclusivamente a versões globalmente aprovadas
   telegram_only_approved_literal: true
 
 telegram:

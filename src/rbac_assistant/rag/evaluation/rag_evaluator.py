@@ -542,7 +542,7 @@ class RagEvaluator:
                 if ev.literal_transcription_allowed
             ):
                 unapproved_literals += 1
-            if answer.is_preliminary_only and answer.normative_text is not None:
+            if answer.is_preliminary_only or answer.preliminary_excerpt is not None:
                 unapproved_literals += 1
 
             if llm_was_called:
@@ -683,20 +683,23 @@ class RagEvaluator:
                     q_fp = len(unique_ev_5)
                     q_note = "failed_to_abstain_on_no_evidence"
 
-            elif case.expected_behavior == "preliminary_location_no_llm":
-                if not answer.is_preliminary_only or llm_was_called:
-                    q_behavior_ok = False
-                    q_fn = 1
-                    retrieval_fn += 1
-                    q_note = "expected_preliminary_without_llm"
-
-            elif case.expected_behavior in ("blocked_ocr_no_llm", "blocked_rejected_no_llm"):
-                if answer.found or llm_was_called:
+            elif case.expected_behavior in (
+                "blocked_unapproved_document_no_llm",
+                "blocked_ocr_no_llm",
+                "blocked_rejected_no_llm",
+            ):
+                if (
+                    answer.found
+                    or llm_was_called
+                    or answer.normative_text is not None
+                    or answer.preliminary_excerpt is not None
+                    or answer.is_preliminary_only
+                ):
                     q_behavior_ok = False
                     abstention_failures += 1
                     q_fp = len(unique_ev_5)
                     retrieval_fp += q_fp
-                    q_note = f"leaked_usable_neighbor_on_{case.expected_behavior}"
+                    q_note = f"leaked_unapproved_on_{case.expected_behavior}"
 
             elif case.expected_behavior == "version_ambiguity":
                 has_ambig_warn = any(

@@ -83,8 +83,9 @@ class SearchFilter:
     version_id: str | None = None
     version_status: VersionStatus | None = None
     only_current_version: bool = True
-    only_approved_literal: bool = False
-    include_preliminary_native: bool = True
+    only_approved_literal: bool = True
+    include_preliminary_native: bool = False
+    allowed_version_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +248,8 @@ class HybridRetrievalResult:
     vector_search_available: bool = True
     warnings: tuple[str, ...] = ()
     diagnostics: RetrievalDiagnostics | None = None
+    blocked_by_document_approval: bool = False
+    blocked_version_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +280,11 @@ class StructuredNormativeAnswer:
         if self.normative_text is not None and not self.is_literal_validated:
             raise ValueError(
                 "normative_text só pode ser preenchido quando is_literal_validated=True."
+            )
+        if self.preliminary_excerpt is not None or self.is_preliminary_only:
+            raise ValueError(
+                "Excertos preliminares não revisados são proibidos pela política global "
+                "de aprovação documental."
             )
 
 

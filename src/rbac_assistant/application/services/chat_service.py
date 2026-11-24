@@ -146,31 +146,48 @@ class NormativeChatService:
             )
             return answer
 
-        # Caso 2: Nenhuma evidência utilizável (incluindo cenário onde apenas páginas bloqueadas
-        # por OCR pendente ou reprovadas corresponderam à consulta)
+        # Caso 2: Versão(ões) bloqueada(s) pela política global de aprovação documental
         if not retrieval.evidences:
-            if retrieval.blocked_evidences:
+            if retrieval.blocked_by_document_approval:
                 explanation = (
-                    "Foram localizados dispositivos potencialmente relacionados, porém todas "
-                    "as páginas correspondentes estão bloqueadas para uso normativo "
-                    "(pendentes de revisão manual de OCR, reprovadas ou não verificadas). "
-                    "Por segurança e fidelidade normativa, o assistente não envia essas páginas "
-                    "ao modelo generativo nem gera resposta fundamentada até revisão humana."
+                    "Não há conteúdo normativo autorizado para responder a esta consulta: "
+                    "a versão documental correspondente ainda não teve todas as suas páginas "
+                    "individualmente revisadas e aprovadas para transcrição literal. "
+                    "Por política global de aprovação documental, o assistente não utiliza "
+                    "documentos pendentes, parciais ou com páginas reprovadas na busca, na "
+                    "exibição de excertos ou na geração por IA até a aprovação integral da versão."
+                )
+                outcome = "refused_document_not_globally_approved"
+                has_blocked = True
+                blocked_count = max(len(retrieval.blocked_version_ids), 1)
+            elif retrieval.blocked_evidences:
+                explanation = (
+                    "Não há conteúdo normativo autorizado para responder a esta consulta: "
+                    "as páginas correspondentes não possuem aprovação integral para "
+                    "transcrição literal. Por segurança e fidelidade normativa, nenhum excerto "
+                    "pendente é exibido nem enviado ao modelo generativo."
                 )
                 outcome = "refused_blocked_only"
+                has_blocked = True
+                blocked_count = len(retrieval.blocked_evidences)
             else:
                 explanation = (
-                    "Não foram encontradas evidências normativas suficientes na base indexada "
-                    "para responder à sua pergunta com segurança. Verifique os filtros aplicados "
-                    "ou confirme se o regulamento desejado já foi ingerido e indexado."
+                    "Não foram encontradas evidências normativas suficientes na base aprovada "
+                    "e indexada para responder à sua pergunta com segurança. Verifique os filtros "
+                    "aplicados ou confirme se o regulamento desejado já foi integralmente "
+                    "revisado, aprovado e indexado."
                 )
                 outcome = "refused_no_evidence"
+                has_blocked = False
+                blocked_count = 0
+
             answer = self._formatter.build_answer(
                 query=clean_question,
                 usable_evidences=(),
-                blocked_evidences=retrieval.blocked_evidences,
+                blocked_evidences=(),
                 explanation=explanation,
                 extra_observations=extra_observations,
+                has_blocked_sources=has_blocked,
                 diagnostics=retrieval.diagnostics,
             )
             self._audit_query(
@@ -178,11 +195,12 @@ class NormativeChatService:
                 actor_id=actor_id,
                 actor_role=actor_role,
                 query_length=len(clean_question),
-                blocked_count=len(retrieval.blocked_evidences),
+                blocked_count=blocked_count,
             )
             return answer
 
-        # Caso 3: Apenas páginas aprovadas para transcrição literal podem fundamentar o LLM!
+        # Caso 3: Apenas evidências de versões globalmente aprovadas para transcrição literal
+        # podem ser exibidas ao usuário ou fundamentar o LLM!
         validated_evidences: list[FusedEvidence] = [
             ev
             for ev in retrieval.evidences
@@ -190,37 +208,39 @@ class NormativeChatService:
             and ev.literal_transcription_allowed
         ]
 
-        # Se somente evidências preliminares (native_quality_checked) foram localizadas,
-        # informa a localização preliminar e exige revisão humana SEM enviar ao Gemini!
+        # Defesa em profundidade: mesmo se um retriever injetado fornecer evidências preliminares
+        # ou não aprovadas, recusa sem exibir excertos e sem chamar o Gemini.
         if not validated_evidences:
             explanation = (
-                "Dispositivo localizado apenas em página(s) com extração automática preliminar "
-                "(native_quality_checked), ainda pendente(s) de revisão humana. Por governança "
-                "normativa, páginas não aprovadas NÃO são enviadas ao modelo generativo Gemini "
-                "nem apresentadas como transcrição literal validada. Revise e aprove as páginas "
-                "com `scripts/validate_extraction.py` antes de utilizar o conteúdo formalmente."
+                "Não há conteúdo normativo autorizado para responder a esta consulta: "
+                "a versão documental correspondente ainda não teve todas as suas páginas "
+                "individualmente revisadas e aprovadas para transcrição literal. "
+                "Por governança normativa, conteúdos preliminares ou pendentes não são "
+                "exibidos nem enviados ao modelo generativo."
             )
             extra_observations.append(
-                "GOVERNANÇA LLM: Nenhuma evidência não aprovada foi enviada ao modelo generativo."
+                "GOVERNANÇA GLOBAL: Nenhuma evidência não aprovada foi exibida ou enviada ao "
+                "modelo generativo."
             )
             answer = self._formatter.build_answer(
                 query=clean_question,
-                usable_evidences=retrieval.evidences,
-                blocked_evidences=retrieval.blocked_evidences,
+                usable_evidences=(),
+                blocked_evidences=(),
                 explanation=explanation,
                 extra_observations=extra_observations,
                 generation_model=None,
                 used_fallback_without_llm=True,
+                has_blocked_sources=True,
                 evidences_sent_to_llm=(),
                 diagnostics=retrieval.diagnostics,
             )
             self._audit_query(
-                outcome="preliminary_only",
+                outcome="refused_unapproved_evidence",
                 actor_id=actor_id,
                 actor_role=actor_role,
                 query_length=len(clean_question),
-                evidence_count=len(retrieval.evidences),
-                blocked_count=len(retrieval.blocked_evidences),
+                evidence_count=0,
+                blocked_count=len(retrieval.evidences) + len(retrieval.blocked_evidences),
                 used_fallback_without_llm=True,
             )
             return answer
@@ -233,8 +253,8 @@ class NormativeChatService:
             )
             answer = self._formatter.build_answer(
                 query=clean_question,
-                usable_evidences=retrieval.evidences,
-                blocked_evidences=retrieval.blocked_evidences,
+                usable_evidences=validated_evidences,
+                blocked_evidences=(),
                 explanation=explanation,
                 extra_observations=extra_observations,
                 generation_model=None,
@@ -247,8 +267,8 @@ class NormativeChatService:
                 actor_id=actor_id,
                 actor_role=actor_role,
                 query_length=len(clean_question),
-                evidence_count=len(retrieval.evidences),
-                blocked_count=len(retrieval.blocked_evidences),
+                evidence_count=len(validated_evidences),
+                blocked_count=0,
                 used_fallback_without_llm=True,
             )
             return answer
@@ -328,8 +348,8 @@ class NormativeChatService:
             safe_explanation = redact_text(citation_check.sanitized_explanation)
             answer = self._formatter.build_answer(
                 query=clean_question,
-                usable_evidences=retrieval.evidences,
-                blocked_evidences=retrieval.blocked_evidences,
+                usable_evidences=validated_evidences,
+                blocked_evidences=(),
                 explanation=safe_explanation,
                 extra_observations=extra_observations,
                 generation_model=self._llm.model_name,
@@ -344,8 +364,8 @@ class NormativeChatService:
                 actor_id=actor_id,
                 actor_role=actor_role,
                 query_length=len(clean_question),
-                evidence_count=len(retrieval.evidences),
-                blocked_count=len(retrieval.blocked_evidences),
+                evidence_count=len(validated_evidences),
+                blocked_count=0,
                 used_fallback_without_llm=False,
                 prompt_injection_detected=(
                     question_check.injection_detected or injection_in_evidence
@@ -379,8 +399,8 @@ class NormativeChatService:
             )
             answer = self._formatter.build_answer(
                 query=clean_question,
-                usable_evidences=retrieval.evidences,
-                blocked_evidences=retrieval.blocked_evidences,
+                usable_evidences=validated_evidences,
+                blocked_evidences=(),
                 explanation=fallback_explanation,
                 extra_observations=extra_observations,
                 generation_model=self._llm.model_name,
@@ -393,8 +413,8 @@ class NormativeChatService:
                 actor_id=actor_id,
                 actor_role=actor_role,
                 query_length=len(clean_question),
-                evidence_count=len(retrieval.evidences),
-                blocked_count=len(retrieval.blocked_evidences),
+                evidence_count=len(validated_evidences),
+                blocked_count=0,
                 used_fallback_without_llm=True,
                 prompt_injection_detected=(
                     question_check.injection_detected or injection_in_evidence

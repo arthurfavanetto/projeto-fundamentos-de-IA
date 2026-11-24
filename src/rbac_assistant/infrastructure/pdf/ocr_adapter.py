@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import shutil
 from pathlib import Path
 
+from rbac_assistant.domain.entities.regulatory_page import compute_page_content_hash
 from rbac_assistant.domain.exceptions import OcrUnavailableError
 from rbac_assistant.domain.ports.ocr_port import OcrPageResult
 from rbac_assistant.infrastructure.pdf.pdfplumber_extractor import normalize_auxiliary_text
@@ -55,7 +55,7 @@ class TesseractOcrAdapter:
             document.close()
 
         normalized_text = normalize_auxiliary_text(original_text)
-        content_hash = hashlib.sha256(original_text.encode("utf-8")).hexdigest()
+        content_hash = compute_page_content_hash(original_text)
         return OcrPageResult(
             pdf_page_number=pdf_page_number,
             original_text=original_text,

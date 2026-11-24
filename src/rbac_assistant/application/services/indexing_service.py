@@ -19,6 +19,11 @@ from datetime import UTC, datetime
 import structlog
 
 from rbac_assistant.application.services.catalog_service import CatalogService
+from rbac_assistant.application.services.validation_service import (
+    DocumentVersionValidationAssessment,
+    ValidationService,
+)
+from rbac_assistant.domain.entities.document_version import DocumentVersion
 from rbac_assistant.domain.entities.rag import (
     IndexingOutcome,
     IndexRegistryEntry,
@@ -26,10 +31,12 @@ from rbac_assistant.domain.entities.rag import (
     IndexVersionSummary,
     NormativeChunk,
 )
+from rbac_assistant.domain.entities.regulatory_document import ValidationPolicy
 from rbac_assistant.domain.exceptions import (
     EmbeddingCompatibilityError,
     IndexingError,
     StorageConnectionError,
+    ValidationPolicyError,
 )
 from rbac_assistant.domain.ports.audit_port import AuditEvent, AuditPort
 from rbac_assistant.domain.ports.document_repository_port import DocumentRepositoryPort
@@ -57,6 +64,7 @@ class IndexingService:
         embedding_port: EmbeddingPort,
         default_collection_name: str = "regulatory_chunks_ge2_768_v1",
         audit_port: AuditPort | None = None,
+        validation_service: ValidationService | None = None,
     ) -> None:
         self._repository = repository
         self._catalog_service = catalog_service
@@ -65,6 +73,57 @@ class IndexingService:
         self._embedding_port = embedding_port
         self._default_collection_name = default_collection_name
         self._audit_port = audit_port
+        self._validation_service = validation_service or ValidationService(
+            policy=ValidationPolicy.STRICT_ALL_PAGES
+        )
+
+    def _require_globally_approved_version(
+        self,
+        *,
+        document_id: str,
+        version: DocumentVersion,
+    ) -> DocumentVersionValidationAssessment:
+        """Valida que 100% das páginas da versão estão aprovadas antes de qualquer efeito."""
+        pages = self._repository.get_pages(version.version_id)
+        assessment = self._validation_service.evaluate_document_version(
+            version=version,
+            pages=pages,
+        )
+        if not assessment.literal_transcription_allowed:
+            reason = assessment.block_reason or (
+                f"Versão '{version.version_id}' do documento '{document_id}' não possui "
+                "todas as páginas revisadas e aprovadas para transcrição literal."
+            )
+            logger.warning(
+                "indexing_blocked_unapproved_version",
+                document_id=document_id,
+                version_id=version.version_id,
+                pending_pages=list(assessment.pending_pdf_pages),
+                rejected_pages=list(assessment.rejected_pdf_pages),
+                missing_pages=list(assessment.missing_pdf_pages),
+                duplicate_pages=list(assessment.duplicate_pdf_pages),
+            )
+            if self._audit_port is not None:
+                self._audit_port.record(
+                    AuditEvent(
+                        timestamp=datetime.now(UTC),
+                        action="document_indexed",
+                        status="blocked_unapproved_version",
+                        actor_id="system",
+                        details={
+                            "document_id": document_id,
+                            "version_id": version.version_id,
+                            "pending_pages_count": len(assessment.pending_pdf_pages),
+                            "rejected_pages_count": len(assessment.rejected_pdf_pages),
+                            "missing_pages_count": len(assessment.missing_pdf_pages),
+                        },
+                    )
+                )
+            raise ValidationPolicyError(
+                f"Indexação bloqueada para '{document_id}' (versão '{version.version_id}'): "
+                f"{reason}"
+            )
+        return assessment
 
     def index_document(
         self,
@@ -75,13 +134,21 @@ class IndexingService:
         collection_name: str | None = None,
         force_reindex: bool = False,
     ) -> IndexingOutcome:
-        """Indexa ou reindexa uma versão documental específica no SQLite FTS5 e no ChromaDB."""
+        """Indexa ou reindexa uma versão documental globalmente aprovada (FTS5 + ChromaDB)."""
         target_collection = collection_name or self._default_collection_name
         document = self._catalog_service.get_document(document_id)
         version = self._catalog_service.resolve_version(
             document_id=document_id,
             version_id=version_id,
             amendment_number=amendment_number,
+        )
+
+        # BLOQUEIO GLOBAL OBRIGATÓRIO ANTES DE QUALQUER EFEITO COLATERAL:
+        # Executa antes de ensure_collection_compatible, checagem de idempotência,
+        # chunking, embeddings, gravação no ChromaDB, save_chunks ou index_registry.
+        self._require_globally_approved_version(
+            document_id=document.document_id,
+            version=version,
         )
 
         # Verifica compatibilidade de modelo, dimensão e estratégia da coleção antes de gravar
@@ -297,21 +364,68 @@ class IndexingService:
         """Reconstrói a coleção vetorial integralmente a partir do SQLite (SSOT).
 
         Uso típico: após trocar `GEMINI_EMBEDDING_MODEL` ou `GEMINI_EMBEDDING_DIMENSIONS`.
-        Preserva 100% do SQLite, PDFs originais e aprovações humanas de revisão.
+        Valida aprovação global ANTES de remover qualquer coleção ou registro de índice,
+        preservando 100% do SQLite, PDFs originais, aprovações humanas e dados válidos.
         """
         target_collection = collection_name or self._default_collection_name
-        self._vector_store.delete_collection(target_collection)
-        self._repository.delete_index_registry(collection_name=target_collection)
-
         if document_id:
             versions = self._repository.list_versions(document_id)
         else:
             versions = self._repository.list_all_versions()
 
+        candidate_versions = [
+            version
+            for version in versions
+            if self._repository.list_units(version.version_id)
+        ]
+        if not candidate_versions:
+            return []
+
+        approved_versions: list[DocumentVersion] = []
+        blocked_assessments: list[tuple[DocumentVersion, DocumentVersionValidationAssessment]] = []
+        for version in candidate_versions:
+            pages = self._repository.get_pages(version.version_id)
+            assessment = self._validation_service.evaluate_document_version(
+                version=version,
+                pages=pages,
+            )
+            if assessment.literal_transcription_allowed:
+                approved_versions.append(version)
+            else:
+                blocked_assessments.append((version, assessment))
+
+        # Validação obrigatória ANTES de qualquer deleção de coleção ou index_registry!
+        if document_id and blocked_assessments:
+            blocked_ver, blocked_assessment = blocked_assessments[0]
+            raise ValidationPolicyError(
+                f"Reconstrução de índice bloqueada para '{document_id}' "
+                f"(versão '{blocked_ver.version_id}'): "
+                f"{blocked_assessment.block_reason or 'versão não aprovada globalmente.'}"
+            )
+        if not approved_versions:
+            blocked_ver, blocked_assessment = blocked_assessments[0]
+            raise ValidationPolicyError(
+                "Reconstrução de índice bloqueada: nenhuma versão documental possui "
+                "todas as páginas aprovadas para transcrição literal "
+                f"(ex.: '{blocked_ver.version_id}': "
+                f"{blocked_assessment.block_reason or 'pendente de aprovação'})."
+            )
+
+        for blocked_ver, blocked_assessment in blocked_assessments:
+            logger.warning(
+                "rebuild_skipping_unapproved_version",
+                document_id=blocked_ver.document_id,
+                version_id=blocked_ver.version_id,
+                pending_pages=list(blocked_assessment.pending_pdf_pages),
+                rejected_pages=list(blocked_assessment.rejected_pdf_pages),
+                missing_pages=list(blocked_assessment.missing_pdf_pages),
+            )
+
+        self._vector_store.delete_collection(target_collection)
+        self._repository.delete_index_registry(collection_name=target_collection)
+
         outcomes: list[IndexingOutcome] = []
-        for version in versions:
-            if not self._repository.list_units(version.version_id):
-                continue
+        for version in approved_versions:
             outcomes.append(
                 self.index_document(
                     document_id=version.document_id,

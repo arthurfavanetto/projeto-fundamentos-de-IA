@@ -127,6 +127,12 @@ def _build_indexing_service(
             instruction_strategy_version=settings.gemini.embedding_instruction_version,
         )
 
+    from rbac_assistant.application.services.validation_service import ValidationService
+    from rbac_assistant.domain.entities.regulatory_document import ValidationPolicy
+
+    validation_service = ValidationService(
+        policy=ValidationPolicy(settings.extraction.validation_policy)
+    )
     service = IndexingService(
         repository=repository,
         catalog_service=catalog,
@@ -135,6 +141,7 @@ def _build_indexing_service(
         embedding_port=embedding_port,
         default_collection_name=collection_name or settings.vector_db.collection_name,
         audit_port=audit_adapter,
+        validation_service=validation_service,
     )
     return service, gemini_client
 

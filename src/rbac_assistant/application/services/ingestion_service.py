@@ -21,6 +21,7 @@ from rbac_assistant.domain.entities.regulatory_document import RegulatoryDocumen
 from rbac_assistant.domain.entities.regulatory_page import (
     ExtractionMetadata,
     RegulatoryPage,
+    compute_page_content_hash,
 )
 from rbac_assistant.domain.exceptions import (
     AuditWriteError,
@@ -197,7 +198,6 @@ class IngestionService:
             for ext_page in extracted_pages:
                 orig_text = ext_page.original_text
                 norm_text = ext_page.normalized_text
-                content_hash = ext_page.content_hash
                 method = ExtractionMethod.NATIVE_PDF
 
                 if ext_page.needs_ocr:
@@ -215,12 +215,16 @@ class IngestionService:
                             )
                             orig_text = ocr_res.original_text
                             norm_text = ocr_res.normalized_text
-                            content_hash = ocr_res.content_hash
                             method = ExtractionMethod.OCR_FALLBACK
                         except OcrUnavailableError:
                             method = ExtractionMethod.OCR_REQUIRED_UNAVAILABLE
                     else:
                         method = ExtractionMethod.OCR_REQUIRED_UNAVAILABLE
+
+                content_hash = compute_page_content_hash(
+                    orig_text,
+                    tuple(table.rows for table in ext_page.tables),
+                )
 
                 quality = self._quality_checker.evaluate(
                     original_text=orig_text,

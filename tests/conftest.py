@@ -128,6 +128,18 @@ class InMemoryChromaCollection:
             "metadatas": found_metas,
         }
 
+    @classmethod
+    def _matches_where(cls, metadata: dict[str, Any], where: dict[str, Any]) -> bool:
+        if "$and" in where:
+            return all(cls._matches_where(metadata, sub) for sub in where["$and"])
+        for k, v in where.items():
+            if isinstance(v, dict) and "$in" in v:
+                if metadata.get(k) not in v["$in"]:
+                    return False
+            elif metadata.get(k) != v:
+                return False
+        return True
+
     def query(
         self,
         *,
@@ -139,7 +151,7 @@ class InMemoryChromaCollection:
         del query_embeddings, include
         matched: list[tuple[str, dict[str, Any]]] = []
         for rec_id, payload in self._store.items():
-            if where and not all(payload["metadata"].get(k) == v for k, v in where.items()):
+            if where and not self._matches_where(payload["metadata"], where):
                 continue
             matched.append((rec_id, payload))
 

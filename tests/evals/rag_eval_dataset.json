@@ -557,53 +557,53 @@
       "case_id": "Q34",
       "category": "governance_native_unreviewed",
       "structural_subset": "explicit_structural_ref",
-      "query": "O que diz o RBAC 43.11 sobre inspeção de 100 horas?",
+      "query": "O que diz o RBAC 44.11 sobre inspeção de 100 horas?",
       "expected_targets": [
         {
-          "regulation_number": "43",
-          "amendment_number": "05",
-          "section_number": "43.11",
-          "expected_pdf_pages": [5],
+          "regulation_number": "44",
+          "amendment_number": "01",
+          "section_number": "44.11",
+          "expected_pdf_pages": [2],
           "expected_text_snippets": ["inspeção de 100 horas"]
         }
       ],
-      "expected_behavior": "preliminary_location_no_llm",
-      "expected_regulation": "43",
-      "expected_amendment": "05"
+      "expected_behavior": "blocked_unapproved_document_no_llm",
+      "expected_regulation": "44",
+      "expected_amendment": "01"
     },
     {
       "case_id": "Q35",
       "category": "governance_ocr_pending",
       "structural_subset": "explicit_structural_ref",
-      "query": "O que determina o RBAC 43.13 sobre métodos e técnicas de manutenção?",
+      "query": "O que determina o RBAC 45.13 sobre métodos e técnicas de manutenção?",
       "expected_targets": [
         {
-          "regulation_number": "43",
-          "amendment_number": "05",
-          "section_number": "43.13",
-          "expected_pdf_pages": [6]
+          "regulation_number": "45",
+          "amendment_number": "01",
+          "section_number": "45.13",
+          "expected_pdf_pages": [2]
         }
       ],
       "expected_behavior": "blocked_ocr_no_llm",
-      "expected_regulation": "43",
-      "expected_amendment": "05"
+      "expected_regulation": "45",
+      "expected_amendment": "01"
     },
     {
       "case_id": "Q36",
       "category": "governance_rejected_page",
       "structural_subset": "explicit_structural_ref",
-      "query": "Qual a regra do RBAC 43.15 para inspeção em helicópteros?",
+      "query": "Qual a regra do RBAC 46.15 para inspeção em helicópteros?",
       "expected_targets": [
         {
-          "regulation_number": "43",
-          "amendment_number": "05",
-          "section_number": "43.15",
-          "expected_pdf_pages": [7]
+          "regulation_number": "46",
+          "amendment_number": "01",
+          "section_number": "46.15",
+          "expected_pdf_pages": [2]
         }
       ],
       "expected_behavior": "blocked_rejected_no_llm",
-      "expected_regulation": "43",
-      "expected_amendment": "05"
+      "expected_regulation": "46",
+      "expected_amendment": "01"
     },
     {
       "case_id": "Q37",

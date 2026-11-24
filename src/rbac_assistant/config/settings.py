@@ -175,7 +175,7 @@ class RetrievalConfig(BaseModel):
     max_vector_distance: float = Field(default=0.85, gt=0.0, le=2.0)
     only_current_amendment_by_default: bool = True
     reconstruct_full_section_from_ssot: bool = True
-    allow_preliminary_native_search: bool = True
+    allow_preliminary_native_search: bool = False
     telegram_only_approved_literal: bool = True
 
 
