@@ -17,7 +17,6 @@ Regras:
 from __future__ import annotations
 
 import asyncio
-import re
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,10 +29,30 @@ from rbac_assistant.application.services.catalog_service import CatalogService
 from rbac_assistant.application.services.chat_service import NormativeChatService
 from rbac_assistant.application.services.indexing_service import IndexingService
 from rbac_assistant.application.use_cases.check_system_status import CheckSystemStatusUseCase
-from rbac_assistant.domain.entities.rag import SearchFilter, StructuredNormativeAnswer
+from rbac_assistant.domain.entities.rag import (
+    IndexVersionSummary,
+    SearchFilter,
+    StructuredNormativeAnswer,
+)
+from rbac_assistant.domain.entities.regulatory_document import (
+    DocumentStatus,
+    RegulatoryDocument,
+    VersionStatus,
+)
+from rbac_assistant.domain.entities.regulatory_page import PageValidationStatus
 from rbac_assistant.domain.exceptions import AuditWriteError, DomainError
 from rbac_assistant.domain.ports.audit_port import AuditEvent, AuditPort
+from rbac_assistant.interfaces.telegram.conversational_guidance import (
+    ConversationIntent,
+    UserConversationStore,
+    classify_conversational_intent,
+    should_generate_explanation_for_free_text,
+)
 from rbac_assistant.interfaces.telegram.message_splitter import MessageSplitter
+from rbac_assistant.rag.retrieval.section_resolver import (
+    extract_amendment_hint,
+    extract_regulation_hint,
+)
 from rbac_assistant.security.access_control import AccessControl, OperatorRole
 from rbac_assistant.security.rate_limiter import UserRateLimiter
 from rbac_assistant.security.secret_redactor import redact_text
@@ -43,6 +62,7 @@ logger = structlog.get_logger(__name__)
 SUPPORTED_COMMANDS: tuple[str, ...] = (
     "/start",
     "/help",
+    "/ajuda",
     "/id",
     "/status",
     "/rbac",
@@ -53,50 +73,38 @@ SUPPORTED_COMMANDS: tuple[str, ...] = (
 )
 
 _MAX_TRACKED_USER_SEMAPHORES = 2048
-
-# Política determinística de intenção para texto livre:
-# 1. Pedido explícito de explicação/interpretação -> aciona explicação separada via Gemini.
-# 2. Pedido literal/transcrição -> somente texto literal e referência (zero Gemini).
-# 3. Pergunta analítica inequívoca (com '?' ou estrutura interrogativa clara) -> explicação.
-# 4. Consulta ambígua, citação isolada ou termos soltos -> prioriza evidência literal (zero Gemini).
-_EXPLICIT_EXPLANATION_RE = re.compile(
-    r"\b(?:expliqu\w*|explica[çc][ãa]o|resum\w*|interpret\w*|esclare[çc]\w*|"
-    r"o\s+que\s+significa|significa\s+o\s+qu[êe]|como\s+funciona|"
-    r"qual\s+a\s+diferen[çc]a|diferen[çc]a\s+entre|quando\s+se\s+aplica)\b",
-    re.IGNORECASE,
+_NON_OFFICIAL_TEST_AUTHORITIES: frozenset[str] = frozenset(
+    {"TEST", "TESTE", "SMOKE", "SYNTH", "DEMO", "MOCK", "FAKE"}
 )
-_LITERAL_ONLY_REQUEST_RE = re.compile(
-    r"\b(?:transcrev\w*|transcri[çc][ãa]o|texto\s+literal|texto\s+exato|"
-    r"texto\s+integral|ipsis\s+litteris|literalmente|reproduz\w*|copi[ae]\w*|"
-    r"(?:mostr[ae]|exib[ae]|traga|envi[ae]|qual\s+(?:[ée]\s+)?o)\s+o?\s*texto\b|"
-    r"ler?\s+a\s+se[çc][ãa]o|cit[ae]\s+literal\w*)\b",
-    re.IGNORECASE,
+_NON_OFFICIAL_TEST_ID_PREFIXES: tuple[str, ...] = (
+    "test_",
+    "smoke_",
+    "synth_",
+    "demo_",
+    "mock_",
+    "fake_",
 )
-_ANALYTICAL_QUESTION_RE = re.compile(
-    r"(?:^\s*(?:quem|como|quando|por\s+que|por\s+qu[êe]|quais|qual|onde|"
-    r"pode|podem|deve|devem|precisa|precisam|[ée]\s+obrigat[óo]rio|"
-    r"[ée]\s+permitido|[ée]\s+poss[íi]vel)\b.*\?\s*$|"
-    r"\b(?:quem\s+pode|como\s+deve|quando\s+deve|por\s+que\s+|quais\s+s[ãa]o\s+os\s+requisitos)\b)",
-    re.IGNORECASE,
+_APPROVED_PAGE_STATUSES: frozenset[PageValidationStatus] = frozenset(
+    {
+        PageValidationStatus.MANUALLY_APPROVED,
+        PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
+    }
+)
+_EXCLUDED_PUBLIC_VERSION_STATUSES: frozenset[VersionStatus] = frozenset(
+    {
+        VersionStatus.PROPOSED,
+        VersionStatus.REVOKED,
+        VersionStatus.UNKNOWN,
+    }
 )
 
-
-def should_generate_explanation_for_free_text(text: str) -> bool:
-    """Decide deterministicamente se uma consulta livre exige explicação IA separada.
-
-    Retorna `False` (somente transcrição literal + referência, sem chamar Gemini) para:
-    - pedidos de transcrição literal;
-    - citações normativas diretas (ex.: `RBAC 43.3`, `F43.1`, `Apêndice E`);
-    - consultas curtas ou ambíguas sem intenção explicativa clara.
-    """
-    cleaned = text.strip()
-    if not cleaned:
-        return False
-    if _EXPLICIT_EXPLANATION_RE.search(cleaned):
-        return True
-    if _LITERAL_ONLY_REQUEST_RE.search(cleaned):
-        return False
-    return bool(_ANALYTICAL_QUESTION_RE.search(cleaned))
+__all__ = [
+    "SUPPORTED_COMMANDS",
+    "TelegramCommandRouter",
+    "TelegramResponse",
+    "TelegramRuntimeInfo",
+    "should_generate_explanation_for_free_text",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +154,7 @@ class TelegramCommandRouter:
         duplicate_update_cache_size: int = 512,
         only_approved_literal: bool = True,
         allow_preliminary_native_search: bool = False,
+        conversation_store: UserConversationStore | None = None,
     ) -> None:
         self._access_control = access_control
         self._rate_limiter = rate_limiter
@@ -165,6 +174,7 @@ class TelegramCommandRouter:
         self._allow_preliminary_native_search = (
             False if only_approved_literal else allow_preliminary_native_search
         )
+        self._conversation_store = conversation_store or UserConversationStore()
 
         self._seen_updates: OrderedDict[int, None] = OrderedDict()
         self._global_semaphore = asyncio.Semaphore(self._max_global_concurrent_updates)
@@ -246,30 +256,47 @@ class TelegramCommandRouter:
             "RBAC AI Assistant — Assistente Normativo de Aviação Civil (ANAC)\n"
             f"Perfil ativo: {role.value}\n"
             f"{mode_note}\n\n"
-            "Este assistente responde exclusivamente com base nos regulamentos oficiais da ANAC "
-            "efetivamente aprovados e indexados na base local, separando estritamente:\n"
-            "- TEXTO NORMATIVO (literal validado, sem reescrita)\n"
-            "- EXPLICAÇÃO (gerada por IA apenas sobre evidências aprovadas)\n"
+            "Respondo exclusivamente com base nos regulamentos oficiais da ANAC aprovados "
+            "e indexados na base local, separando rigorosamente:\n"
+            "- TEXTO NORMATIVO (transcrição literal oficial, sem reescrita)\n"
+            "- EXPLICAÇÃO (linguagem natural gerada por IA apenas sobre evidências aprovadas)\n"
             "- REFERÊNCIA (documento, emenda, seção e páginas PDF/impressa)\n\n"
-            "Perguntas fora do escopo documental ou sem evidência suficiente recebem recusa "
-            "fundamentada, sem pesquisa na internet nem uso de conhecimento geral.\n"
-            "Envie /help para ver todos os comandos ou faça sua pergunta em texto livre."
+            "Como você pode conversar comigo:\n"
+            "1. Consulta literal: informe a seção/item (ex.: \"Transcreva 43.10(a)(1)\" "
+            "ou /rbac 43.10(a)(1))\n"
+            "2. Pergunta explicativa: peça uma explicação sobre uma regra ou seção "
+            "(ex.: \"Quem pode executar manutenção no RBAC 43?\" ou /explicar 43.10)\n"
+            "3. Orientação: se não souber qual seção consultar, descreva sua atividade — "
+            "farei perguntas curtas para direcionar antes de buscar.\n\n"
+            "Temas fora da base aprovada recebem recusa fundamentada, sem invenção de regras.\n"
+            "Envie /ajuda (ou /help) para ver comandos e exemplos, ou mande sua pergunta."
         )
 
     def _handle_help(self) -> str:
         return (
-            "Comandos disponíveis do RBAC AI Assistant (conversas privadas):\n\n"
-            "/start — Apresentação, escopo normativo e perfil ativo\n"
-            "/help — Lista de comandos e instruções de uso\n"
-            "/id — Exibe exclusivamente o seu próprio Telegram User ID numérico\n"
-            "/status — Disponibilidade do assistente e base normativa\n"
-            "/rbac <seção> — Consulta normativa direta sem reescrita IA (ex.: /rbac 43.3)\n"
-            "/buscar <termo> — Busca híbrida (estrutural + lexical + vetorial) sem geração IA\n"
-            "/explicar <seção ou pergunta> — Texto normativo literal + explicação fundamentada IA\n"
+            "Guia de uso — RBAC AI Assistant (conversas privadas)\n\n"
+            "=== EXEMPLOS DE PERGUNTAS ===\n"
+            "1. Consultas literais (texto oficial sem reescrita):\n"
+            "- Transcreva a seção 43.10.\n"
+            "- Mostre o texto de 43.10(a)(1).\n"
+            "- /rbac 43.10(a)(1)\n\n"
+            "2. Perguntas explicativas (baseadas apenas em evidências aprovadas):\n"
+            "- Explique a seção 43.10.\n"
+            "- Quem pode executar manutenção no RBAC 43?\n"
+            "- /explicar 43.9\n\n"
+            "3. Pedir orientação (quando não souber o número da seção):\n"
+            "- Trabalho com aeronavegabilidade. Qual seção devo consultar?\n"
+            "- Preciso de ajuda para encontrar o requisito aplicável ao meu caso.\n\n"
+            "=== COMANDOS DISPONÍVEIS ===\n"
+            "/start — Apresentação, escopo normativo e reinício do contexto\n"
+            "/ajuda ou /help — Este guia com exemplos e lista de comandos\n"
+            "/rbac <seção> — Transcrição literal direta sem IA (ex.: /rbac 43.3)\n"
+            "/buscar <termo> — Busca híbrida nos trechos aprovados sem IA\n"
+            "/explicar <seção ou pergunta> — Texto oficial + explicação em linguagem natural\n"
             "/documentos — Lista regulamentos disponíveis na base\n"
-            "/versao — Versão do assistente, política Gemini e emendas vigentes na base\n\n"
-            "Texto livre: envie uma pergunta em linguagem natural sobre regulamentos da ANAC. "
-            "As respostas utilizam exclusivamente documentos aprovados e indexados."
+            "/versao — Versão do assistente, modelos Gemini e emendas na base\n"
+            "/status — Disponibilidade do assistente e base normativa\n"
+            "/id — Exibe exclusivamente o seu próprio Telegram User ID numérico"
         )
 
     def _handle_id(self, user_id: int) -> str:
@@ -321,31 +348,85 @@ class TelegramCommandRouter:
                 lines.append(f"Erro reportado: {redact_text(status_report.error)}")
         return "\n".join(lines)
 
-    def _handle_documentos(self, role: OperatorRole) -> str:
+    @staticmethod
+    def _is_official_public_document(doc: RegulatoryDocument) -> bool:
+        """Exclui documentos de teste/smoke, rascunhos, arquivados, propostos ou revogados."""
+        if doc.authority.strip().upper() in _NON_OFFICIAL_TEST_AUTHORITIES:
+            return False
+        if doc.document_id.strip().lower().startswith(_NON_OFFICIAL_TEST_ID_PREFIXES):
+            return False
+        title_lower = doc.document_title.lower()
+        if "smoke test" in title_lower or "fictício" in title_lower or "ficticio" in title_lower:
+            return False
+        if doc.document_status != DocumentStatus.ACTIVE:
+            return False
+        return doc.version_status not in _EXCLUDED_PUBLIC_VERSION_STATUSES
+
+    def _is_version_globally_approved(self, *, document_id: str, version_id: str) -> bool:
+        """Confirma aprovação integral das páginas quando há versão persistida no repositório."""
+        repo = getattr(self._catalog_service, "_repository", None)
+        if repo is None:
+            return True
+        versions = self._catalog_service.list_versions(document_id)
+        if not versions:
+            # Fixtures unitários em memória sem tabela de páginas delegam ao gate de indexação.
+            return True
+        if not any(v.version_id == version_id for v in versions):
+            return False
+        pages = repo.get_pages(version_id)
+        if not pages:
+            return False
+        return all(p.validation_status in _APPROVED_PAGE_STATUSES for p in pages)
+
+    def _list_public_approved_indexed_documents(
+        self,
+    ) -> list[tuple[RegulatoryDocument, IndexVersionSummary]]:
+        """Retorna somente regulamentos oficiais aprovados e efetivamente indexados."""
         docs = self._catalog_service.search_documents()
         index_report = self._indexing_service.get_index_status()
-        indexed_by_doc = {
-            v.document_id: v for v in index_report.version_summaries if v.is_indexed
-        }
-        if not docs:
+        indexed_by_doc: dict[str, IndexVersionSummary] = {}
+        excluded_ver_values = {s.value for s in _EXCLUDED_PUBLIC_VERSION_STATUSES}
+        for summary in index_report.version_summaries:
+            if not summary.is_indexed or summary.indexed_chunk_count <= 0:
+                continue
+            if summary.version_status in excluded_ver_values:
+                continue
+            prev = indexed_by_doc.get(summary.document_id)
+            if prev is None or summary.version_status == VersionStatus.CURRENT.value:
+                indexed_by_doc[summary.document_id] = summary
+
+        available: list[tuple[RegulatoryDocument, IndexVersionSummary]] = []
+        for doc in docs:
+            if not self._is_official_public_document(doc):
+                continue
+            idx_summary = indexed_by_doc.get(doc.document_id)
+            if idx_summary is None:
+                continue
+            if not self._is_version_globally_approved(
+                document_id=doc.document_id,
+                version_id=idx_summary.version_id,
+            ):
+                continue
+            available.append((doc, idx_summary))
+        return available
+
+    def _handle_documentos(self, role: OperatorRole) -> str:
+        available_docs = self._list_public_approved_indexed_documents()
+        if not available_docs:
             if role == OperatorRole.ADMIN:
                 return (
-                    "Nenhum documento regulatório está cadastrado no catálogo SQLite no momento.\n"
-                    "Execute a ingestão controlada via `scripts/ingest_regulation.py` no servidor."
+                    "Nenhum documento regulatório oficial aprovado e indexado está disponível "
+                    "no momento.\nExecute a ingestão, aprovação e indexação controlada via CLI "
+                    "administrativo no servidor."
                 )
             return "Nenhum documento regulatório aprovado está disponível na base no momento."
 
         lines = ["=== DOCUMENTOS REGULATÓRIOS DISPONÍVEIS ==="]
-        for doc in docs:
-            idx_summary = indexed_by_doc.get(doc.document_id)
+        for doc, idx_summary in available_docs:
             if role == OperatorRole.ADMIN:
-                idx_label = (
-                    f"indexado ({idx_summary.indexed_chunk_count} chunks)"
-                    if idx_summary is not None
-                    else "não indexado"
-                )
+                idx_label = f"indexado ({idx_summary.indexed_chunk_count} chunks)"
             else:
-                idx_label = "indexado" if idx_summary is not None else "não indexado"
+                idx_label = "indexado"
             lines.append(
                 f"- {doc.authority} {doc.document_type.value} {doc.regulation_number} "
                 f"(Emenda {doc.amendment_number} | vigência: {doc.version_status.value}) — "
@@ -383,60 +464,232 @@ class TelegramCommandRouter:
                 )
         return "\n".join(lines)
 
+    def _record_validated_refs(
+        self,
+        user_id: int,
+        answer: StructuredNormativeAnswer,
+    ) -> None:
+        """Guarda somente referências canônicas validadas da última resposta deste usuário."""
+        if not (answer.found and answer.is_literal_validated and answer.evidences):
+            return
+        refs: list[str] = []
+        for ev in answer.evidences:
+            if not ev.section_number:
+                continue
+            suffix = f"{ev.paragraph_number}{ev.item_number}"
+            prefix = f"{ev.document_type} {ev.regulation_number}".strip()
+            label = f"{prefix} {ev.section_number}{suffix}".strip()
+            if label:
+                refs.append(label)
+        if refs:
+            self._conversation_store.set_last_normative_refs(user_id, tuple(refs))
+
     def _handle_rbac(
-        self, args_text: str, *, actor_id: str, role: OperatorRole
+        self, args_text: str, *, user_id: int, actor_id: str, role: OperatorRole
     ) -> str | StructuredNormativeAnswer:
+        self._conversation_store.clear_pending_clarification(user_id)
         if not args_text:
             return "Uso: /rbac <seção ou referência>\nExemplo: /rbac 43.3 ou /rbac RBAC 43.9(a)"
         query = args_text if "rbac" in args_text.lower() else f"RBAC {args_text}"
-        return self._chat_service.ask(
+        answer = self._chat_service.ask(
             question=query,
             filters=self._default_search_filter(),
             generate_explanation=False,
             actor_id=actor_id,
             actor_role=role.value,
         )
+        self._record_validated_refs(user_id, answer)
+        return answer
 
     def _handle_buscar(
-        self, args_text: str, *, actor_id: str, role: OperatorRole
+        self, args_text: str, *, user_id: int, actor_id: str, role: OperatorRole
     ) -> str | StructuredNormativeAnswer:
+        self._conversation_store.clear_pending_clarification(user_id)
         if not args_text:
             return "Uso: /buscar <termo ou assunto>\nExemplo: /buscar manutencao preventiva"
-        return self._chat_service.ask(
+        answer = self._chat_service.ask(
             question=args_text,
             filters=self._default_search_filter(),
             generate_explanation=False,
             actor_id=actor_id,
             actor_role=role.value,
         )
+        self._record_validated_refs(user_id, answer)
+        return answer
 
     def _handle_explicar(
-        self, args_text: str, *, actor_id: str, role: OperatorRole
+        self, args_text: str, *, user_id: int, actor_id: str, role: OperatorRole
     ) -> str | StructuredNormativeAnswer:
+        self._conversation_store.clear_pending_clarification(user_id)
         if not args_text:
             return (
                 "Uso: /explicar <seção ou pergunta>\n"
                 "Exemplo: /explicar 43.3 ou /explicar Quem pode executar manutenção preventiva?"
             )
-        return self._chat_service.ask(
+        answer = self._chat_service.ask(
             question=args_text,
             filters=self._default_search_filter(),
             generate_explanation=True,
             actor_id=actor_id,
             actor_role=role.value,
         )
+        self._record_validated_refs(user_id, answer)
+        return answer
+
+    def _handle_out_of_catalog_ranking(self) -> str:
+        """Resposta honesta de limitação para rankings/panoramas multi-RBAC fora do catálogo."""
+        available_docs = self._list_public_approved_indexed_documents()
+
+        lines = [
+            "Não consigo ranquear nem listar todos os RBACs mais utilizados no setor "
+            "aeronáutico: respondo exclusivamente com base nos regulamentos oficiais da ANAC "
+            "aprovados e indexados nesta base local.",
+            "",
+            "Documentos disponíveis nesta base no momento:",
+        ]
+        if not available_docs:
+            lines.append("- Nenhum documento regulatório aprovado está disponível no momento.")
+        else:
+            for doc, _idx_summary in available_docs:
+                lines.append(
+                    f"- {doc.authority} {doc.document_type.value} {doc.regulation_number} "
+                    f"(Emenda {doc.amendment_number} | vigência: {doc.version_status.value}) — "
+                    f"{doc.document_title} [indexado]"
+                )
+        lines.extend(
+            [
+                "",
+                "Se a sua dúvida envolver um regulamento listado acima, informe a seção "
+                "(ex.: /rbac 43.10(a)(1)) ou descreva a atividade que deseja consultar.",
+            ]
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_concise_explained_answer(
+        answer: StructuredNormativeAnswer,
+        *,
+        deictic_followup: bool,
+    ) -> str:
+        """Renderiza explicação curta + referências sem despejar transcrições integrais."""
+        ref_lines = (
+            "\n".join(f"- {ref}" for ref in answer.references)
+            if answer.references
+            else "- Nenhuma referência normativa validada disponível."
+        )
+        first_section = (
+            f"{answer.evidences[0].section_number}"
+            f"{answer.evidences[0].paragraph_number}"
+            f"{answer.evidences[0].item_number}"
+            if answer.evidences and answer.evidences[0].section_number
+            else "43.10"
+        )
+        sections: list[str] = []
+        if answer.used_fallback_without_llm:
+            if deictic_followup:
+                info_msg = (
+                    "A explicação por IA está temporariamente indisponível no momento. "
+                    "A transcrição literal oficial já foi exibida na consulta anterior; "
+                    f"se precisar vê-la novamente, envie /rbac {first_section}."
+                )
+            else:
+                info_msg = (
+                    "A explicação por IA está temporariamente indisponível no momento, mas "
+                    "localizei referências aprovadas compatíveis abaixo. Para ler a transcrição "
+                    f"literal oficial (funciona mesmo sem IA), envie /rbac {first_section}."
+                )
+            sections.append(f"=== INFORMAÇÃO ===\n{info_msg}")
+        else:
+            notice = (
+                "[Nota: explicação em linguagem natural baseada exclusivamente nas evidências "
+                "aprovadas referenciadas abaixo — não constitui transcrição oficial da norma.]"
+            )
+            sections.append(
+                f"=== EXPLICAÇÃO (GERADA POR IA) ===\n{notice}\n\n{answer.explanation}"
+            )
+
+        sections.append(f"=== REFERÊNCIA ===\n{ref_lines}")
+
+        obs_list = list(answer.observations)
+        if deictic_followup:
+            obs_list.append(
+                "Transcrição literal omitida para evitar repetição do trecho já apresentado. "
+                f"Para consultá-la novamente na íntegra, envie /rbac {first_section}."
+            )
+        else:
+            obs_list.append(
+                "Para receber a transcrição literal oficial completa de qualquer seção listada, "
+                f"envie /rbac {first_section} ou peça \"Transcreva {first_section}\"."
+            )
+        obs_lines = "\n".join(f"- {obs}" for obs in dict.fromkeys(obs_list))
+        sections.append(f"=== OBSERVAÇÃO ===\n{obs_lines}")
+        return "\n\n".join(sections)
 
     def _handle_free_text(
-        self, text: str, *, actor_id: str, role: OperatorRole
-    ) -> StructuredNormativeAnswer:
-        wants_explanation = should_generate_explanation_for_free_text(text)
-        return self._chat_service.ask(
-            question=text,
+        self, text: str, *, user_id: int, actor_id: str, role: OperatorRole
+    ) -> str | StructuredNormativeAnswer:
+        pending = self._conversation_store.get_pending_clarification(user_id)
+        last_refs = self._conversation_store.get_last_normative_refs(user_id)
+        decision = classify_conversational_intent(
+            text,
+            pending_clarification=pending,
+            last_normative_refs=last_refs,
+        )
+
+        if decision.intent == ConversationIntent.OUT_OF_CATALOG:
+            if pending is not None:
+                self._conversation_store.clear_pending_clarification(user_id)
+            self._record_audit(
+                action="telegram_conversational_guidance",
+                status="out_of_catalog_refused",
+                actor_id=actor_id,
+                role=role.value,
+                details={"reason": decision.reason},
+            )
+            return self._handle_out_of_catalog_ranking()
+
+        if decision.intent == ConversationIntent.NEEDS_CLARIFICATION:
+            if decision.expects_clarification_followup:
+                _, reg_hint = extract_regulation_hint(text)
+                amd_hint = extract_amendment_hint(text)
+                self._conversation_store.set_pending_clarification(
+                    user_id,
+                    original_question=text,
+                    regulation_hint=reg_hint,
+                    amendment_hint=amd_hint,
+                    selected_topic=decision.selected_topic,
+                )
+            self._record_audit(
+                action="telegram_conversational_guidance",
+                status="clarification_requested",
+                actor_id=actor_id,
+                role=role.value,
+                details={
+                    "reason": decision.reason,
+                    "followup": decision.used_clarification_context,
+                },
+            )
+            return decision.guidance_message or ""
+
+        if pending is not None:
+            self._conversation_store.clear_pending_clarification(user_id)
+
+        top_k_override = 2 if decision.used_clarification_context else None
+        answer = self._chat_service.ask(
+            question=decision.effective_query,
             filters=self._default_search_filter(),
-            generate_explanation=wants_explanation,
+            top_k=top_k_override,
+            generate_explanation=decision.generate_explanation,
             actor_id=actor_id,
             actor_role=role.value,
         )
+        self._record_validated_refs(user_id, answer)
+        if decision.concise_explanation_only and answer.found:
+            return self._format_concise_explained_answer(
+                answer,
+                deictic_followup=decision.used_deictic_context,
+            )
+        return answer
 
     def _dispatch_sync(
         self,
@@ -448,8 +701,10 @@ class TelegramCommandRouter:
         role: OperatorRole,
     ) -> str | StructuredNormativeAnswer:
         if command == "/start":
+            self._conversation_store.reset_user(user_id)
             return self._handle_start(role)
-        if command == "/help":
+        if command in ("/help", "/ajuda"):
+            self._conversation_store.clear_pending_clarification(user_id)
             return self._handle_help()
         if command == "/id":
             return self._handle_id(user_id)
@@ -460,16 +715,21 @@ class TelegramCommandRouter:
         if command == "/versao":
             return self._handle_versao(role)
         if command == "/rbac":
-            return self._handle_rbac(args_text, actor_id=actor_id, role=role)
+            return self._handle_rbac(args_text, user_id=user_id, actor_id=actor_id, role=role)
         if command == "/buscar":
-            return self._handle_buscar(args_text, actor_id=actor_id, role=role)
+            return self._handle_buscar(args_text, user_id=user_id, actor_id=actor_id, role=role)
         if command == "/explicar":
-            return self._handle_explicar(args_text, actor_id=actor_id, role=role)
+            return self._handle_explicar(args_text, user_id=user_id, actor_id=actor_id, role=role)
         if command == "text":
-            return self._handle_free_text(args_text, actor_id=actor_id, role=role)
+            return self._handle_free_text(
+                args_text,
+                user_id=user_id,
+                actor_id=actor_id,
+                role=role,
+            )
         return (
             f"Comando não reconhecido: {command}\n"
-            "Envie /help para consultar a lista de comandos suportados."
+            "Envie /ajuda ou /help para consultar a lista de comandos suportados."
         )
 
     async def handle_message(
@@ -506,7 +766,8 @@ class TelegramCommandRouter:
         if not raw_text.strip():
             return TelegramResponse(
                 messages=self._splitter.split(
-                    "Envie uma pergunta normativa ou utilize /help para listar os comandos."
+                    "Envie uma pergunta normativa ou utilize /ajuda (ou /help) para ver exemplos "
+                    "e listar os comandos."
                 ),
                 command=command,
             )

@@ -42,6 +42,7 @@ def test_load_settings_from_repository_yaml(
     assert settings.gemini_embedding_model == "gemini-embedding-2"
     assert settings.effective_embedding_dimensions == 768
     assert settings.gemini_allow_paid_models is False
+    assert settings.gemini.generation_max_retries == 0
     assert settings.gemini.allowed_free_tier_generation_models == ("gemini-4-hydrogen",)
     assert settings.gemini.allowed_free_tier_embedding_models == ("gemini-embedding-2",)
 

@@ -27,6 +27,7 @@ Recursos implementados:
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -116,6 +117,8 @@ class GeminiClientAdapter:
         embedding_max_input_tokens: int = DEFAULT_EMBEDDING_MAX_INPUT_TOKENS,
         timeout_seconds: float = 30.0,
         max_retries: int = 3,
+        generation_max_retries: int = 0,
+        query_embedding_max_retries: int = 0,
         retry_min_wait_seconds: float = 0.5,
         retry_max_wait_seconds: float = 8.0,
         default_temperature: float = 0.1,
@@ -154,7 +157,9 @@ class GeminiClientAdapter:
         self._embedding_instruction_version = embedding_instruction_version.strip()
         self._embedding_max_input_tokens = embedding_max_input_tokens
         self._timeout_seconds = timeout_seconds
-        self._max_retries = max_retries
+        self._max_retries = max(0, int(max_retries))
+        self._generation_max_retries = max(0, int(generation_max_retries))
+        self._query_embedding_max_retries = max(0, int(query_embedding_max_retries))
         self._retry_min_wait_seconds = retry_min_wait_seconds
         self._retry_max_wait_seconds = retry_max_wait_seconds
         self._default_temperature = default_temperature
@@ -194,7 +199,10 @@ class GeminiClientAdapter:
                     "Em testes automatizados, injete um `sdk_client` simulado."
                 )
             timeout_ms = max(1000, int(self._timeout_seconds * 1000))
-            http_options = genai_types.HttpOptions(timeout=timeout_ms)
+            http_options = genai_types.HttpOptions(
+                timeout=timeout_ms,
+                retry_options=genai_types.HttpRetryOptions(attempts=1),
+            )
             self._client = genai.Client(
                 api_key=self._api_key,
                 http_options=http_options,
@@ -206,8 +214,22 @@ class GeminiClientAdapter:
         if self._client is not None and hasattr(self._client, "close"):
             self._client.close()
 
-    def _run_with_retry[T](self, operation_name: str, model_id: str, fn: Callable[[], T]) -> T:
-        attempts = self._max_retries + 1
+    def _run_with_retry[T](
+        self,
+        operation_name: str,
+        model_id: str,
+        fn: Callable[[], T],
+        *,
+        max_retries: int | None = None,
+        input_chars: int = 0,
+    ) -> T:
+        effective_retries = self._max_retries if max_retries is None else max(0, max_retries)
+        attempts = effective_retries + 1
+        started_at = time.monotonic()
+        attempts_made = 0
+        succeeded = False
+        error_type = "none"
+
         retrying = Retrying(
             reraise=True,
             stop=stop_after_attempt(attempts),
@@ -221,15 +243,20 @@ class GeminiClientAdapter:
         try:
             for attempt in retrying:
                 with attempt:
+                    attempts_made += 1
                     try:
-                        return fn()
-                    except LLMServiceError:
+                        result = fn()
+                        succeeded = True
+                        return result
+                    except LLMServiceError as exc:
+                        error_type = type(exc).__name__
                         raise
                     except Exception as exc:
                         translated, is_transient = self._translate_exception(
                             operation_name, model_id, exc
                         )
-                        if is_transient:
+                        error_type = type(translated).__name__
+                        if is_transient and effective_retries > 0:
                             logger.warning(
                                 "gemini_transient_error",
                                 operation=operation_name,
@@ -241,7 +268,21 @@ class GeminiClientAdapter:
                             raise _TransientGeminiError(translated) from exc
                         raise translated from exc
         except _TransientGeminiError as wrapped:
+            error_type = type(wrapped.domain_error).__name__
             raise wrapped.domain_error from wrapped
+        finally:
+            duration_ms = int((time.monotonic() - started_at) * 1000)
+            logger.info(
+                "gemini_api_call",
+                operation=operation_name,
+                model=model_id,
+                attempts=attempts_made,
+                max_attempts=attempts,
+                succeeded=succeeded,
+                error_type=error_type,
+                duration_ms=duration_ms,
+                input_chars=input_chars,
+            )
         raise LLMServiceError(f"Falha inesperada na operação Gemini '{operation_name}'.")
 
     @staticmethod
@@ -346,7 +387,13 @@ class GeminiClientAdapter:
                 )
             return text.strip()
 
-        return self._run_with_retry("generate_content", self._generation_model, _call)
+        return self._run_with_retry(
+            "generate_content",
+            self._generation_model,
+            _call,
+            max_retries=self._generation_max_retries,
+            input_chars=len(system_instruction) + len(user_prompt),
+        )
 
     def embed_documents(
         self,
@@ -388,7 +435,7 @@ class GeminiClientAdapter:
 
         payload = format_ge2_query(text)
         self._validate_token_budget(payload, label="query")
-        vectors = self._embed_batch([payload])
+        vectors = self._embed_batch([payload], max_retries=self._query_embedding_max_retries)
         return vectors[0]
 
     def _validate_token_budget(self, payload: str, *, label: str) -> None:
@@ -399,7 +446,12 @@ class GeminiClientAdapter:
                 f"do modelo '{self._embedding_model}' (estimado: {estimated} tokens)."
             )
 
-    def _embed_batch(self, payloads: list[str]) -> list[tuple[float, ...]]:
+    def _embed_batch(
+        self,
+        payloads: list[str],
+        *,
+        max_retries: int | None = None,
+    ) -> list[tuple[float, ...]]:
         client = self._get_client()
 
         # Gemini Embedding 2 (modelo único de runtime, 768d):
@@ -442,7 +494,13 @@ class GeminiClientAdapter:
                 vectors.append(vec)
             return vectors
 
-        return self._run_with_retry("embed_content", self._embedding_model, _call)
+        return self._run_with_retry(
+            "embed_content",
+            self._embedding_model,
+            _call,
+            max_retries=max_retries,
+            input_chars=sum(len(item) for item in payloads),
+        )
 
 
 class GeminiEmbeddingAdapter:

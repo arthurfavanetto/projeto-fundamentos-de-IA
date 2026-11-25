@@ -42,6 +42,8 @@ vector_db:
 gemini:
   timeout_seconds: 30.0
   max_retries: 3
+  # Zero retries na geração (máximo 1 tentativa HTTP por mensagem no Free Tier 5 RPM / 20 RPD)
+  generation_max_retries: 0
   retry_min_wait_seconds: 0.5
   retry_max_wait_seconds: 8.0
   temperature: 0.1
