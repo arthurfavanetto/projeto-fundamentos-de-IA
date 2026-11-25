@@ -440,31 +440,15 @@ def select_structural_units(
     root_units = [u for u in ordered_units if u.parent_unit_id is None]
 
     if not root_units:
-        if granularity != StructuralGranularity.SECTION:
-            return SubunitSelectionResult(
-                status=SubunitSelectionStatus.VERIFICATION_FAILED,
-                granularity=granularity,
-                found=False,
-                reason=(
-                    "Unidade-raiz ausente no SQLite; impossível comprovar fidelidade literal "
-                    "da subunidade solicitada."
-                ),
-            )
-        fallback = ordered_units[0]
-        all_pages = tuple(sorted({p for u in ordered_units for p in u.page_numbers}))
         return SubunitSelectionResult(
-            status=SubunitSelectionStatus.MATCHED,
-            granularity=StructuralGranularity.SECTION,
-            found=True,
-            root_unit=fallback,
-            selected_units=(fallback,),
-            unit_id=fallback.unit_id,
-            paragraph_number=fallback.paragraph_number,
-            item_number=fallback.item_number,
-            original_text=fallback.original_text,
-            page_numbers=all_pages,
-            structure_status=fallback.structure_status,
-            reason="matched:section_fallback_no_root",
+            status=SubunitSelectionStatus.VERIFICATION_FAILED,
+            granularity=granularity,
+            found=False,
+            reason=(
+                "Unidade-raiz (`parent_unit_id=None`) ausente no SQLite para esta seção; "
+                "por política fail-closed, o sistema não utiliza uma subunidade isolada como "
+                "seção completa nem libera transcrição sem comprovação literal na unidade-raiz."
+            ),
         )
 
     if len(root_units) > 1 and granularity != StructuralGranularity.SECTION:

@@ -6,15 +6,15 @@ import re
 
 from rbac_assistant.domain.entities.rag import ResolvedStructuralRef
 
-# Ex.: "RBAC 43.3", "RBAC nº 43.9(a)(1)(i)", "RBAC 43 seção 43.3(b)", "RBAC 43 F43.1(a)(1)"
+# Ex.: "RBAC 43 seção 43.3(b)", "RBAC 43, sec. 43.10(a)(1)", "RBAC 43 F43.1(a)(1)"
 _RBAC_SECTION_RE = re.compile(
-    r"\bRBAC\s*(?:n[º°.]?\s*)?(?P<reg>\d{1,3})\s*"
-    r"(?:(?:,\s*)?(?:se[çc][ãa]o|sec\.?|ap[êe]ndice)\s*)?"
-    r"(?P<sec>[A-Z]?(?P=reg)\.\d+[A-Za-z0-9\-]*)\s*"
-    r"(?:\((?P<par>[a-z])\))?\s*"
-    r"(?:\((?P<item>\d+|[ivx]+)\))?\s*"
-    r"(?:\((?P<subitem>[ivx]+|[A-Z]|\d+)\))?"
-    r"(?:\((?P<leaf>[A-Z])\))?",
+    r"\bRBAC\s*(?:n[º°.]?\s*)?(?P<reg>\d{1,3})"
+    r"(?:(?:\s*,\s*|\s+)(?:se[çc][ãa]o|sec\.?|ap[êe]ndice)\s+|\s+)"
+    r"(?P<sec>[A-Z]?(?P=reg)\.\d+[A-Za-z0-9\-]*)"
+    r"(?:\s*\((?P<par>[a-z])\))?"
+    r"(?:\s*\((?P<item>\d+|[ivx]+)\))?"
+    r"(?:\s*\((?P<subitem>[ivx]+|[A-Z]|\d+)\))?"
+    r"(?:\s*\((?P<leaf>[A-Z])\))?",
     re.IGNORECASE,
 )
 
@@ -197,12 +197,13 @@ def resolve_structural_references(query: str) -> tuple[ResolvedStructuralRef, ..
         _STANDALONE_SECTION_RE,
     ):
         for match in pattern.finditer(query):
-            span = match.span()
+            raw_text = match.group(0)
+            span = (match.start(), match.start() + len(raw_text.rstrip()))
             if _is_covered(span):
                 continue
             groups = match.groupdict()
             _add(
-                match.group(0),
+                raw_text,
                 groups.get("reg"),
                 groups.get("sec"),
                 groups.get("par"),

@@ -698,3 +698,319 @@ def test_official_rbac43_emd05_exact_subunit_retrieval_cases_a_through_g_in_tmp_
         assert "(b) Remoção temporária" not in cli_out
     finally:
         repo.close()
+
+
+@pytest.mark.integration
+def test_fail_closed_multiple_explicit_references_and_missing_root_unit_cases_a_through_g(
+    tmp_path: Path,
+) -> None:
+    """Testes de regressão obrigatórios (PR #21 revisão — Casos A, B, C, D, E, F e G)."""
+    from rbac_assistant.application.use_cases.get_normative_section import (
+        GetNormativeSectionUseCase,
+    )
+
+    repo, _ret, chat, llm, vector_store, embedder, ver_id = _build_synthetic_rbac43_10_stack(
+        tmp_path / "base_multi"
+    )
+    try:
+        units_43_10 = repo.get_units_by_section(version_id=ver_id, section_number="43.10")
+        par_a_units = [u for u in units_43_10 if u.paragraph_number == "(a)"]
+        unit_a1 = next(u for u in par_a_units if u.item_number == "(1)")
+        unit_a2 = next(u for u in par_a_units if u.item_number == "(2)")
+        filt = SearchFilter(
+            document_id="anac_rbac_43",
+            regulation_number="43",
+            amendment_number="05",
+            only_approved_literal=True,
+        )
+
+        # Caso A: 43.10(a)(1) válida + 43.10(a)(99) inexistente -> bloqueio integral, 0 LLM
+        ans_a = chat.ask(
+            question="Transcreva literalmente os itens 43.10(a)(1) e 43.10(a)(99).",
+            filters=filt,
+            top_k=5,
+            generate_explanation=True,
+        )
+        assert ans_a.found is False
+        assert ans_a.is_literal_validated is False
+        assert ans_a.normative_text is None
+        assert ans_a.evidences == ()
+        assert ans_a.has_blocked_sources is True
+        assert "Peça com limite de vida" not in ans_a.formatted_text
+        assert "43.10(a)(99)" in ans_a.explanation
+        assert any("CONSULTA PARCIAL BLOQUEADA" in o for o in ans_a.observations)
+        assert ans_a.diagnostics is not None
+        assert [r.canonical_label for r in ans_a.diagnostics.resolved_references] == [
+            "43.10(a)(1)",
+            "43.10(a)(99)",
+        ]
+        assert any(
+            "explicit_ref_not_found(43.10(a)(99))" in d.reason
+            for d in ans_a.diagnostics.evidence_decisions
+        )
+        assert any(
+            "partial_multi_ref_blocked" in d.reason
+            for d in ans_a.diagnostics.evidence_decisions
+        )
+        assert llm.calls == []
+
+        # Caso C: Duas referências válidas na mesma seção -> ambas preservadas separadamente
+        ans_c = chat.ask(
+            question="Transcreva literalmente os itens 43.10(a)(1) e 43.10(a)(2).",
+            filters=filt,
+            top_k=5,
+            generate_explanation=False,
+        )
+        assert ans_c.found is True
+        assert ans_c.is_literal_validated is True
+        assert ans_c.normative_text is not None
+        assert len(ans_c.evidences) == 2
+        assert [ev.unit_id for ev in ans_c.evidences] == [unit_a1.unit_id, unit_a2.unit_id]
+        assert extract_literal_excerpts_from_text(ans_c.formatted_text) == (
+            unit_a1.original_text,
+            unit_a2.original_text,
+        )
+        assert "(b) Remoção temporária" not in ans_c.formatted_text
+        assert llm.calls == []
+
+        # Caso D: 43.10(a)(1) + 43.10(a)(99) usando SOMENTE recuperação lexical (FTS5) -> bloqueio
+        lex_ret = HybridNormativeRetriever(
+            repository=repo,
+            vector_store=vector_store,
+            embedding_port=embedder,
+            collection_name="test_granular_col",
+            validation_service=ValidationService(ValidationPolicy.STRICT_ALL_PAGES),
+            enable_structural=False,
+            enable_lexical=True,
+            enable_vector=False,
+        )
+        llm_d = _RecordingFakeLLM()
+        chat_d = NormativeChatService(retriever=lex_ret, llm=llm_d)
+        ans_d = chat_d.ask(
+            question="Transcreva literalmente os itens 43.10(a)(1) e 43.10(a)(99).",
+            filters=filt,
+            top_k=5,
+            generate_explanation=True,
+        )
+        assert ans_d.found is False
+        assert ans_d.normative_text is None
+        assert ans_d.evidences == ()
+        assert ans_d.has_blocked_sources is True
+        assert "Peça com limite de vida" not in ans_d.formatted_text
+        assert "43.10(a)(99)" in ans_d.explanation
+        assert llm_d.calls == []
+
+        # Caso E: 43.10(a)(1) + 43.10(a)(99) usando SOMENTE recuperação vetorial -> bloqueio
+        vec_ret = HybridNormativeRetriever(
+            repository=repo,
+            vector_store=vector_store,
+            embedding_port=embedder,
+            collection_name="test_granular_col",
+            validation_service=ValidationService(ValidationPolicy.STRICT_ALL_PAGES),
+            enable_structural=False,
+            enable_lexical=False,
+            enable_vector=True,
+        )
+        llm_e = _RecordingFakeLLM()
+        chat_e = NormativeChatService(retriever=vec_ret, llm=llm_e)
+        ans_e = chat_e.ask(
+            question="Transcreva literalmente os itens 43.10(a)(1) e 43.10(a)(99).",
+            filters=filt,
+            top_k=5,
+            generate_explanation=True,
+        )
+        assert ans_e.found is False
+        assert ans_e.normative_text is None
+        assert ans_e.evidences == ()
+        assert ans_e.has_blocked_sources is True
+        assert "Peça com limite de vida" not in ans_e.formatted_text
+        assert "43.10(a)(99)" in ans_e.explanation
+        assert llm_e.calls == []
+    finally:
+        repo.close()
+
+    # Caso B1: Uma referência válida (43.10(a)(2)) + outra com divergência literal (43.10(a)(1))
+    repo_b1, _r_b1, chat_b1, llm_b1, _vs_b1, _emb_b1, _vid_b1 = _build_synthetic_rbac43_10_stack(
+        tmp_path / "case_b_corrupt",
+        corrupt_subunit_a1=True,
+    )
+    try:
+        ans_b1 = chat_b1.ask(
+            question="Transcreva literalmente os itens 43.10(a)(2) e 43.10(a)(1).",
+            generate_explanation=True,
+        )
+        assert ans_b1.found is False
+        assert ans_b1.normative_text is None
+        assert ans_b1.evidences == ()
+        assert ans_b1.has_blocked_sources is True
+        assert "Situação de vida" not in ans_b1.formatted_text
+        assert "43.10(a)(1)" in ans_b1.explanation
+        assert llm_b1.calls == []
+    finally:
+        repo_b1.close()
+
+    # Caso B2: Uma referência válida (43.10(a)(2)) + outra ambígua/duplicada (43.10(a)(1))
+    repo_b2, _r_b2, chat_b2, llm_b2, _vs_b2, _emb_b2, vid_b2 = _build_synthetic_rbac43_10_stack(
+        tmp_path / "case_b_ambig"
+    )
+    try:
+        # Insere duplicata ambígua de 43.10(a)(1) diretamente na base descartável
+        with repo_b2._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM normative_units "
+                "WHERE version_id = ? AND section_number = '43.10' "
+                "AND paragraph_number = '(a)' AND item_number = '(1)';",
+                (vid_b2,),
+            ).fetchone()
+            assert row is not None
+            cols = list(row.keys())
+            vals = [row[c] for c in cols]
+            vals[cols.index("unit_id")] = f"{row['unit_id']}_dup"
+            vals[cols.index("order_index")] = int(row["order_index"])
+            placeholders = ",".join("?" for _ in cols)
+            conn.execute(
+                f"INSERT INTO normative_units ({', '.join(cols)}) VALUES ({placeholders});",
+                vals,
+            )
+            conn.commit()
+
+        ans_b2 = chat_b2.ask(
+            question="Transcreva literalmente os itens 43.10(a)(2) e 43.10(a)(1).",
+            generate_explanation=True,
+        )
+        assert ans_b2.found is False
+        assert ans_b2.normative_text is None
+        assert ans_b2.evidences == ()
+        assert ans_b2.has_blocked_sources is True
+        assert "Situação de vida" not in ans_b2.formatted_text
+        assert "43.10(a)(1)" in ans_b2.explanation
+        assert ans_b2.diagnostics is not None
+        assert any(
+            d.reason == "excluded:explicit_ref_ambiguous(43.10(a)(1))"
+            for d in ans_b2.diagnostics.evidence_decisions
+        )
+        assert any(
+            d.reason == "excluded:partial_multi_ref_blocked"
+            for d in ans_b2.diagnostics.evidence_decisions
+        )
+        assert llm_b2.calls == []
+    finally:
+        repo_b2.close()
+
+    # Casos F e G: Seção SEM unidade-raiz (`parent_unit_id IS NULL`) no SQLite
+    repo_nr, _r_nr, chat_nr, llm_nr, vs_nr, emb_nr, vid_nr = _build_synthetic_rbac43_10_stack(
+        tmp_path / "no_root"
+    )
+    try:
+        # Remove exclusivamente o registro-raiz da seção 43.10 mantendo suas subunidades e chunks
+        with repo_nr._connect() as conn:
+            conn.execute("PRAGMA foreign_keys = OFF;")
+            conn.execute(
+                "DELETE FROM normative_units "
+                "WHERE version_id = ? AND section_number = '43.10' AND parent_unit_id IS NULL;",
+                (vid_nr,),
+            )
+            conn.commit()
+
+        # Garante que restam apenas subunidades de 43.10 (zero unidade-raiz)
+        rem_units = repo_nr.get_units_by_section(version_id=vid_nr, section_number="43.10")
+        assert len(rem_units) > 0
+        assert all(u.parent_unit_id is not None for u in rem_units)
+
+        # Caso F1: Consulta explícita por seção completa sem unidade-raiz -> abstenção segura
+        ans_f1 = chat_nr.ask(
+            question="Transcreva literalmente a seção 43.10.",
+            generate_explanation=True,
+        )
+        assert ans_f1.found is False
+        assert ans_f1.is_literal_validated is False
+        assert ans_f1.normative_text is None
+        assert ans_f1.evidences == ()
+        assert ans_f1.has_blocked_sources is True
+        assert "(a) Definições usadas nesta seção" not in ans_f1.formatted_text
+        assert llm_nr.calls == []
+
+        # Caso F2a: Consulta lexical-only atingindo 43.10 sem raiz -> bloqueio total
+        ret_f2_lex = HybridNormativeRetriever(
+            repository=repo_nr,
+            vector_store=vs_nr,
+            embedding_port=emb_nr,
+            collection_name="test_granular_col",
+            validation_service=ValidationService(ValidationPolicy.STRICT_ALL_PAGES),
+            enable_structural=False,
+            enable_lexical=True,
+            enable_vector=False,
+        )
+        llm_f2_lex = _RecordingFakeLLM()
+        ans_f2a = NormativeChatService(retriever=ret_f2_lex, llm=llm_f2_lex).ask(
+            question="O que significa peça com limite de vida e segregação?",
+            generate_explanation=True,
+        )
+        assert ans_f2a.found is False
+        assert ans_f2a.is_literal_validated is False
+        assert ans_f2a.normative_text is None
+        assert ans_f2a.evidences == ()
+        assert ans_f2a.has_blocked_sources is True
+        assert "(a) Definições usadas nesta seção" not in ans_f2a.formatted_text
+        assert llm_f2_lex.calls == []
+
+        # Caso F2b: Em busca híbrida aberta, 43.10 sem raiz é excluída (nunca retorna subunidade)
+        llm_f2_hyb = _RecordingFakeLLM()
+        ans_f2b = NormativeChatService(retriever=_r_nr, llm=llm_f2_hyb).ask(
+            question="O que significa peça com limite de vida e segregação?",
+            generate_explanation=False,
+        )
+        assert all(ev.section_number != "43.10" for ev in ans_f2b.evidences)
+        assert "(a) Definições usadas nesta seção" not in ans_f2b.formatted_text
+        assert ans_f2b.diagnostics is not None
+        assert any(
+            d.section_number == "43.10"
+            and d.included is False
+            and d.reason == "excluded:missing_root_unit"
+            for d in ans_f2b.diagnostics.evidence_decisions
+        )
+
+        # Caso F3: Mesmo com reconstruct_full_section_from_ssot=False, bloqueia sem raiz
+        ret_no_recon = HybridNormativeRetriever(
+            repository=repo_nr,
+            vector_store=vs_nr,
+            embedding_port=emb_nr,
+            collection_name="test_granular_col",
+            validation_service=ValidationService(ValidationPolicy.STRICT_ALL_PAGES),
+            reconstruct_full_section_from_ssot=False,
+        )
+        llm_f3 = _RecordingFakeLLM()
+        ans_f3 = NormativeChatService(retriever=ret_no_recon, llm=llm_f3).ask(
+            question="Transcreva literalmente a seção 43.10.",
+            generate_explanation=True,
+        )
+        assert ans_f3.found is False
+        assert ans_f3.normative_text is None
+        assert ans_f3.evidences == ()
+        assert llm_f3.calls == []
+
+        # Caso F4: GetNormativeSectionUseCase também bloqueia sem unidade-raiz
+        sec_uc = GetNormativeSectionUseCase(
+            repository=repo_nr,
+            catalog_service=CatalogService(repo_nr),
+            validation_service=ValidationService(ValidationPolicy.STRICT_ALL_PAGES),
+        )
+        sec_res = sec_uc.execute(document_id="anac_rbac_43", section_number="43.10")
+        assert sec_res.found is False
+        assert sec_res.section is None
+        assert "unidade-raiz" in sec_res.message.lower()
+
+        # Caso G: Consulta por subunidade (43.10(a)(1)) sem unidade-raiz -> bloqueio literal, 0 LLM
+        ans_g = chat_nr.ask(
+            question="Transcreva literalmente o item 43.10(a)(1).",
+            generate_explanation=True,
+        )
+        assert ans_g.found is False
+        assert ans_g.is_literal_validated is False
+        assert ans_g.normative_text is None
+        assert ans_g.evidences == ()
+        assert ans_g.has_blocked_sources is True
+        assert "Peça com limite de vida" not in ans_g.formatted_text
+        assert llm_nr.calls == []
+    finally:
+        repo_nr.close()

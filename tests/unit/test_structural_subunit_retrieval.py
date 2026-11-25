@@ -392,6 +392,27 @@ def test_subunit_selector_blocks_fail_closed_on_missing_ambiguous_or_corrupted_u
     assert res_gap.found is False
     assert res_gap.status == SubunitSelectionStatus.VERIFICATION_FAILED
 
+    # Caso F (unitário): Seção completa sem unidade-raiz (apenas subunidades) -> fail-closed
+    subunits_only = [u for u in units if u.parent_unit_id is not None]
+    assert len(subunits_only) > 0
+    res_no_root_sec = select_structural_units(
+        subunits_only,
+        ResolvedStructuralRef("43.10", "43", "43.10"),
+    )
+    assert res_no_root_sec.found is False
+    assert res_no_root_sec.status == SubunitSelectionStatus.VERIFICATION_FAILED
+    assert res_no_root_sec.original_text == ""
+    assert res_no_root_sec.selected_units == ()
+
+    # Caso G (unitário): Subunidade SEM unidade-raiz -> bloqueio por verificação literal impossível
+    res_no_root_sub = select_structural_units(
+        subunits_only,
+        ResolvedStructuralRef("43.10(a)(1)", "43", "43.10", "(a)", "(1)"),
+    )
+    assert res_no_root_sub.found is False
+    assert res_no_root_sub.status == SubunitSelectionStatus.VERIFICATION_FAILED
+    assert res_no_root_sub.original_text == ""
+
 
 @pytest.mark.unit
 def test_rrf_fusion_preserves_multiple_granular_refs_on_same_chunk_and_blocks_expansion() -> None:
@@ -434,3 +455,25 @@ def test_rrf_fusion_preserves_multiple_granular_refs_on_same_chunk_and_blocks_ex
         assert acc.lexical_rank == 1
         assert acc.vector_rank == 1
         assert acc.target_ref is not None
+
+
+@pytest.mark.unit
+def test_resolve_structural_references_avoids_phantom_repeated_digit_matches() -> None:
+    """Impede match espúrio `7.3` dentro de `RBAC 77.3 Emenda 2` por backtracking de regex."""
+    refs_77 = resolve_structural_references("RBAC 77.3 Emenda 2")
+    assert len(refs_77) == 1
+    assert refs_77[0].regulation_number == "77"
+    assert refs_77[0].section_number == "77.3"
+    assert refs_77[0].amendment_number == "2"
+
+    refs_11 = resolve_structural_references("RBAC 11.1(a)(1) Emenda 01")
+    assert len(refs_11) == 1
+    assert refs_11[0].regulation_number == "11"
+    assert refs_11[0].section_number == "11.1"
+    assert refs_11[0].paragraph_number == "(a)"
+    assert refs_11[0].item_number == "(1)"
+
+    refs_spaced = resolve_structural_references("RBAC 43, seção 43.10 (a)(1) Emenda 05")
+    assert len(refs_spaced) == 1
+    assert refs_spaced[0].canonical_label == "43.10(a)(1)"
+    assert refs_spaced[0].amendment_number == "05"

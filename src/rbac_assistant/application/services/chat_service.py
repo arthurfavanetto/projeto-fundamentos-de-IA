@@ -162,10 +162,21 @@ class NormativeChatService:
                 has_blocked = True
                 blocked_count = max(len(retrieval.blocked_version_ids), 1)
             elif retrieval.blocked_evidences:
+                has_missing_root_block = any(
+                    ev.warning_message
+                    and "UNIDADE-RAIZ AUSENTE NO SSOT" in ev.warning_message
+                    for ev in retrieval.blocked_evidences
+                )
                 has_subunit_block = any(
                     ev.warning_message
-                    and "GRANULARIDADE NORMATIVA BLOQUEADA" in ev.warning_message
+                    and (
+                        "GRANULARIDADE NORMATIVA BLOQUEADA" in ev.warning_message
+                        or "UNIDADE NORMATIVA NÃO ENCONTRADA" in ev.warning_message
+                    )
                     for ev in retrieval.blocked_evidences
+                )
+                has_partial_multi_ref_block = any(
+                    "CONSULTA PARCIAL BLOQUEADA" in w for w in retrieval.warnings
                 )
                 has_table_ownership_block = any(
                     ev.warning_message
@@ -177,13 +188,46 @@ class NormativeChatService:
                     and "INTEGRIDADE TABULAR BLOQUEADA" in ev.warning_message
                     for ev in retrieval.blocked_evidences
                 )
-                if has_subunit_block:
+                if has_missing_root_block:
+                    explanation = (
+                        "Não foi possível transcrever a seção solicitada com garantia de "
+                        "fidelidade literal: não existe unidade-raiz (`parent_unit_id=None`) "
+                        "no SQLite para esta seção. Por política fail-closed, o assistente "
+                        "não utiliza subunidade parcial como seção completa e não aciona o "
+                        "modelo generativo."
+                    )
+                    outcome = "refused_missing_root_unit"
+                elif has_partial_multi_ref_block:
+                    missing_labels = ", ".join(
+                        dict.fromkeys(
+                            f"{ev.section_number}{ev.paragraph_number}{ev.item_number}"
+                            for ev in retrieval.blocked_evidences
+                            if ev.section_number
+                        )
+                    )
+                    explanation = (
+                        "Não foi possível atender à solicitação múltipla com garantia de "
+                        f"completude literal: referência(s) não localizada(s) ou não "
+                        f"verificável(is) no SSOT ({missing_labels}). Por política fail-closed, "
+                        "o assistente bloqueia a consulta integralmente sem retornar transcrição "
+                        "parcial e sem acionar o modelo generativo."
+                    )
+                    outcome = "refused_partial_multi_ref_blocked"
+                elif has_subunit_block:
+                    blocked_labels = ", ".join(
+                        dict.fromkeys(
+                            f"{ev.section_number}{ev.paragraph_number}{ev.item_number}"
+                            for ev in retrieval.blocked_evidences
+                            if ev.section_number
+                        )
+                    )
+                    labels_suffix = f" ({blocked_labels})" if blocked_labels else ""
                     explanation = (
                         "Não foi possível transcrever o dispositivo normativo específico "
-                        "solicitado com garantia de fidelidade literal (subunidade ausente, "
-                        "ambígua ou não verificável contra a unidade-raiz aprovada). Por "
-                        "política fail-closed, o assistente não retorna a seção inteira como "
-                        "substituto e não aciona o modelo generativo."
+                        f"solicitado{labels_suffix} com garantia de fidelidade literal "
+                        "(subunidade ausente, ambígua ou não verificável contra a unidade-raiz "
+                        "aprovada). Por política fail-closed, o assistente não retorna a seção "
+                        "inteira como substituto e não aciona o modelo generativo."
                     )
                     outcome = "refused_subunit_fidelity_blocked"
                 elif has_table_ownership_block:
