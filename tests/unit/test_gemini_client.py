@@ -352,23 +352,135 @@ def test_gemini_model_unavailable_has_no_silent_fallback() -> None:
 
 
 @pytest.mark.unit
-def test_gemini_retries_transient_429_and_503_and_eventually_succeeds() -> None:
+def test_gemini_generation_never_retries_on_429_503_403_400_timeout_or_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Garante exatamente 1 tentativa HTTP na geração (generation_max_retries=0) + log seguro."""
+    import httpx
+    from structlog.testing import capture_logs
+
+    from rbac_assistant.infrastructure.llm import gemini_client as gemini_module
+
+    # 1. Confirma que genai.Client recebe explicitamente HttpRetryOptions(attempts=1)
+    captured_http_opts: list[Any] = []
+
+    class _CapturingClient:
+        def __init__(self, *, api_key: str, http_options: Any) -> None:
+            del api_key
+            captured_http_opts.append(http_options)
+
+    monkeypatch.setenv("RBAC_BLOCK_REAL_GEMINI_API", "0")
+    monkeypatch.setattr(gemini_module.genai, "Client", _CapturingClient)
+    probe_adapter = GeminiClientAdapter(api_key="AIzaFakeProbeKeyNotReal1234567890")
+    probe_adapter._get_client()
+    assert len(captured_http_opts) == 1
+    assert captured_http_opts[0].retry_options is not None
+    assert captured_http_opts[0].retry_options.attempts == 1
+
+    # 2. Mesmo com max_retries=3 (batch embeddings), geração usa generation_max_retries=0
+    cases: list[tuple[Exception, type[Exception]]] = [
+        (genai_errors.APIError(429, {"error": {"message": "Quota exceeded"}}), LLMRateLimitError),
+        (
+            genai_errors.APIError(503, {"error": {"message": "Service unavailable"}}),
+            LLMServiceError,
+        ),
+        (genai_errors.APIError(403, {"error": {"message": "Forbidden"}}), LLMServiceError),
+        (genai_errors.APIError(400, {"error": {"message": "Bad request"}}), LLMServiceError),
+        (TimeoutError("socket timed out"), LLMTimeoutError),
+        (httpx.ReadTimeout("read timeout"), LLMTimeoutError),
+        (ConnectionError("connection reset"), LLMServiceError),
+    ]
+    secret_marker = "AIzaSySecretNeverLogged1234567890"
+    private_prompt_marker = "CONTEUDO_PRIVADO_USUARIO_998877"
+
+    with capture_logs() as cap_logs:
+        for exc, expected_exc_type in cases:
+            fake_sdk = _FakeGenAISDKClient()
+            fake_sdk.models.generate_side_effects = [
+                exc,
+                _FakeGenerateResponse(text="Nunca deveria ser chamado em retry."),
+            ]
+            adapter = GeminiClientAdapter(
+                api_key=secret_marker,
+                max_retries=3,
+                generation_max_retries=0,
+                retry_min_wait_seconds=0.0,
+                retry_max_wait_seconds=0.0,
+                sdk_client=fake_sdk,
+            )
+            with pytest.raises(expected_exc_type):
+                adapter.generate_text(
+                    system_instruction="sys",
+                    user_prompt=private_prompt_marker,
+                )
+            # Exatamente 1 tentativa HTTP — sem retry nem continuação em background!
+            assert len(fake_sdk.models.generate_calls) == 1, f"Falhou para {type(exc).__name__}"
+
+        # 3. Chamada bem-sucedida também registra log estruturado `gemini_api_call` sem segredos
+        ok_sdk = _FakeGenAISDKClient()
+        ok_adapter = GeminiClientAdapter(
+            api_key=secret_marker,
+            max_retries=3,
+            generation_max_retries=0,
+            sdk_client=ok_sdk,
+        )
+        assert (
+            ok_adapter.generate_text(
+                system_instruction="sys",
+                user_prompt=private_prompt_marker,
+            )
+            == "Explicação técnica fundamentada na seção."
+        )
+        assert len(ok_sdk.models.generate_calls) == 1
+
+    api_call_logs = [entry for entry in cap_logs if entry.get("event") == "gemini_api_call"]
+    assert len(api_call_logs) == len(cases) + 1
+    assert api_call_logs[-1]["operation"] == "generate_content"
+    assert api_call_logs[-1]["attempts"] == 1
+    assert api_call_logs[-1]["succeeded"] is True
+    for entry in api_call_logs:
+        serialized = repr(entry)
+        assert secret_marker not in serialized
+        assert private_prompt_marker not in serialized
+
+
+@pytest.mark.unit
+def test_gemini_batch_embed_documents_retries_transient_503_while_query_embed_fails_fast() -> None:
+    """Batch `embed_documents` mantém retry limitado; `embed_query` em tempo real falha em 1x."""
     fake_sdk = _FakeGenAISDKClient()
-    fake_sdk.models.generate_side_effects = [
-        genai_errors.APIError(429, {"error": {"message": "Quota exceeded"}}),
+    fake_sdk.models.embed_side_effects = [
         genai_errors.APIError(503, {"error": {"message": "Service unavailable"}}),
-        _FakeGenerateResponse(text="Explicação após retry."),
+        _FakeEmbedResponse(embeddings=[_FakeEmbeddingObj(values=[0.2] * 768)]),
     ]
     adapter = GeminiClientAdapter(
         max_retries=2,
+        generation_max_retries=0,
+        query_embedding_max_retries=0,
         retry_min_wait_seconds=0.0,
         retry_max_wait_seconds=0.0,
         sdk_client=fake_sdk,
     )
+    vecs = adapter.embed_documents(["trecho batch"])
+    assert len(vecs) == 1
+    assert len(fake_sdk.models.embed_calls) == 2
 
-    result = adapter.generate_text(system_instruction="sys", user_prompt="usr")
-    assert result == "Explicação após retry."
-    assert len(fake_sdk.models.generate_calls) == 3
+    # Em consulta em tempo real (`embed_query`), falha rápido em exatamente 1 tentativa!
+    fake_sdk_q = _FakeGenAISDKClient()
+    fake_sdk_q.models.embed_side_effects = [
+        genai_errors.APIError(429, {"error": {"message": "Quota exceeded"}}),
+        _FakeEmbedResponse(embeddings=[_FakeEmbeddingObj(values=[0.2] * 768)]),
+    ]
+    adapter_q = GeminiClientAdapter(
+        max_retries=3,
+        generation_max_retries=0,
+        query_embedding_max_retries=0,
+        retry_min_wait_seconds=0.0,
+        retry_max_wait_seconds=0.0,
+        sdk_client=fake_sdk_q,
+    )
+    with pytest.raises(LLMRateLimitError):
+        adapter_q.embed_query("transcreva 43.10(a)(1)")
+    assert len(fake_sdk_q.models.embed_calls) == 1
 
 
 @pytest.mark.unit

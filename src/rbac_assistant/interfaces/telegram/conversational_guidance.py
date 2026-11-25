@@ -37,6 +37,7 @@ class ConversationIntent(StrEnum):
     LITERAL_QUERY = "literal_query"
     EXPLANATORY_QUERY = "explanatory_query"
     NEEDS_CLARIFICATION = "needs_clarification"
+    OUT_OF_CATALOG = "out_of_catalog"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +52,8 @@ class ConversationalDecision:
     expects_clarification_followup: bool = False
     used_clarification_context: bool = False
     used_deictic_context: bool = False
+    concise_explanation_only: bool = False
+    selected_topic: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +65,7 @@ class PendingClarification:
     amendment_hint: str | None
     created_at: float
     turns: int = 1
+    selected_topic: str | None = None
 
 
 @dataclass(slots=True)
@@ -71,16 +75,50 @@ class _UserConversationRecord:
     last_refs_updated_at: float = 0.0
 
 
-# Mapeamento determinístico das opções numéricas apresentadas na mensagem de orientação.
-_GUIDANCE_OPTION_QUERIES: dict[str, str] = {
+# Sub-orientação curta por opção numérica (1–5): delimita o assunto sem disparar busca ampla.
+_GUIDANCE_OPTION_SUBPROMPTS: dict[str, tuple[str, str]] = {
     "1": (
-        "Quais são os requisitos aplicáveis sobre execução de manutenção, "
-        "manutenção preventiva, reconstrução ou alteração?"
+        "Execução de manutenção ou alteração",
+        "Sobre execução de manutenção ou alteração, qual ponto específico você quer consultar?\n"
+        "- Quem pode executar manutenção, manutenção preventiva, reconstrução ou alteração\n"
+        "- Regras de desempenho na execução da manutenção\n"
+        "- Grande reparo ou grande alteração\n\n"
+        "Descreva sua dúvida em uma frase ou informe diretamente a seção (ex.: /rbac 43.3).",
     ),
-    "2": "Quais são os requisitos aplicáveis sobre inspeções de manutenção?",
-    "3": "Quais são os requisitos aplicáveis sobre registros e documentação de manutenção?",
-    "4": "Quais são os requisitos aplicáveis sobre aprovação para retorno ao serviço?",
-    "5": "Quais são os requisitos aplicáveis sobre controle de componentes com limite de vida?",
+    "2": (
+        "Inspeções",
+        "Sobre inspeções, qual aspecto específico você precisa consultar?\n"
+        "- Regras adicionais de desempenho para inspeções\n"
+        "- Registros de aprovação ou reprovação em inspeção\n"
+        "- Inspeções de altímetro, sistema estático ou transponder\n\n"
+        "Descreva sua dúvida em uma frase ou informe diretamente a seção (ex.: /rbac 43.15).",
+    ),
+    "3": (
+        "Registros e documentação de manutenção",
+        "Sobre registros e documentação de manutenção, qual ponto específico você procura?\n"
+        "- Conteúdo obrigatório do registro de manutenção\n"
+        "- Registro de inspeções ou discrepâncias\n"
+        "- Formulários ou registros de grandes reparos e grandes alterações\n\n"
+        "Descreva sua dúvida em uma frase ou informe diretamente a seção (ex.: /rbac 43.9).",
+    ),
+    "4": (
+        "Aprovação para retorno ao serviço",
+        "Sobre aprovação para retorno ao serviço, qual aspecto específico você quer saber?\n"
+        "- Quem está autorizado a aprovar retorno ao serviço\n"
+        "- Requisitos e condições antes de aprovar o retorno ao serviço\n"
+        "- Registros exigidos para a aprovação de retorno ao serviço\n\n"
+        "Descreva sua dúvida em uma frase ou informe diretamente a seção "
+        "(ex.: /rbac 43.5 ou /rbac 43.7).",
+    ),
+    "5": (
+        "Controle de componentes com limite de vida",
+        "Sobre componentes com limite de vida, qual ponto específico você precisa consultar?\n"
+        "- Definições (peça com limite de vida e situação de vida)\n"
+        "- Remoção temporária ou métodos de controle (segregação, mutilação, registro)\n"
+        "- Transferência de peças com limite de vida\n\n"
+        "Descreva sua dúvida em uma frase ou informe diretamente a seção "
+        "(ex.: /rbac 43.10 ou /rbac 43.10(a)(1)).",
+    ),
 }
 
 _NUMBERED_CHOICE_RE = re.compile(
@@ -204,6 +242,19 @@ _PLURAL_COMPARISON_RE = re.compile(
     r"entre\s+(?:eles|elas|ambos))\b",
     re.IGNORECASE,
 )
+_OUT_OF_CATALOG_RANKING_RE = re.compile(
+    r"\b(?:"
+    r"quais\s+(?:s[ãa]o\s+)?(?:os\s+|as\s+)?(?:rbacs?|regulamentos?)\s+"
+    r"(?:s[ãa]o\s+)?(?:mais\s+(?:utilizad[oa]s?|usad[oa]s?|aplicad[oa]s?|"
+    r"important\w*|comuns?|cobrad[oa]s?|conhecid[oa]s?)|"
+    r"exist\w*|h[áa]\s+na\s+anac|da\s+anac)|"
+    r"qual\s+(?:[ée]\s+)?(?:o\s+|a\s+)?(?:rbac|regulamento)\s+"
+    r"(?:mais\s+(?:utilizad[oa]|usad[oa]|aplicad[oa]|important\w*|comum))|"
+    r"(?:ranking|top\s*\d*|lista\s+completa|todos\s+os)\s+(?:de\s+|dos\s+|das\s+)?"
+    r"(?:rbacs?|regulamentos?(?:\s+da\s+anac)?)"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def build_orientation_guidance_message() -> str:
@@ -313,6 +364,7 @@ class UserConversationStore:
         original_question: str,
         regulation_hint: str | None = None,
         amendment_hint: str | None = None,
+        selected_topic: str | None = None,
     ) -> None:
         """Registra que este usuário aguarda esclarecimento para sua consulta vaga."""
         with self._lock:
@@ -326,6 +378,11 @@ class UserConversationStore:
                 amendment_hint=amendment_hint or (prev.amendment_hint if prev else None),
                 created_at=now,
                 turns=turns,
+                selected_topic=(
+                    selected_topic
+                    if selected_topic is not None
+                    else (prev.selected_topic if prev else None)
+                ),
             )
 
     def clear_pending_clarification(self, user_id: int) -> None:
@@ -448,29 +505,60 @@ def classify_conversational_intent(
             reason="explicit_structural_ref",
         )
 
+    # 1.5. Pergunta de ranking geral ou panorama multi-RBAC fora do catálogo (0 embeddings, 0 LLM).
+    if _OUT_OF_CATALOG_RANKING_RE.search(cleaned):
+        return ConversationalDecision(
+            intent=ConversationIntent.OUT_OF_CATALOG,
+            effective_query="",
+            generate_explanation=False,
+            reason="out_of_catalog_ranking",
+        )
+
     # 2. Continuidade imediata quando este usuário está respondendo a um pedido de esclarecimento.
     if pending_clarification is not None:
         choice_match = _NUMBERED_CHOICE_RE.match(cleaned)
         if choice_match is not None:
             num = choice_match.group("num")
             rest = (choice_match.group("rest") or "").strip()
-            if num in _GUIDANCE_OPTION_QUERIES:
+            if num in _GUIDANCE_OPTION_SUBPROMPTS:
+                topic_label, subprompt = _GUIDANCE_OPTION_SUBPROMPTS[num]
+                # Se o usuário enviou apenas o número (ex.: "4", "5", "3"), faz pergunta curta
+                # para delimitar o assunto — zero busca ampla e zero chamada ao Gemini!
+                if not rest or _BARE_GENERIC_TOPIC_RE.match(rest) or len(rest.split()) < 2:
+                    return ConversationalDecision(
+                        intent=ConversationIntent.NEEDS_CLARIFICATION,
+                        effective_query="",
+                        generate_explanation=False,
+                        reason=f"clarification_option_{num}_narrowing",
+                        guidance_message=subprompt,
+                        expects_clarification_followup=True,
+                        used_clarification_context=True,
+                        selected_topic=topic_label,
+                    )
+                # Se já trouxe descrição concreta junto com o número (ex.: "5 - transferência"),
+                # segue direto com explicação enxuta + referências.
                 base_query = (
                     rest
-                    if len(rest) >= 12 and _CONCRETE_SUBTOPIC_RE.search(rest)
-                    else _GUIDANCE_OPTION_QUERIES[num]
+                    if topic_label.lower() in rest.lower()
+                    else f"{rest} ({topic_label})"
                 )
                 effective = _append_reg_context(
                     base_query,
                     regulation_hint=pending_clarification.regulation_hint,
                     amendment_hint=pending_clarification.amendment_hint,
                 )
+                wants_exp = not bool(_LITERAL_ONLY_REQUEST_RE.search(rest))
                 return ConversationalDecision(
-                    intent=ConversationIntent.EXPLANATORY_QUERY,
+                    intent=(
+                        ConversationIntent.EXPLANATORY_QUERY
+                        if wants_exp
+                        else ConversationIntent.LITERAL_QUERY
+                    ),
                     effective_query=effective,
-                    generate_explanation=True,
-                    reason=f"clarification_option_{num}",
+                    generate_explanation=wants_exp,
+                    reason=f"clarification_option_{num}_with_detail",
                     used_clarification_context=True,
+                    concise_explanation_only=wants_exp,
                 )
             # Opção 6 ("outra atividade"): se o usuário já descreveu o tema após "6", usa-o!
             if rest and not _BARE_GENERIC_TOPIC_RE.match(rest) and len(rest.split()) >= 2:
@@ -490,6 +578,7 @@ def classify_conversational_intent(
                     generate_explanation=wants_exp,
                     reason="clarification_option_6_with_detail",
                     used_clarification_context=True,
+                    concise_explanation_only=wants_exp,
                 )
             return ConversationalDecision(
                 intent=ConversationIntent.NEEDS_CLARIFICATION,
@@ -534,6 +623,7 @@ def classify_conversational_intent(
                     generate_explanation=wants_exp,
                     reason="deictic_followup_resolved",
                     used_deictic_context=True,
+                    concise_explanation_only=wants_exp,
                 )
             return ConversationalDecision(
                 intent=ConversationIntent.NEEDS_CLARIFICATION,
@@ -545,12 +635,18 @@ def classify_conversational_intent(
                 used_clarification_context=True,
             )
 
-        # Resposta concreta ao esclarecimento (ex.: "inspeções", "componentes com limite de vida",
-        # "preciso registrar manutenção" ou tema fora da base que seguirá para recusa fail-closed)
+        # Resposta concreta ao esclarecimento (ex.: "quem pode aprovar", "definições de peça com
+        # limite de vida", "registros de manutenção" ou tema fora da base -> recusa fail-closed).
         is_literal_req = bool(_LITERAL_ONLY_REQUEST_RE.search(cleaned))
+        topic_ctx = pending_clarification.selected_topic
+        if topic_ctx and topic_ctx.lower() not in cleaned.lower():
+            enriched_text = f"{cleaned} ({topic_ctx})"
+        else:
+            enriched_text = cleaned
+
         if is_literal_req:
             effective = _append_reg_context(
-                cleaned,
+                enriched_text,
                 regulation_hint=pending_clarification.regulation_hint,
                 amendment_hint=pending_clarification.amendment_hint,
             )
@@ -563,9 +659,9 @@ def classify_conversational_intent(
             )
 
         clarified_query = (
-            cleaned
-            if "?" in cleaned or len(cleaned.split()) >= 5
-            else f"Quais são os requisitos aplicáveis sobre {cleaned}?"
+            enriched_text
+            if "?" in enriched_text or len(enriched_text.split()) >= 5
+            else f"Quais são os requisitos aplicáveis sobre {enriched_text}?"
         )
         effective = _append_reg_context(
             clarified_query,
@@ -578,6 +674,7 @@ def classify_conversational_intent(
             generate_explanation=True,
             reason="clarification_followup_resolved",
             used_clarification_context=True,
+            concise_explanation_only=True,
         )
 
     # 3. Referências dêiticas sem seção explícita ("essa seção", "essa exigência", "esses dois").
@@ -598,6 +695,7 @@ def classify_conversational_intent(
                 generate_explanation=wants_exp,
                 reason="deictic_followup_resolved",
                 used_deictic_context=True,
+                concise_explanation_only=wants_exp,
             )
         return ConversationalDecision(
             intent=ConversationIntent.NEEDS_CLARIFICATION,

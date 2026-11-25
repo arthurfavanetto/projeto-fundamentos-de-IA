@@ -119,6 +119,7 @@ def build_telegram_router(
             embedding_max_input_tokens=settings.gemini.embedding_max_input_tokens,
             timeout_seconds=settings.gemini.timeout_seconds,
             max_retries=settings.gemini.max_retries,
+            generation_max_retries=settings.gemini.generation_max_retries,
             retry_min_wait_seconds=settings.gemini.retry_min_wait_seconds,
             retry_max_wait_seconds=settings.gemini.retry_max_wait_seconds,
             default_temperature=settings.gemini.temperature,

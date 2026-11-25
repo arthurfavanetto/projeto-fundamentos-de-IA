@@ -101,6 +101,7 @@ class GeminiConfig(BaseModel):
 
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     max_retries: int = Field(default=3, ge=0, le=10)
+    generation_max_retries: int = Field(default=0, ge=0, le=3)
     retry_min_wait_seconds: float = Field(default=0.5, ge=0.0, le=30.0)
     retry_max_wait_seconds: float = Field(default=8.0, ge=0.0, le=120.0)
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)

@@ -448,6 +448,98 @@ class TelegramCommandRouter:
         self._record_validated_refs(user_id, answer)
         return answer
 
+    def _handle_out_of_catalog_ranking(self) -> str:
+        """Resposta honesta de limitação para rankings/panoramas multi-RBAC fora do catálogo."""
+        docs = self._catalog_service.search_documents()
+        index_report = self._indexing_service.get_index_status()
+        indexed_ids = {v.document_id for v in index_report.version_summaries if v.is_indexed}
+
+        lines = [
+            "Não consigo ranquear nem listar todos os RBACs mais utilizados no setor "
+            "aeronáutico: respondo exclusivamente com base nos regulamentos oficiais da ANAC "
+            "aprovados e indexados nesta base local.",
+            "",
+            "Documentos disponíveis nesta base no momento:",
+        ]
+        if not docs:
+            lines.append("- Nenhum documento regulatório aprovado está disponível no momento.")
+        else:
+            for doc in docs:
+                status_tag = "indexado" if doc.document_id in indexed_ids else "não indexado"
+                lines.append(
+                    f"- {doc.authority} {doc.document_type.value} {doc.regulation_number} "
+                    f"(Emenda {doc.amendment_number} | vigência: {doc.version_status.value}) — "
+                    f"{doc.document_title} [{status_tag}]"
+                )
+        lines.extend(
+            [
+                "",
+                "Se a sua dúvida envolver um regulamento listado acima, informe a seção "
+                "(ex.: /rbac 43.10(a)(1)) ou descreva a atividade que deseja consultar.",
+            ]
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_concise_explained_answer(
+        answer: StructuredNormativeAnswer,
+        *,
+        deictic_followup: bool,
+    ) -> str:
+        """Renderiza explicação curta + referências sem despejar transcrições integrais."""
+        ref_lines = (
+            "\n".join(f"- {ref}" for ref in answer.references)
+            if answer.references
+            else "- Nenhuma referência normativa validada disponível."
+        )
+        first_section = (
+            f"{answer.evidences[0].section_number}"
+            f"{answer.evidences[0].paragraph_number}"
+            f"{answer.evidences[0].item_number}"
+            if answer.evidences and answer.evidences[0].section_number
+            else "43.10"
+        )
+        sections: list[str] = []
+        if answer.used_fallback_without_llm:
+            if deictic_followup:
+                info_msg = (
+                    "A explicação por IA está temporariamente indisponível no momento. "
+                    "A transcrição literal oficial já foi exibida na consulta anterior; "
+                    f"se precisar vê-la novamente, envie /rbac {first_section}."
+                )
+            else:
+                info_msg = (
+                    "A explicação por IA está temporariamente indisponível no momento, mas "
+                    "localizei referências aprovadas compatíveis abaixo. Para ler a transcrição "
+                    f"literal oficial (funciona mesmo sem IA), envie /rbac {first_section}."
+                )
+            sections.append(f"=== INFORMAÇÃO ===\n{info_msg}")
+        else:
+            notice = (
+                "[Nota: explicação em linguagem natural baseada exclusivamente nas evidências "
+                "aprovadas referenciadas abaixo — não constitui transcrição oficial da norma.]"
+            )
+            sections.append(
+                f"=== EXPLICAÇÃO (GERADA POR IA) ===\n{notice}\n\n{answer.explanation}"
+            )
+
+        sections.append(f"=== REFERÊNCIA ===\n{ref_lines}")
+
+        obs_list = list(answer.observations)
+        if deictic_followup:
+            obs_list.append(
+                "Transcrição literal omitida para evitar repetição do trecho já apresentado. "
+                f"Para consultá-la novamente na íntegra, envie /rbac {first_section}."
+            )
+        else:
+            obs_list.append(
+                "Para receber a transcrição literal oficial completa de qualquer seção listada, "
+                f"envie /rbac {first_section} ou peça \"Transcreva {first_section}\"."
+            )
+        obs_lines = "\n".join(f"- {obs}" for obs in dict.fromkeys(obs_list))
+        sections.append(f"=== OBSERVAÇÃO ===\n{obs_lines}")
+        return "\n\n".join(sections)
+
     def _handle_free_text(
         self, text: str, *, user_id: int, actor_id: str, role: OperatorRole
     ) -> str | StructuredNormativeAnswer:
@@ -459,6 +551,18 @@ class TelegramCommandRouter:
             last_normative_refs=last_refs,
         )
 
+        if decision.intent == ConversationIntent.OUT_OF_CATALOG:
+            if pending is not None:
+                self._conversation_store.clear_pending_clarification(user_id)
+            self._record_audit(
+                action="telegram_conversational_guidance",
+                status="out_of_catalog_refused",
+                actor_id=actor_id,
+                role=role.value,
+                details={"reason": decision.reason},
+            )
+            return self._handle_out_of_catalog_ranking()
+
         if decision.intent == ConversationIntent.NEEDS_CLARIFICATION:
             if decision.expects_clarification_followup:
                 _, reg_hint = extract_regulation_hint(text)
@@ -468,6 +572,7 @@ class TelegramCommandRouter:
                     original_question=text,
                     regulation_hint=reg_hint,
                     amendment_hint=amd_hint,
+                    selected_topic=decision.selected_topic,
                 )
             self._record_audit(
                 action="telegram_conversational_guidance",
@@ -484,14 +589,21 @@ class TelegramCommandRouter:
         if pending is not None:
             self._conversation_store.clear_pending_clarification(user_id)
 
+        top_k_override = 2 if decision.used_clarification_context else None
         answer = self._chat_service.ask(
             question=decision.effective_query,
             filters=self._default_search_filter(),
+            top_k=top_k_override,
             generate_explanation=decision.generate_explanation,
             actor_id=actor_id,
             actor_role=role.value,
         )
         self._record_validated_refs(user_id, answer)
+        if decision.concise_explanation_only and answer.found:
+            return self._format_concise_explained_answer(
+                answer,
+                deictic_followup=decision.used_deictic_context,
+            )
         return answer
 
     def _dispatch_sync(

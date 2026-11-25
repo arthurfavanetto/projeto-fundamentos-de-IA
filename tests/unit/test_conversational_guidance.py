@@ -31,7 +31,10 @@ from rbac_assistant.application.services.validation_service import ValidationSer
 from rbac_assistant.application.use_cases.check_system_status import CheckSystemStatusUseCase
 from rbac_assistant.domain.entities.document_version import DocumentVersion, ExtractionRun
 from rbac_assistant.domain.entities.normative_unit import ExtractionMethod
-from rbac_assistant.domain.entities.rag import IndexStatusReport
+from rbac_assistant.domain.entities.rag import (
+    IndexStatusReport,
+    IndexVersionSummary,
+)
 from rbac_assistant.domain.entities.regulatory_document import (
     DocumentType,
     RegulatoryDocument,
@@ -279,6 +282,19 @@ class _StubIndexingStatus(IndexingService):
             total_documents=1,
             total_versions=1,
             indexed_versions_count=1,
+            version_summaries=(
+                IndexVersionSummary(
+                    document_id="anac_rbac_43",
+                    version_id="anac_rbac_43_emd_05_5026d2da",
+                    regulation_number="43",
+                    amendment_number="05",
+                    version_status="current",
+                    sqlite_chunk_count=3,
+                    indexed_chunk_count=3,
+                    is_indexed=True,
+                    is_stale=False,
+                ),
+            ),
         )
 
 
@@ -504,6 +520,17 @@ def test_conversational_intent_classifier_matrix_preserves_literal_explanatory_a
         assert dec.generate_explanation is False
         assert dec.guidance_message is not None
 
+    # Perguntas de ranking / panorama geral multi-RBAC -> OUT_OF_CATALOG (0 embeddings, 0 Gemini)
+    for ranking_q in (
+        "Quais RBACs são mais utilizadas no setor aeronáutico?",
+        "Qual é o RBAC mais importante da ANAC?",
+        "Quais RBACs existem na ANAC?",
+        "Liste todos os RBACs da ANAC",
+    ):
+        dec = classify_conversational_intent(ranking_q)
+        assert dec.intent == ConversationIntent.OUT_OF_CATALOG, ranking_q
+        assert dec.generate_explanation is False
+
     # Perguntas concretas fora da base NÃO são desviadas para orientação — vão ao gate fail-closed
     for oos_q in (
         "Qual a receita de bolo de chocolate?",
@@ -570,8 +597,8 @@ async def test_conversational_guidance_end_to_end_cases_1_to_10(tmp_path: Path) 
         assert EXPLANATION_NOT_OFFICIAL_NOTICE not in joined_lit
         assert llm.calls == []
 
-        # --- CASO 2 & 8: Pergunta explicativa (inclusive dêitica após ler 43.10(a)(1)) ---
-        # Separação estrita entre transcrição oficial e explicação IA com nota explícita!
+        # --- CASO 2 & 8: Follow-up dêitico ("O que significa essa exigência?") ---
+        # Explica com base no SSOT aprovado SEM repetir o texto literal integral já exibido!
         r_deictic = await router.handle_message(
             user_id=5001,
             text="O que significa essa exigência?",
@@ -579,14 +606,43 @@ async def test_conversational_guidance_end_to_end_cases_1_to_10(tmp_path: Path) 
         )
         joined_deictic = "".join(strip_pagination_header(m) for m in r_deictic.messages)
         assert len(llm.calls) == 1
-        assert extract_literal_excerpts_from_text(joined_deictic) == (expected_a1,)
-        assert "=== TEXTO NORMATIVO (LITERAL VALIDADO — SQLite SSOT) ===" in joined_deictic
+        assert "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>" not in joined_deictic
+        assert "Peça com limite de vida significa" not in joined_deictic
         assert "=== EXPLICAÇÃO (GERADA POR IA) ===" in joined_deictic
-        assert EXPLANATION_NOT_OFFICIAL_NOTICE in joined_deictic
         assert "não constitui transcrição oficial" in joined_deictic
-        # A explicação fica estritamente fora das marcas literais
-        exp_section = joined_deictic.split("=== EXPLICAÇÃO (GERADA POR IA) ===", 1)[1]
+        assert "=== REFERÊNCIA ===" in joined_deictic
+        assert "Seção 43.10 / Parágrafo (a) / Item (1)" in joined_deictic
+        assert "/rbac 43.10(a)(1)" in joined_deictic
+
+        # /explicar continua entregando texto oficial literal + explicação separada com nota!
+        r_cmd_exp = await router.handle_message(
+            user_id=5001,
+            text="/explicar 43.10(a)(1)",
+            update_id=55,
+        )
+        joined_cmd_exp = "".join(strip_pagination_header(m) for m in r_cmd_exp.messages)
+        assert len(llm.calls) == 2
+        assert extract_literal_excerpts_from_text(joined_cmd_exp) == (expected_a1,)
+        assert "=== EXPLICAÇÃO (GERADA POR IA) ===" in joined_cmd_exp
+        assert EXPLANATION_NOT_OFFICIAL_NOTICE in joined_cmd_exp
+        exp_section = joined_cmd_exp.split("=== EXPLICAÇÃO (GERADA POR IA) ===", 1)[1]
         assert "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>" not in exp_section
+
+        # --- Ranking / panorama multi-RBAC -> limitação honesta do catálogo (0 emb, 0 Gemini) ---
+        emb_before_rank = len(embedder.query_calls)
+        llm_before_rank = len(llm.calls)
+        r_rank = await router.handle_message(
+            user_id=5001,
+            text="Quais RBACs são mais utilizadas no setor aeronáutico?",
+            update_id=56,
+        )
+        rank_text = "\n".join(r_rank.messages)
+        assert "Não consigo ranquear" in rank_text
+        assert "ANAC RBAC 43" in rank_text
+        assert "43.1-I" not in rank_text
+        assert "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>" not in rank_text
+        assert len(embedder.query_calls) == emb_before_rank
+        assert len(llm.calls) == llm_before_rank
 
         # --- CASO 3: Pergunta vaga -> pede esclarecimento com 0 embeddings e 0 Gemini ---
         embed_before_vague = len(embedder.query_calls)
@@ -610,6 +666,34 @@ async def test_conversational_guidance_end_to_end_cases_1_to_10(tmp_path: Path) 
         assert len(embedder.query_calls) == embed_before_vague
         assert len(llm.calls) == llm_before_vague
 
+        # --- Opções 1 a 5: todas fazem sub-orientação curta SEM busca ampla (0 emb, 0 Gemini) ---
+        for opt_idx, (opt_num, expected_cue) in enumerate(
+            (
+                ("1", "execução de manutenção ou alteração"),
+                ("2", "inspeções"),
+                ("3", "registros e documentação de manutenção"),
+                ("4", "aprovação para retorno ao serviço"),
+                ("5", "componentes com limite de vida"),
+            ),
+            start=60,
+        ):
+            opt_uid = 5200 + opt_idx
+            await router.handle_message(
+                user_id=opt_uid,
+                text="Trabalho com aeronavegabilidade. Qual seção devo consultar?",
+                update_id=opt_idx * 10,
+            )
+            r_opt = await router.handle_message(
+                user_id=opt_uid,
+                text=opt_num,
+                update_id=opt_idx * 10 + 1,
+            )
+            opt_reply = r_opt.messages[0]
+            assert expected_cue in opt_reply.lower()
+            assert "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>" not in opt_reply
+        assert len(embedder.query_calls) == embed_before_vague
+        assert len(llm.calls) == llm_before_vague
+
         # --- CASO 10: Isolamento de contexto entre usuários ---
         # Usuário 5002 está aguardando esclarecimento, mas Usuário 5003 envia "5" ou "essa seção":
         # Usuário 5003 JAMAIS herda o contexto de 5002 ou 5001!
@@ -629,16 +713,51 @@ async def test_conversational_guidance_end_to_end_cases_1_to_10(tmp_path: Path) 
         assert len(embedder.query_calls) == embed_before_u3
         assert len(llm.calls) == llm_before_u3
 
-        # --- CASO 4a: Usuário 5002 responde ao esclarecimento escolhendo opção 5 ---
-        r_followup = await router.handle_message(user_id=5002, text="5", update_id=9)
+        # --- CASO 4a: Usuário 5002 escolhe opção 5 (0 emb/0 LLM) e depois detalha o ponto ---
+        r_opt5_narrow = await router.handle_message(user_id=5002, text="5", update_id=9)
+        assert "componentes com limite de vida" in r_opt5_narrow.messages[0].lower()
+        assert "/rbac 43.10" in r_opt5_narrow.messages[0]
+        assert "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>" not in r_opt5_narrow.messages[0]
+        assert len(embedder.query_calls) == embed_before_u3
+        assert len(llm.calls) == llm_before_u3
+
+        # Agora usuário 5002 fornece detalhe -> explicação curta + referência (sem textão literal!)
+        r_followup = await router.handle_message(
+            user_id=5002,
+            text="Definições de peça com limite de vida",
+            update_id=90,
+        )
         joined_followup = "".join(strip_pagination_header(m) for m in r_followup.messages)
-        assert "43.10" in joined_followup
-        assert "Peça com limite de vida" in joined_followup
         assert "=== EXPLICAÇÃO (GERADA POR IA) ===" in joined_followup
-        assert EXPLANATION_NOT_OFFICIAL_NOTICE in joined_followup
+        assert "não constitui transcrição oficial" in joined_followup
+        assert "=== REFERÊNCIA ===" in joined_followup
+        assert "43.10" in joined_followup
+        assert "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>" not in joined_followup
+        assert "/rbac 43.10" in joined_followup
         assert len(llm.calls) == llm_before_u3 + 1
 
-        # --- CASO 4b: Esclarecimento por resposta em texto livre + opção 6 + expiração TTL ---
+        # --- CASO 4b: Opção 4 com direcionamento específico + opção 6 (sem e com descrição) ---
+        await router.handle_message(
+            user_id=5007,
+            text="Trabalho com aeronavegabilidade. Qual seção devo consultar?",
+            update_id=91,
+        )
+        r_opt4_narrow = await router.handle_message(user_id=5007, text="4", update_id=92)
+        assert "aprovação para retorno ao serviço" in r_opt4_narrow.messages[0].lower()
+        assert "/rbac 43.5" in r_opt4_narrow.messages[0]
+        assert len(llm.calls) == llm_before_u3 + 1
+
+        r_opt6_inline = await router.handle_message(
+            user_id=5007,
+            text="6 - registros de manutenção obrigatórios",
+            update_id=93,
+        )
+        joined_opt6_inline = "".join(strip_pagination_header(m) for m in r_opt6_inline.messages)
+        assert "43.9" in joined_opt6_inline
+        assert "=== EXPLICAÇÃO (GERADA POR IA) ===" in joined_opt6_inline
+        assert "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>" not in joined_opt6_inline
+        assert len(llm.calls) == llm_before_u3 + 2
+
         r_vague2 = await router.handle_message(
             user_id=5004,
             text="Trabalho com aeronavegabilidade. Qual seção devo consultar?",
@@ -653,7 +772,7 @@ async def test_conversational_guidance_end_to_end_cases_1_to_10(tmp_path: Path) 
         assert len(embedder.query_calls) == emb_before_6
         assert len(llm.calls) == llm_before_6
 
-        # Agora usuário 5004 responde com o tema concreto -> recupera 43.9 com explicação
+        # Agora usuário 5004 responde com o tema concreto -> explicação curta + referência 43.9
         r_opt6_detail = await router.handle_message(
             user_id=5004,
             text="Registros e documentação de manutenção",
@@ -662,6 +781,7 @@ async def test_conversational_guidance_end_to_end_cases_1_to_10(tmp_path: Path) 
         joined_opt6 = "".join(strip_pagination_header(m) for m in r_opt6_detail.messages)
         assert "43.9" in joined_opt6
         assert "=== EXPLICAÇÃO (GERADA POR IA) ===" in joined_opt6
+        assert "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>" not in joined_opt6
         assert len(llm.calls) == llm_before_6 + 1
 
         # TTL expirado: se passar mais de 600s, o contexto pendente é descartado!
@@ -726,16 +846,19 @@ async def test_conversational_guidance_end_to_end_cases_1_to_10(tmp_path: Path) 
         assert extract_literal_excerpts_from_text(joined_multi_ok) == (expected_a1, expected_a2)
         assert len(llm.calls) == llm_before_multi
 
-        # Comparação dêitica com 2 referências recém-consultadas pelo mesmo usuário 5006!
+        # Comparação dêitica com 2 referências recém-consultadas pelo mesmo usuário 5006:
+        # explica sem repetir as duas transcrições integrais, preservando ambas as referências!
         r_cmp = await router.handle_message(
             user_id=5006,
             text="Qual é a diferença entre esses dois requisitos?",
             update_id=19,
         )
         joined_cmp = "".join(strip_pagination_header(m) for m in r_cmp.messages)
-        assert extract_literal_excerpts_from_text(joined_cmp) == (expected_a1, expected_a2)
+        assert "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>" not in joined_cmp
         assert "=== EXPLICAÇÃO (GERADA POR IA) ===" in joined_cmp
-        assert EXPLANATION_NOT_OFFICIAL_NOTICE in joined_cmp
+        assert "não constitui transcrição oficial" in joined_cmp
+        assert "Seção 43.10 / Parágrafo (a) / Item (1)" in joined_cmp
+        assert "Seção 43.10 / Parágrafo (a) / Item (2)" in joined_cmp
         assert len(llm.calls) == llm_before_multi + 1
     finally:
         repo.close()
@@ -758,10 +881,109 @@ async def test_unapproved_document_never_reaches_gemini_even_after_clarification
         )
         assert "5." in r_vague.messages[0]
 
-        r_reply = await router.handle_message(user_id=6001, text="5", update_id=102)
+        r_opt5 = await router.handle_message(user_id=6001, text="5", update_id=102)
+        assert "componentes com limite de vida" in r_opt5.messages[0].lower()
+        assert llm.calls == []
+
+        r_reply = await router.handle_message(
+            user_id=6001,
+            text="Definições de peça com limite de vida",
+            update_id=103,
+        )
         reply_text = "\n".join(r_reply.messages)
         assert "Peça com limite de vida" not in reply_text
         assert "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>" not in reply_text
         assert llm.calls == []
+    finally:
+        repo.close()
+
+
+@pytest.mark.unit
+async def test_literal_queries_work_when_gemini_embeddings_and_generation_fail(
+    tmp_path: Path,
+) -> None:
+    """Caso 9 e B: consultas literais funcionam via SSOT/FTS5 com Gemini em 429/503/timeout."""
+    from google.genai import errors as genai_errors
+
+    from rbac_assistant.infrastructure.llm.gemini_client import (
+        GeminiClientAdapter,
+        GeminiEmbeddingAdapter,
+    )
+    from tests.unit.test_gemini_client import _FakeGenAISDKClient
+
+    base_router, _spy_emb, _spy_llm, repo, _store = _build_full_ssot_telegram_stack(tmp_path)
+    expected_a1 = (
+        "(1) Peça com limite de vida significa qualquer peça para a qual esteja especificado "
+        "um limite obrigatório de substituição."
+    )
+
+    try:
+        # Substitui retriever/chat para usar GeminiClientAdapter real sobre SDK falhando em 429/503
+        failing_sdk = _FakeGenAISDKClient()
+        failing_sdk.models.embed_side_effects = [
+            genai_errors.APIError(429, {"error": {"message": "Embedding quota exceeded"}}),
+            TimeoutError("embedding socket timeout"),
+            genai_errors.APIError(503, {"error": {"message": "Embedding unavailable"}}),
+        ]
+        failing_sdk.models.generate_side_effects = [
+            genai_errors.APIError(429, {"error": {"message": "Generation quota exceeded"}}),
+        ]
+        gemini_adapter = GeminiClientAdapter(
+            max_retries=3,
+            generation_max_retries=0,
+            query_embedding_max_retries=0,
+            retry_min_wait_seconds=0.0,
+            retry_max_wait_seconds=0.0,
+            sdk_client=failing_sdk,
+        )
+        emb_adapter = GeminiEmbeddingAdapter(gemini_adapter)
+
+        resilient_retriever = HybridNormativeRetriever(
+            repository=repo,
+            vector_store=_InMemoryVectorStore(),  # type: ignore[arg-type]
+            embedding_port=emb_adapter,  # type: ignore[arg-type]
+            collection_name="test_guidance_col",
+            validation_service=ValidationService(ValidationPolicy.STRICT_ALL_PAGES),
+        )
+        resilient_chat = NormativeChatService(
+            retriever=resilient_retriever,
+            llm=gemini_adapter,
+        )
+        base_router._chat_service = resilient_chat
+
+        # 1. Consulta literal livre com embedding em 429 -> sucesso via estrutural+FTS5, 0 geração!
+        r_lit1 = await base_router.handle_message(
+            user_id=7001,
+            text="Transcreva literalmente o item 43.10(a)(1).",
+            update_id=301,
+        )
+        joined1 = "".join(strip_pagination_header(m) for m in r_lit1.messages)
+        assert extract_literal_excerpts_from_text(joined1) == (expected_a1,)
+        assert len(failing_sdk.models.embed_calls) == 1
+        assert len(failing_sdk.models.generate_calls) == 0
+
+        # 2. /rbac com embedding em TimeoutError -> sucesso exato, 1 tentativa embed, 0 geração!
+        r_lit2 = await base_router.handle_message(
+            user_id=7001,
+            text="/rbac 43.10(a)(1)",
+            update_id=302,
+        )
+        joined2 = "".join(strip_pagination_header(m) for m in r_lit2.messages)
+        assert extract_literal_excerpts_from_text(joined2) == (expected_a1,)
+        assert len(failing_sdk.models.embed_calls) == 2
+        assert len(failing_sdk.models.generate_calls) == 0
+
+        # 3. Follow-up dêitico com geração em 429 -> exatamente 1 tentativa, sem repetir literal!
+        r_deictic_429 = await base_router.handle_message(
+            user_id=7001,
+            text="O que significa essa exigência?",
+            update_id=303,
+        )
+        deictic_429_text = "\n".join(r_deictic_429.messages)
+        assert len(failing_sdk.models.embed_calls) == 3
+        assert len(failing_sdk.models.generate_calls) == 1
+        assert "temporariamente indisponível" in deictic_429_text.lower()
+        assert "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>" not in deictic_429_text
+        assert "43.10" in deictic_429_text
     finally:
         repo.close()
