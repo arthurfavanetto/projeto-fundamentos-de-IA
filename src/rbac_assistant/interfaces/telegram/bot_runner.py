@@ -341,6 +341,7 @@ class TelegramBotRunner:
         for cmd in (
             "start",
             "help",
+            "ajuda",
             "id",
             "status",
             "rbac",

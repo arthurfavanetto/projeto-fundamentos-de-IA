@@ -16,7 +16,10 @@ from __future__ import annotations
 import re
 
 from rbac_assistant.domain.entities.rag import StructuredNormativeAnswer
-from rbac_assistant.rag.generation.response_formatter import render_structured_answer_text
+from rbac_assistant.rag.generation.response_formatter import (
+    EXPLANATION_NOT_OFFICIAL_NOTICE,
+    render_structured_answer_text,
+)
 from rbac_assistant.security.secret_redactor import redact_text
 
 _PAGINATION_HEADER_RE = re.compile(r"^\[Parte \d+/\d+\]\n")
@@ -199,6 +202,15 @@ class MessageSplitter:
         safe_explanation = sanitize_telegram_text(answer.explanation)
         safe_references = tuple(sanitize_telegram_text(ref) for ref in answer.references)
         safe_observations = tuple(sanitize_telegram_text(obs) for obs in answer.observations)
+        explanation_notice = (
+            EXPLANATION_NOT_OFFICIAL_NOTICE
+            if (
+                answer.found
+                and not answer.used_fallback_without_llm
+                and answer.generation_model is not None
+            )
+            else None
+        )
         assembled = render_structured_answer_text(
             normative_text=answer.normative_text,
             preliminary_excerpt=None,
@@ -208,5 +220,6 @@ class MessageSplitter:
             structured_tables_text=answer.structured_tables_text,
             include_explanation_block=not is_literal_only_no_llm,
             explanation_heading="=== EXPLICAÇÃO (GERADA POR IA) ===",
+            explanation_notice=explanation_notice,
         )
         return self._split_raw(assembled)

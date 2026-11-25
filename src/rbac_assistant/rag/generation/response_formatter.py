@@ -26,6 +26,10 @@ _TRUST_LABELS: dict[EvidenceTrustLevel, str] = {
 EXTERNAL_EXCERPT_SEPARATOR = "\n\n[SEPARADOR EXTERNO ENTRE TRECHOS NORMATIVOS]\n\n"
 LITERAL_START_MARKER = "<<<INÍCIO_TRANSCRIÇÃO_LITERAL>>>"
 LITERAL_END_MARKER = "<<<FIM_TRANSCRIÇÃO_LITERAL>>>"
+EXPLANATION_NOT_OFFICIAL_NOTICE = (
+    "[Nota: explicação em linguagem natural baseada exclusivamente nas evidências "
+    "aprovadas acima — não constitui transcrição oficial da norma.]"
+)
 _LITERAL_EXTRACT_RE = re.compile(
     re.escape(LITERAL_START_MARKER) + r"\n(.*?)\n" + re.escape(LITERAL_END_MARKER),
     re.DOTALL,
@@ -69,6 +73,7 @@ def render_structured_answer_text(
     structured_tables_text: str | None = None,
     include_explanation_block: bool = True,
     explanation_heading: str = "=== EXPLICAÇÃO (GERADA POR IA) ===",
+    explanation_notice: str | None = None,
 ) -> str:
     """Monta representação textual com blocos separados, sem nunca expor conteúdo preliminar."""
     del preliminary_excerpt  # Excertos preliminares não revisados nunca são exibidos
@@ -92,7 +97,10 @@ def render_structured_answer_text(
         )
 
     if include_explanation_block and explanation:
-        sections.append(f"{explanation_heading}\n{explanation}")
+        if explanation_notice:
+            sections.append(f"{explanation_heading}\n{explanation_notice}\n\n{explanation}")
+        else:
+            sections.append(f"{explanation_heading}\n{explanation}")
 
     if references:
         ref_lines = "\n".join(f"- {ref}" for ref in references)
@@ -197,6 +205,11 @@ class NormativeResponseFormatter:
             if found
             else "=== INFORMAÇÃO / RECUSA FUNDAMENTADA ==="
         )
+        explanation_notice = (
+            EXPLANATION_NOT_OFFICIAL_NOTICE
+            if (found and not used_fallback_without_llm and generation_model is not None)
+            else None
+        )
         formatted_text = render_structured_answer_text(
             normative_text=normative_text,
             preliminary_excerpt=None,
@@ -206,6 +219,7 @@ class NormativeResponseFormatter:
             structured_tables_text=structured_tables_text,
             include_explanation_block=include_explanation_block,
             explanation_heading=explanation_heading,
+            explanation_notice=explanation_notice,
         )
 
         return StructuredNormativeAnswer(

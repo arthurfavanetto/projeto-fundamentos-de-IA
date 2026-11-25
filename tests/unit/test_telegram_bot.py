@@ -308,6 +308,7 @@ async def test_telegram_router_all_commands_and_free_text_for_authorized_users(
         expected_cmds = (
             "/start",
             "/help",
+            "/ajuda",
             "/id",
             "/status",
             "/rbac",
@@ -318,6 +319,13 @@ async def test_telegram_router_all_commands_and_free_text_for_authorized_users(
         )
         for cmd in expected_cmds:
             assert cmd in r_help.messages[0]
+
+        r_ajuda = await router.handle_message(
+            user_id=public_user_id,
+            text="/ajuda",
+            update_id=202,
+        )
+        assert r_ajuda.messages == r_help.messages
 
         # /status público é sanitizado e NÃO expõe diagnósticos administrativos ou infraestrutura
         r_status_user = await router.handle_message(
@@ -577,7 +585,7 @@ async def test_telegram_bot_runner_lifecycle_retries_errors_and_blocks_real_api_
         assert updater.stopped is True
         assert fake_app.stopped is True
         assert fake_app.shutdown_called is True
-        assert len(fake_app.handlers) == 11  # 9 comandos (incl. /id) + desconhecidos + texto livre
+        assert len(fake_app.handlers) == 12  # 10 comandos (incl. /ajuda e /id) + outros + texto
         assert len(fake_app.error_handlers) == 1
 
         # 3. InvalidToken encerra com código 1 sem loop infinito
