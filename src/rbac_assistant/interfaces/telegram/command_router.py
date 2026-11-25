@@ -29,7 +29,17 @@ from rbac_assistant.application.services.catalog_service import CatalogService
 from rbac_assistant.application.services.chat_service import NormativeChatService
 from rbac_assistant.application.services.indexing_service import IndexingService
 from rbac_assistant.application.use_cases.check_system_status import CheckSystemStatusUseCase
-from rbac_assistant.domain.entities.rag import SearchFilter, StructuredNormativeAnswer
+from rbac_assistant.domain.entities.rag import (
+    IndexVersionSummary,
+    SearchFilter,
+    StructuredNormativeAnswer,
+)
+from rbac_assistant.domain.entities.regulatory_document import (
+    DocumentStatus,
+    RegulatoryDocument,
+    VersionStatus,
+)
+from rbac_assistant.domain.entities.regulatory_page import PageValidationStatus
 from rbac_assistant.domain.exceptions import AuditWriteError, DomainError
 from rbac_assistant.domain.ports.audit_port import AuditEvent, AuditPort
 from rbac_assistant.interfaces.telegram.conversational_guidance import (
@@ -63,6 +73,30 @@ SUPPORTED_COMMANDS: tuple[str, ...] = (
 )
 
 _MAX_TRACKED_USER_SEMAPHORES = 2048
+_NON_OFFICIAL_TEST_AUTHORITIES: frozenset[str] = frozenset(
+    {"TEST", "TESTE", "SMOKE", "SYNTH", "DEMO", "MOCK", "FAKE"}
+)
+_NON_OFFICIAL_TEST_ID_PREFIXES: tuple[str, ...] = (
+    "test_",
+    "smoke_",
+    "synth_",
+    "demo_",
+    "mock_",
+    "fake_",
+)
+_APPROVED_PAGE_STATUSES: frozenset[PageValidationStatus] = frozenset(
+    {
+        PageValidationStatus.MANUALLY_APPROVED,
+        PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
+    }
+)
+_EXCLUDED_PUBLIC_VERSION_STATUSES: frozenset[VersionStatus] = frozenset(
+    {
+        VersionStatus.PROPOSED,
+        VersionStatus.REVOKED,
+        VersionStatus.UNKNOWN,
+    }
+)
 
 __all__ = [
     "SUPPORTED_COMMANDS",
@@ -314,31 +348,85 @@ class TelegramCommandRouter:
                 lines.append(f"Erro reportado: {redact_text(status_report.error)}")
         return "\n".join(lines)
 
-    def _handle_documentos(self, role: OperatorRole) -> str:
+    @staticmethod
+    def _is_official_public_document(doc: RegulatoryDocument) -> bool:
+        """Exclui documentos de teste/smoke, rascunhos, arquivados, propostos ou revogados."""
+        if doc.authority.strip().upper() in _NON_OFFICIAL_TEST_AUTHORITIES:
+            return False
+        if doc.document_id.strip().lower().startswith(_NON_OFFICIAL_TEST_ID_PREFIXES):
+            return False
+        title_lower = doc.document_title.lower()
+        if "smoke test" in title_lower or "fictício" in title_lower or "ficticio" in title_lower:
+            return False
+        if doc.document_status != DocumentStatus.ACTIVE:
+            return False
+        return doc.version_status not in _EXCLUDED_PUBLIC_VERSION_STATUSES
+
+    def _is_version_globally_approved(self, *, document_id: str, version_id: str) -> bool:
+        """Confirma aprovação integral das páginas quando há versão persistida no repositório."""
+        repo = getattr(self._catalog_service, "_repository", None)
+        if repo is None:
+            return True
+        versions = self._catalog_service.list_versions(document_id)
+        if not versions:
+            # Fixtures unitários em memória sem tabela de páginas delegam ao gate de indexação.
+            return True
+        if not any(v.version_id == version_id for v in versions):
+            return False
+        pages = repo.get_pages(version_id)
+        if not pages:
+            return False
+        return all(p.validation_status in _APPROVED_PAGE_STATUSES for p in pages)
+
+    def _list_public_approved_indexed_documents(
+        self,
+    ) -> list[tuple[RegulatoryDocument, IndexVersionSummary]]:
+        """Retorna somente regulamentos oficiais aprovados e efetivamente indexados."""
         docs = self._catalog_service.search_documents()
         index_report = self._indexing_service.get_index_status()
-        indexed_by_doc = {
-            v.document_id: v for v in index_report.version_summaries if v.is_indexed
-        }
-        if not docs:
+        indexed_by_doc: dict[str, IndexVersionSummary] = {}
+        excluded_ver_values = {s.value for s in _EXCLUDED_PUBLIC_VERSION_STATUSES}
+        for summary in index_report.version_summaries:
+            if not summary.is_indexed or summary.indexed_chunk_count <= 0:
+                continue
+            if summary.version_status in excluded_ver_values:
+                continue
+            prev = indexed_by_doc.get(summary.document_id)
+            if prev is None or summary.version_status == VersionStatus.CURRENT.value:
+                indexed_by_doc[summary.document_id] = summary
+
+        available: list[tuple[RegulatoryDocument, IndexVersionSummary]] = []
+        for doc in docs:
+            if not self._is_official_public_document(doc):
+                continue
+            idx_summary = indexed_by_doc.get(doc.document_id)
+            if idx_summary is None:
+                continue
+            if not self._is_version_globally_approved(
+                document_id=doc.document_id,
+                version_id=idx_summary.version_id,
+            ):
+                continue
+            available.append((doc, idx_summary))
+        return available
+
+    def _handle_documentos(self, role: OperatorRole) -> str:
+        available_docs = self._list_public_approved_indexed_documents()
+        if not available_docs:
             if role == OperatorRole.ADMIN:
                 return (
-                    "Nenhum documento regulatório está cadastrado no catálogo SQLite no momento.\n"
-                    "Execute a ingestão controlada via `scripts/ingest_regulation.py` no servidor."
+                    "Nenhum documento regulatório oficial aprovado e indexado está disponível "
+                    "no momento.\nExecute a ingestão, aprovação e indexação controlada via CLI "
+                    "administrativo no servidor."
                 )
             return "Nenhum documento regulatório aprovado está disponível na base no momento."
 
         lines = ["=== DOCUMENTOS REGULATÓRIOS DISPONÍVEIS ==="]
-        for doc in docs:
-            idx_summary = indexed_by_doc.get(doc.document_id)
+        for doc, idx_summary in available_docs:
             if role == OperatorRole.ADMIN:
-                idx_label = (
-                    f"indexado ({idx_summary.indexed_chunk_count} chunks)"
-                    if idx_summary is not None
-                    else "não indexado"
-                )
+                idx_label = f"indexado ({idx_summary.indexed_chunk_count} chunks)"
             else:
-                idx_label = "indexado" if idx_summary is not None else "não indexado"
+                idx_label = "indexado"
             lines.append(
                 f"- {doc.authority} {doc.document_type.value} {doc.regulation_number} "
                 f"(Emenda {doc.amendment_number} | vigência: {doc.version_status.value}) — "
@@ -450,9 +538,7 @@ class TelegramCommandRouter:
 
     def _handle_out_of_catalog_ranking(self) -> str:
         """Resposta honesta de limitação para rankings/panoramas multi-RBAC fora do catálogo."""
-        docs = self._catalog_service.search_documents()
-        index_report = self._indexing_service.get_index_status()
-        indexed_ids = {v.document_id for v in index_report.version_summaries if v.is_indexed}
+        available_docs = self._list_public_approved_indexed_documents()
 
         lines = [
             "Não consigo ranquear nem listar todos os RBACs mais utilizados no setor "
@@ -461,15 +547,14 @@ class TelegramCommandRouter:
             "",
             "Documentos disponíveis nesta base no momento:",
         ]
-        if not docs:
+        if not available_docs:
             lines.append("- Nenhum documento regulatório aprovado está disponível no momento.")
         else:
-            for doc in docs:
-                status_tag = "indexado" if doc.document_id in indexed_ids else "não indexado"
+            for doc, _idx_summary in available_docs:
                 lines.append(
                     f"- {doc.authority} {doc.document_type.value} {doc.regulation_number} "
                     f"(Emenda {doc.amendment_number} | vigência: {doc.version_status.value}) — "
-                    f"{doc.document_title} [{status_tag}]"
+                    f"{doc.document_title} [indexado]"
                 )
         lines.extend(
             [

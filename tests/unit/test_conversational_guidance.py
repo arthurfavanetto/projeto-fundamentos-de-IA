@@ -987,3 +987,256 @@ async def test_literal_queries_work_when_gemini_embeddings_and_generation_fail(
         assert "43.10" in deictic_429_text
     finally:
         repo.close()
+
+
+@pytest.mark.unit
+async def test_documentos_and_coverage_hide_rbac999_proposed_unapproved_while_cli_status_keeps_all(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Garante que /documentos e limitação de cobertura exibem só oficiais aprovados e indexados.
+
+    - RBAC 43 Emenda 05 (aprovado e indexado) aparece para o usuário.
+    - TEST RBAC 999 (smoke test, não indexado), documento proposto, documento não aprovado e
+      documento oficial não indexado NÃO aparecem em /documentos nem na limitação de cobertura.
+    - RBAC 999 permanece intacto no SQLite e `scripts/index_document.py --status` continua
+      reportando o estado real completo.
+    """
+    import json
+
+    from scripts import index_document as index_cli
+
+    from rbac_assistant.domain.entities.regulatory_document import DocumentStatus
+
+    router, embedder, llm, repo, _store = _build_full_ssot_telegram_stack(tmp_path)
+    now = datetime.now(UTC)
+
+    try:
+        # 1. Insere exatamente o documento de smoke test TEST RBAC 999 (não indexado) no SQLite
+        smoke_hash = _sha("smoke_test_rbac_999")
+        smoke_ver_id = "smoke_test_rbac_999_emd_00_smoke001"
+        smoke_text = "999.1 Aplicabilidade de manutenção.\n(a) Regra fictícia para smoke test."
+        repo.save_version_ingestion(
+            document=RegulatoryDocument(
+                document_id="smoke_test_rbac_999",
+                authority="TEST",
+                document_type=DocumentType.RBAC,
+                regulation_number="999",
+                document_title="Documento Fictício de Smoke Test SQLite",
+                amendment_number="00",
+                version_status=VersionStatus.CURRENT,
+                file_hash=smoke_hash,
+                imported_at=now,
+            ),
+            version=DocumentVersion(
+                version_id=smoke_ver_id,
+                document_id="smoke_test_rbac_999",
+                amendment_number="00",
+                version_status=VersionStatus.CURRENT,
+                source_hash=smoke_hash,
+                page_count=1,
+                imported_at=now,
+            ),
+            pages=[
+                RegulatoryPage(
+                    page_id=f"{smoke_ver_id}::p0001",
+                    version_id=smoke_ver_id,
+                    pdf_page_number=1,
+                    printed_page_number="1/1",
+                    original_text=smoke_text,
+                    normalized_text=smoke_text,
+                    extraction_method=ExtractionMethod.NATIVE_PDF,
+                    validation_status=PageValidationStatus.PENDING_REVIEW,
+                    content_hash=compute_page_content_hash(smoke_text, ()),
+                )
+            ],
+            units=(),
+            tables=(),
+            extraction_run=ExtractionRun(
+                run_id="run_smoke_999",
+                document_id="smoke_test_rbac_999",
+                version_id=smoke_ver_id,
+                started_at=now,
+                finished_at=now,
+                status="succeeded",
+                extraction_version="2.0.0",
+                source_hash=smoke_hash,
+                pages_extracted=1,
+                units_created=0,
+            ),
+        )
+
+        # 2. Insere também documento oficial PROPOSED e documento oficial PENDING_REVIEW
+        prop_hash = _sha("anac_rbac_145_proposed")
+        prop_ver_id = "anac_rbac_145_emd_09_prop0001"
+        prop_text = "145.1 Aplicabilidade proposta."
+        repo.save_version_ingestion(
+            document=RegulatoryDocument(
+                document_id="anac_rbac_145_prop",
+                authority="ANAC",
+                document_type=DocumentType.RBAC,
+                regulation_number="145",
+                document_title="Organizações de Manutenção (Proposta)",
+                document_status=DocumentStatus.ACTIVE,
+                amendment_number="09",
+                version_status=VersionStatus.PROPOSED,
+                file_hash=prop_hash,
+                imported_at=now,
+            ),
+            version=DocumentVersion(
+                version_id=prop_ver_id,
+                document_id="anac_rbac_145_prop",
+                amendment_number="09",
+                version_status=VersionStatus.PROPOSED,
+                source_hash=prop_hash,
+                page_count=1,
+                imported_at=now,
+            ),
+            pages=[
+                RegulatoryPage(
+                    page_id=f"{prop_ver_id}::p0001",
+                    version_id=prop_ver_id,
+                    pdf_page_number=1,
+                    printed_page_number="1/1",
+                    original_text=prop_text,
+                    normalized_text=prop_text,
+                    extraction_method=ExtractionMethod.NATIVE_PDF,
+                    validation_status=PageValidationStatus.APPROVED_FOR_LITERAL_TRANSCRIPTION,
+                    content_hash=compute_page_content_hash(prop_text, ()),
+                )
+            ],
+            units=(),
+            tables=(),
+            extraction_run=ExtractionRun(
+                run_id="run_prop_145",
+                document_id="anac_rbac_145_prop",
+                version_id=prop_ver_id,
+                started_at=now,
+                finished_at=now,
+                status="succeeded",
+                extraction_version="2.0.0",
+                source_hash=prop_hash,
+                pages_extracted=1,
+                units_created=0,
+            ),
+        )
+
+        unapp_hash = _sha("anac_rbac_91_unapproved")
+        unapp_ver_id = "anac_rbac_91_emd_04_unap0001"
+        unapp_text = "91.1 Requisitos gerais ainda pendentes de aprovação."
+        repo.save_version_ingestion(
+            document=RegulatoryDocument(
+                document_id="anac_rbac_91_pending",
+                authority="ANAC",
+                document_type=DocumentType.RBAC,
+                regulation_number="91",
+                document_title="Requisitos Gerais de Operação",
+                document_status=DocumentStatus.ACTIVE,
+                amendment_number="04",
+                version_status=VersionStatus.CURRENT,
+                file_hash=unapp_hash,
+                imported_at=now,
+            ),
+            version=DocumentVersion(
+                version_id=unapp_ver_id,
+                document_id="anac_rbac_91_pending",
+                amendment_number="04",
+                version_status=VersionStatus.CURRENT,
+                source_hash=unapp_hash,
+                page_count=1,
+                imported_at=now,
+            ),
+            pages=[
+                RegulatoryPage(
+                    page_id=f"{unapp_ver_id}::p0001",
+                    version_id=unapp_ver_id,
+                    pdf_page_number=1,
+                    printed_page_number="1/1",
+                    original_text=unapp_text,
+                    normalized_text=unapp_text,
+                    extraction_method=ExtractionMethod.NATIVE_PDF,
+                    validation_status=PageValidationStatus.PENDING_REVIEW,
+                    content_hash=compute_page_content_hash(unapp_text, ()),
+                )
+            ],
+            units=(),
+            tables=(),
+            extraction_run=ExtractionRun(
+                run_id="run_unapp_91",
+                document_id="anac_rbac_91_pending",
+                version_id=unapp_ver_id,
+                started_at=now,
+                finished_at=now,
+                status="succeeded",
+                extraction_version="2.0.0",
+                source_hash=unapp_hash,
+                pages_extracted=1,
+                units_created=0,
+            ),
+        )
+
+        # Usa IndexingService real para refletir exatamente os registros do SQLite
+        real_indexing = IndexingService(
+            repository=repo,
+            catalog_service=CatalogService(repo),
+            chunker=StructuralNormativeChunker(),
+            vector_store=_InMemoryVectorStore(),  # type: ignore[arg-type]
+            embedding_port=embedder,  # type: ignore[arg-type]
+            default_collection_name="test_guidance_col",
+            validation_service=ValidationService(ValidationPolicy.STRICT_ALL_PAGES),
+        )
+        router._indexing_service = real_indexing
+
+        # 3. /documentos (USER e ADMIN): mostra APENAS RBAC 43 Emenda 05; oculta 999, 145 e 91
+        for uid, upd in ((8001, 401), (1001, 402)):
+            r_docs = await router.handle_message(user_id=uid, text="/documentos", update_id=upd)
+            docs_text = "\n".join(r_docs.messages)
+            assert "ANAC RBAC 43" in docs_text
+            assert "Emenda 05" in docs_text
+            assert "999" not in docs_text
+            assert "TEST" not in docs_text
+            assert "145" not in docs_text
+            assert "RBAC 91" not in docs_text
+            assert "não indexado" not in docs_text
+
+        # 4. Pergunta de ranking/cobertura documental: mostra APENAS RBAC 43, 0 Gemini
+        emb_before = len(embedder.query_calls)
+        llm_before = len(llm.calls)
+        r_rank = await router.handle_message(
+            user_id=8001,
+            text="Quais RBACs são mais utilizadas no setor aeronáutico?",
+            update_id=403,
+        )
+        rank_text = "\n".join(r_rank.messages)
+        assert "ANAC RBAC 43" in rank_text
+        assert "Emenda 05" in rank_text
+        assert "999" not in rank_text
+        assert "TEST" not in rank_text
+        assert "145" not in rank_text
+        assert "RBAC 91" not in rank_text
+        assert "não indexado" not in rank_text
+        assert len(embedder.query_calls) == emb_before
+        assert len(llm.calls) == llm_before
+
+        # 5. RBAC999 permanece intacto no SQLite e `scripts/index_document.py --status` mostra tudo
+        assert repo.get_document("smoke_test_rbac_999") is not None
+        capsys.readouterr()
+        exit_code = index_cli.main(
+            [
+                "--status",
+                "--documents-dir",
+                str(tmp_path),
+                "--collection",
+                "test_guidance_col",
+            ]
+        )
+        assert exit_code == 0
+        cli_status = json.loads(capsys.readouterr().out)
+        cli_versions = {v["document_id"]: v for v in cli_status["versions"]}
+        assert "anac_rbac_43" in cli_versions
+        assert cli_versions["anac_rbac_43"]["is_indexed"] is True
+        assert "smoke_test_rbac_999" in cli_versions
+        assert cli_versions["smoke_test_rbac_999"]["is_indexed"] is False
+        assert smoke_ver_id in cli_status["unindexed_versions"]
+    finally:
+        repo.close()
