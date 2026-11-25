@@ -53,6 +53,7 @@ def _serialize_diagnostics(diag: RetrievalDiagnostics | None) -> dict[str, Any] 
                 "paragraph_number": r.paragraph_number,
                 "item_number": r.item_number,
                 "subitem_number": r.subitem_number,
+                "leaf_number": r.leaf_number,
                 "amendment_number": r.amendment_number,
             }
             for r in diag.resolved_references
@@ -76,6 +77,7 @@ def _serialize_diagnostics(diag: RetrievalDiagnostics | None) -> dict[str, Any] 
         "rrf_candidates": [
             {
                 "chunk_id": r.chunk_id,
+                "target_ref": r.target_ref,
                 "rrf_score": round(r.rrf_score, 6),
                 "rerank_score": (
                     round(r.rerank_score, 6) if r.rerank_score is not None else None
@@ -90,11 +92,14 @@ def _serialize_diagnostics(diag: RetrievalDiagnostics | None) -> dict[str, Any] 
         "evidence_decisions": [
             {
                 "chunk_id": d.chunk_id,
+                "unit_id": d.unit_id,
                 "document_id": d.document_id,
                 "version_id": d.version_id,
                 "regulation_number": d.regulation_number,
                 "amendment_number": d.amendment_number,
                 "section_number": d.section_number,
+                "paragraph_number": d.paragraph_number,
+                "item_number": d.item_number,
                 "pdf_pages": list(d.pdf_pages),
                 "trust_level": d.trust_level,
                 "included": d.included,
@@ -169,8 +174,9 @@ def format_debug_report(answer: StructuredNormativeAnswer) -> str:
         rerank_str = (
             f" rerank={rcand.rerank_score:.4f}" if rcand.rerank_score is not None else ""
         )
+        target_str = f" target={rcand.target_ref}" if rcand.target_ref else ""
         lines.append(
-            f"  chunk={rcand.chunk_id} rrf={rcand.rrf_score:.6f}{rerank_str} "
+            f"  chunk={rcand.chunk_id}{target_str} rrf={rcand.rrf_score:.6f}{rerank_str} "
             f"ranks(est={rcand.structural_rank}, fts={rcand.lexical_rank}, "
             f"vec={rcand.vector_rank}) fontes=[{src_list}]"
         )
@@ -178,10 +184,13 @@ def format_debug_report(answer: StructuredNormativeAnswer) -> str:
     lines.append(f"Decisões de hidratação/revisão ({len(diag.evidence_decisions)}):")
     for dec in diag.evidence_decisions:
         action = "INCLUÍDA" if dec.included else "EXCLUÍDA"
+        unit_str = f" unit={dec.unit_id}" if dec.unit_id else ""
+        granular_str = f"{dec.paragraph_number}{dec.item_number}"
         lines.append(
-            f"  [{action}] chunk={dec.chunk_id} doc={dec.document_id} ver={dec.version_id} "
-            f"reg={dec.regulation_number} emd={dec.amendment_number} sec={dec.section_number} "
-            f"pdf_pages={list(dec.pdf_pages)} trust={dec.trust_level} motivo={dec.reason}"
+            f"  [{action}] chunk={dec.chunk_id}{unit_str} doc={dec.document_id} "
+            f"ver={dec.version_id} reg={dec.regulation_number} emd={dec.amendment_number} "
+            f"sec={dec.section_number}{granular_str} pdf_pages={list(dec.pdf_pages)} "
+            f"trust={dec.trust_level} motivo={dec.reason}"
         )
 
     lines.append(

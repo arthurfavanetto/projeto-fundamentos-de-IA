@@ -54,7 +54,7 @@
           "section_number": "43.9",
           "paragraph_number": "(a)",
           "alinea": "(a)",
-          "normative_unit_id": "eval_rbac_43_v05_u_4_43.9",
+          "normative_unit_id": "eval_rbac_43_v05_u_4_43.9_a",
           "expected_pdf_pages": [4],
           "expected_text_snippets": ["(a) Cada pessoa que executa manutenção deve registrar na caderneta de manutenção"]
         }
@@ -77,7 +77,7 @@
           "paragraph_number": "(a)",
           "item_number": "(1)",
           "subitem_number": "(i)",
-          "normative_unit_id": "eval_rbac_43_v05_u_4_43.9",
+          "normative_unit_id": "eval_rbac_43_v05_u_4_43.9_a_1_i",
           "expected_pdf_pages": [4],
           "expected_text_snippets": ["(a)(1)(i) Data de conclusão do serviço, nome completo, assinatura e número da licença"]
         }
@@ -99,8 +99,8 @@
           "section_number": "43.3",
           "paragraph_number": "(a)",
           "item_number": "(1)",
-          "normative_unit_id": "eval_rbac_43_v05_u_2_43.3",
-          "expected_pdf_pages": [2, 3],
+          "normative_unit_id": "eval_rbac_43_v05_u_2_43.3_a_1",
+          "expected_pdf_pages": [2],
           "expected_text_snippets": ["(a)(1) O mecânico de manutenção aeronáutica habilitado pode executar manutenção"]
         }
       ],

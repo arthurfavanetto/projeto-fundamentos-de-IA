@@ -25,6 +25,7 @@ from rbac_assistant.domain.entities.normative_unit import (
 from rbac_assistant.domain.entities.rag import (
     IndexRegistryEntry,
     NormativeChunk,
+    ResolvedStructuralRef,
     SearchFilter,
 )
 from rbac_assistant.domain.entities.regulatory_document import (
@@ -1711,9 +1712,12 @@ class SqliteDocumentRepository:
         paragraph_number: str | None = None,
         item_number: str | None = None,
         subitem_number: str | None = None,
+        leaf_number: str | None = None,
         filters: SearchFilter | None = None,
         limit: int = 10,
     ) -> list[NormativeChunk]:
+        from rbac_assistant.rag.retrieval.subunit_selector import select_structural_units
+
         clauses, params = self._build_chunk_filter_clauses(filters, alias="nc")
         clauses.append("LOWER(nc.section_number) = LOWER(?)")
         params.append(section_number.strip())
@@ -1721,6 +1725,8 @@ class SqliteDocumentRepository:
         if regulation_number and (not filters or not filters.regulation_number):
             clauses.append("LOWER(nc.regulation_number) = LOWER(?)")
             params.append(regulation_number.strip())
+
+        has_subunit_request = bool(paragraph_number or item_number or subitem_number or leaf_number)
         if paragraph_number:
             clauses.append(
                 "(LOWER(nc.paragraph_number) = LOWER(?) OR nc.paragraph_number = '')"
@@ -1743,21 +1749,52 @@ class SqliteDocumentRepository:
                     nc.chunk_index ASC
                 LIMIT ?;
                 """,
-                [*params, (paragraph_number or "").strip(), max(limit, 10)],
+                [*params, (paragraph_number or "").strip(), max(limit * 4, 20)],
             ).fetchall()
 
         chunks = [self._row_to_chunk(row) for row in rows]
-        if (paragraph_number or item_number or subitem_number) and len(chunks) > 1:
-            composite_marker = "".join(
-                part.lower() for part in (paragraph_number, item_number, subitem_number) if part
-            )
-            chunks.sort(
-                key=lambda c: (
-                    0 if (composite_marker and composite_marker in c.original_text.lower()) else 1,
-                    c.chunk_index,
+        if not chunks or not has_subunit_request:
+            return chunks[:limit]
+
+        # Correspondência permissiva no chunk-raiz serve APENAS como âncora da seção:
+        # antes de retornar qualquer candidato para parágrafo/inciso/alínea/subitem,
+        # valida explicitamente a existência e verificação literal no SSOT (`normative_units`).
+        target_ref = ResolvedStructuralRef(
+            raw_match=section_number.strip(),
+            regulation_number=regulation_number.strip() if regulation_number else None,
+            section_number=section_number.strip(),
+            paragraph_number=paragraph_number.strip() if paragraph_number else None,
+            item_number=item_number.strip() if item_number else None,
+            subitem_number=subitem_number.strip() if subitem_number else None,
+            leaf_number=leaf_number.strip() if leaf_number else None,
+        )
+        selection_cache: dict[tuple[str, str], tuple[bool, tuple[int, ...], str]] = {}
+        verified_chunks: list[tuple[int, int, NormativeChunk]] = []
+
+        for chunk in chunks:
+            cache_key = (chunk.version_id, chunk.section_number.lower())
+            if cache_key not in selection_cache:
+                units = self.get_units_by_section(
+                    version_id=chunk.version_id,
+                    section_number=chunk.section_number,
                 )
+                sel = select_structural_units(units, target_ref)
+                selection_cache[cache_key] = (sel.found, sel.page_numbers, sel.original_text)
+
+            is_found, sel_pages, sel_text = selection_cache[cache_key]
+            if not is_found:
+                continue
+
+            contains_text = 0 if (sel_text and sel_text in chunk.original_text) else 1
+            covers_pages = (
+                0
+                if (sel_pages and any(p in chunk.pdf_pages for p in sel_pages))
+                else 1
             )
-        return chunks[:limit]
+            verified_chunks.append((contains_text, covers_pages, chunk))
+
+        verified_chunks.sort(key=lambda item: (item[0], item[1], item[2].chunk_index))
+        return [item[2] for item in verified_chunks[:limit]]
 
     def _run_fts5_query(
         self,

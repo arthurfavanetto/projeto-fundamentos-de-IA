@@ -141,12 +141,15 @@ class NormativeResponseFormatter:
         literal_excerpts = tuple(ev.original_text for ev in validated)
         normative_text: str | None = None
         if validated:
-            normative_blocks = [
-                f"[IDENTIFICAÇÃO EXTERNA — {ev.document_type} {ev.regulation_number} | "
-                f"Emenda {ev.amendment_number} | Seção {ev.section_number}]\n"
-                f"{LITERAL_START_MARKER}\n{ev.original_text}\n{LITERAL_END_MARKER}"
-                for ev in validated
-            ]
+            normative_blocks: list[str] = []
+            for ev in validated:
+                granular_suffix = f"{ev.paragraph_number}{ev.item_number}"
+                sec_label = f"{ev.section_number}{granular_suffix}"
+                normative_blocks.append(
+                    f"[IDENTIFICAÇÃO EXTERNA — {ev.document_type} {ev.regulation_number} | "
+                    f"Emenda {ev.amendment_number} | Seção {sec_label}]\n"
+                    f"{LITERAL_START_MARKER}\n{ev.original_text}\n{LITERAL_END_MARKER}"
+                )
             normative_text = EXTERNAL_EXCERPT_SEPARATOR.join(normative_blocks)
 
         rendered_tables: list[str] = []

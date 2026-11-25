@@ -14,6 +14,7 @@ Responsabilidades:
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -28,6 +29,7 @@ from rbac_assistant.domain.entities.document_version import DocumentVersion
 from rbac_assistant.domain.entities.normative_unit import (
     NormativeTable,
     StructureStatus,
+    TableOwnershipStatus,
     resolve_section_tables,
 )
 from rbac_assistant.domain.entities.rag import (
@@ -59,6 +61,7 @@ from rbac_assistant.domain.exceptions import (
 )
 from rbac_assistant.domain.ports.document_repository_port import DocumentRepositoryPort
 from rbac_assistant.domain.ports.rag_ports import EmbeddingPort
+from rbac_assistant.domain.ports.validation_port import ParsedUnitRecord
 from rbac_assistant.domain.ports.vector_store_port import (
     MetadataFilterValue,
     VectorStorePort,
@@ -71,8 +74,21 @@ from rbac_assistant.rag.retrieval.section_resolver import (
     normalize_amendment_number,
     resolve_structural_references,
 )
+from rbac_assistant.rag.retrieval.subunit_selector import (
+    SubunitSelectionStatus,
+    select_structural_units,
+)
 
 logger = structlog.get_logger(__name__)
+
+_EXPLICIT_REF_PREFIX_RE = re.compile(
+    r"\b(?:rbac|se[çc][ãa]o|sec\.?|ap[êe]ndice|art\.?|artigo|par[áa]grafo|inciso|item|al[íi]nea)\b",
+    re.IGNORECASE,
+)
+_APPENDIX_ALIAS_SEC_RE = re.compile(
+    r"^(?:ap[êe]ndice\s+[a-z0-9]+|[a-z]\d{1,3}\.\d+)$",
+    re.IGNORECASE,
+)
 
 _DEFAULT_SOURCE_WEIGHTS: Mapping[RetrievalSource, float] = {
     RetrievalSource.EXACT_STRUCTURAL: 2.0,
@@ -84,6 +100,8 @@ _DEFAULT_SOURCE_WEIGHTS: Mapping[RetrievalSource, float] = {
 @dataclass(slots=True)
 class _RrfAccumulator:
     chunk_id: str
+    target_ref: ResolvedStructuralRef | None = None
+    target_key: str = ""
     score: float = 0.0
     sources: list[RetrievalSource] | None = None
     structural_rank: int | None = None
@@ -108,6 +126,9 @@ class _RrfAccumulator:
         if candidate.source == RetrievalSource.EXACT_STRUCTURAL:
             if self.structural_rank is None or candidate.rank < self.structural_rank:
                 self.structural_rank = candidate.rank
+            if candidate.target_ref is not None and self.target_ref is None:
+                self.target_ref = candidate.target_ref
+                self.target_key = candidate.target_ref.target_key
         elif candidate.source == RetrievalSource.LEXICAL_FTS5:
             if self.lexical_rank is None or candidate.rank < self.lexical_rank:
                 self.lexical_rank = candidate.rank
@@ -125,19 +146,53 @@ def fuse_candidates_rrf(
     rrf_k: int = 60,
     source_weights: Mapping[RetrievalSource, float] | None = None,
 ) -> list[_RrfAccumulator]:
-    """Combina candidatos de múltiplas fontes usando Reciprocal Rank Fusion (RRF)."""
+    """Combina candidatos de múltiplas fontes via RRF preservando referências granulares.
+
+    Quando um mesmo `chunk_id` (âncora de seção) é atingido por múltiplas referências
+    estruturais distintas (ex.: `43.10(a)(1)` e `43.10(a)(2)`), cada referência mantém
+    seu próprio acumulador. Hits lexicais/vetoriais no mesmo `chunk_id` reforçam o score
+    dos alvos estruturais específicos sem criar um candidato paralelo da seção inteira.
+    """
     weights = source_weights or _DEFAULT_SOURCE_WEIGHTS
-    by_chunk: dict[str, _RrfAccumulator] = {}
+    by_key: dict[tuple[str, str], _RrfAccumulator] = {}
+    structural_keys_by_chunk: dict[str, list[tuple[str, str]]] = defaultdict(list)
+
+    # 1º passo: registra todos os candidatos estruturais com sua chave granular específica
     for cand in candidates:
-        acc = by_chunk.get(cand.chunk_id)
+        if cand.target_ref is None:
+            continue
+        t_key = cand.target_ref.target_key
+        full_key = (cand.chunk_id, t_key)
+        acc = by_key.get(full_key)
+        if acc is None:
+            acc = _RrfAccumulator(
+                chunk_id=cand.chunk_id,
+                target_ref=cand.target_ref,
+                target_key=t_key,
+            )
+            by_key[full_key] = acc
+            structural_keys_by_chunk[cand.chunk_id].append(full_key)
+        acc.add(cand, rrf_k, weights)
+
+    # 2º passo: funde candidatos lexicais/vetoriais (ou estruturais sem target_ref)
+    for cand in candidates:
+        if cand.target_ref is not None:
+            continue
+        existing_structural = structural_keys_by_chunk.get(cand.chunk_id)
+        if existing_structural:
+            for full_key in existing_structural:
+                by_key[full_key].add(cand, rrf_k, weights)
+            continue
+        full_key = (cand.chunk_id, "")
+        acc = by_key.get(full_key)
         if acc is None:
             acc = _RrfAccumulator(chunk_id=cand.chunk_id)
-            by_chunk[cand.chunk_id] = acc
+            by_key[full_key] = acc
         acc.add(cand, rrf_k, weights)
 
     return sorted(
-        by_chunk.values(),
-        key=lambda item: (-item.score, item.chunk_id),
+        by_key.values(),
+        key=lambda item: (-item.score, item.chunk_id, item.target_key),
     )
 
 
@@ -351,6 +406,40 @@ class HybridNormativeRetriever:
         vector_diagnostics: list[VectorHitDiagnostic] = []
         vector_distance_by_chunk: dict[str, float] = {}
         chroma_where_used: dict[str, MetadataFilterValue] | None = None
+        units_cache: dict[tuple[str, str], list[ParsedUnitRecord]] = {}
+        approved_version_regs = self._map_approved_version_regulations(approved_version_ids)
+
+        # Avaliação estrutural determinística no SSOT de TODAS as referências explícitas
+        # (independente do modo estrutural/lexical/vetorial): garante que qualquer referência
+        # ausente, ambígua ou não verificável bloqueie a consulta inteira (zero resposta parcial).
+        resolved_explicit_count, unresolved_explicit_refs = (
+            self._evaluate_explicit_references_against_ssot(
+                resolved_refs=resolved_refs,
+                approved_version_ids=approved_version_ids,
+                approved_version_regs=approved_version_regs,
+                units_cache=units_cache,
+            )
+        )
+        for u_ref, u_status, u_reason in unresolved_explicit_refs:
+            if u_status == SubunitSelectionStatus.NOT_FOUND:
+                warnings.append(
+                    f"UNIDADE NORMATIVA NÃO ENCONTRADA ({u_ref.canonical_label}): {u_reason}"
+                )
+            elif not u_ref.has_subunit_target and "Unidade-raiz" in u_reason:
+                warnings.append(
+                    f"UNIDADE-RAIZ AUSENTE NO SSOT ({u_ref.canonical_label}): {u_reason}"
+                )
+            else:
+                warnings.append(
+                    f"GRANULARIDADE NORMATIVA BLOQUEADA ({u_ref.canonical_label}): {u_reason}"
+                )
+        if unresolved_explicit_refs and resolved_explicit_count > 0:
+            missing_desc = ", ".join(r.canonical_label for r, _, _ in unresolved_explicit_refs)
+            warnings.append(
+                "CONSULTA PARCIAL BLOQUEADA (FAIL-CLOSED): A consulta solicitou múltiplas "
+                f"referências estruturais explícitas, mas [{missing_desc}] não pôde(puderam) "
+                "ser validada(s) no SSOT. Nenhuma transcrição parcial será apresentada."
+            )
 
         # 1. Busca estrutural determinística exata restrita a versões globalmente aprovadas
         structural_hits = 0
@@ -364,10 +453,32 @@ class HybridNormativeRetriever:
                     paragraph_number=ref.paragraph_number,
                     item_number=ref.item_number,
                     subitem_number=ref.subitem_number,
+                    leaf_number=ref.leaf_number,
                     filters=effective_filters,
                     limit=limit_final,
                 )
-                for rank, chunk in enumerate(matched_chunks, start=1):
+
+                # Defesa em profundidade: mesmo que o repositório retorne um chunk-raiz como
+                # âncora, valida explicitamente no SSOT (`normative_units`) antes de aceitar.
+                verified_anchor_chunks: list[NormativeChunk] = []
+                seen_ver_sec_for_ref: set[tuple[str, str]] = set()
+                for chunk in matched_chunks:
+                    ver_sec_key = (chunk.version_id, chunk.section_number.lower())
+                    if ver_sec_key in seen_ver_sec_for_ref and ref.has_subunit_target:
+                        continue
+                    sec_units = self._get_section_units_cached(
+                        version_id=chunk.version_id,
+                        section_number=chunk.section_number,
+                        units_cache=units_cache,
+                    )
+                    sel = select_structural_units(sec_units, ref)
+                    if not sel.found:
+                        continue
+                    if ref.has_subunit_target:
+                        seen_ver_sec_for_ref.add(ver_sec_key)
+                    verified_anchor_chunks.append(chunk)
+
+                for rank, chunk in enumerate(verified_anchor_chunks, start=1):
                     structural_hits += 1
                     structural_hit_ids.append(chunk.chunk_id)
                     candidates.append(
@@ -376,6 +487,7 @@ class HybridNormativeRetriever:
                             source=RetrievalSource.EXACT_STRUCTURAL,
                             rank=rank,
                             raw_score=1.0 / rank,
+                            target_ref=ref,
                         )
                     )
 
@@ -486,6 +598,27 @@ class HybridNormativeRetriever:
                 all_pages_cache=all_pages_cache,
             )
             warnings.extend(ambiguity_warnings)
+            blocked_subunit_empty = self._build_blocked_subunit_evidences(
+                unresolved_subunit_refs=unresolved_explicit_refs,
+                chunks_by_id={},
+            )
+            empty_decisions = tuple(
+                EvidenceDecisionDiagnostic(
+                    chunk_id=f"unresolved::{u_ref.canonical_label}",
+                    document_id="",
+                    version_id="",
+                    regulation_number=u_ref.regulation_number or "",
+                    amendment_number=u_ref.amendment_number or "",
+                    section_number=u_ref.section_number or "",
+                    pdf_pages=(),
+                    trust_level=EvidenceTrustLevel.BLOCKED_UNVERIFIED.value,
+                    included=False,
+                    reason=f"excluded:explicit_ref_{u_status.value}({u_ref.canonical_label})",
+                    paragraph_number=u_ref.paragraph_number or "",
+                    item_number=f"{u_ref.item_number or ''}{u_ref.subitem_number or ''}",
+                )
+                for u_ref, u_status, _ in unresolved_explicit_refs
+            )
             diagnostics = RetrievalDiagnostics(
                 query=clean_query,
                 effective_filters=self._serialize_filters(effective_filters),
@@ -495,7 +628,7 @@ class HybridNormativeRetriever:
                 lexical_hits=tuple(lexical_diagnostics),
                 vector_hits=tuple(vector_diagnostics),
                 rrf_candidates=(),
-                evidence_decisions=(),
+                evidence_decisions=empty_decisions,
                 max_vector_distance=self._max_vector_distance,
                 version_ambiguity_detected=bool(ambiguity_warnings),
                 reranker_enabled=self._enable_reranker,
@@ -504,15 +637,16 @@ class HybridNormativeRetriever:
             return HybridRetrievalResult(
                 query=clean_query,
                 resolved_references=resolved_refs,
+                blocked_evidences=tuple(blocked_subunit_empty),
                 lexical_hits_count=len(lexical_pairs),
                 vector_hits_count=vector_hits_count,
                 structural_hits_count=structural_hits,
                 vector_search_available=vector_available,
-                warnings=tuple(warnings),
+                warnings=tuple(dict.fromkeys(warnings)),
                 diagnostics=diagnostics,
             )
 
-        # 4. Fusão e deduplicação por RRF
+        # 4. Fusão e deduplicação por RRF preservando granularidade estrutural
         fused = fuse_candidates_rrf(
             candidates,
             rrf_k=self._rrf_k,
@@ -521,18 +655,170 @@ class HybridNormativeRetriever:
         for acc in fused:
             acc.vector_distance = vector_distance_by_chunk.get(acc.chunk_id)
 
+        explicit_subunit_refs = tuple(r for r in resolved_refs if r.has_subunit_target)
+
+        # Proteção fail-closed integral (single-ref e multi-ref, em TODOS os modos — estrutural,
+        # híbrido, lexical-only e vetorial-only): se QUALQUER referência estrutural explícita da
+        # consulta não puder ser resolvida/verificada no SSOT, bloqueia TODA a solicitação sem
+        # devolver transcrição parcial nem permitir fallback lexical/vetorial para a seção inteira.
+        if unresolved_explicit_refs:
+            approved_version_set = set(approved_version_ids)
+            chunks_by_id_blocked = {
+                c.chunk_id: c
+                for c in self._repository.get_chunks_by_ids(
+                    list(dict.fromkeys(item.chunk_id for item in fused))
+                )
+                if c.version_id in approved_version_set
+            }
+            blocked_decisions: list[EvidenceDecisionDiagnostic] = []
+            for acc in fused:
+                ch = chunks_by_id_blocked.get(acc.chunk_id)
+                if ch is None:
+                    continue
+                is_partial_valid = acc.structural_rank is not None or resolved_explicit_count > 0
+                decision_reason = (
+                    "excluded:partial_multi_ref_blocked"
+                    if is_partial_valid
+                    else "excluded:unresolved_explicit_structural_ref"
+                )
+                blocked_decisions.append(
+                    EvidenceDecisionDiagnostic(
+                        chunk_id=ch.chunk_id,
+                        document_id=ch.document_id,
+                        version_id=ch.version_id,
+                        regulation_number=ch.regulation_number,
+                        amendment_number=ch.amendment_number,
+                        section_number=ch.section_number,
+                        pdf_pages=ch.pdf_pages,
+                        trust_level=EvidenceTrustLevel.BLOCKED_UNVERIFIED.value,
+                        included=False,
+                        reason=decision_reason,
+                        paragraph_number=(
+                            acc.target_ref.paragraph_number or "" if acc.target_ref else ""
+                        ),
+                        item_number=(
+                            f"{acc.target_ref.item_number or ''}"
+                            f"{acc.target_ref.subitem_number or ''}"
+                            if acc.target_ref
+                            else ""
+                        ),
+                    )
+                )
+            for u_ref, u_status, _ in unresolved_explicit_refs:
+                blocked_decisions.append(
+                    EvidenceDecisionDiagnostic(
+                        chunk_id=f"unresolved::{u_ref.canonical_label}",
+                        document_id="",
+                        version_id="",
+                        regulation_number=u_ref.regulation_number or "",
+                        amendment_number=u_ref.amendment_number or "",
+                        section_number=u_ref.section_number or "",
+                        pdf_pages=(),
+                        trust_level=EvidenceTrustLevel.BLOCKED_UNVERIFIED.value,
+                        included=False,
+                        reason=f"excluded:explicit_ref_{u_status.value}({u_ref.canonical_label})",
+                        paragraph_number=u_ref.paragraph_number or "",
+                        item_number=f"{u_ref.item_number or ''}{u_ref.subitem_number or ''}",
+                    )
+                )
+            rrf_diag_blocked = tuple(
+                RrfCandidateDiagnostic(
+                    chunk_id=acc.chunk_id,
+                    rrf_score=acc.score,
+                    structural_rank=acc.structural_rank,
+                    lexical_rank=acc.lexical_rank,
+                    vector_rank=acc.vector_rank,
+                    sources=tuple(acc.sources or ()),
+                    rerank_score=acc.rerank_score,
+                    target_ref=acc.target_ref.canonical_label if acc.target_ref else "",
+                )
+                for acc in fused
+            )
+            blocked_subunit_evidences = self._build_blocked_subunit_evidences(
+                unresolved_subunit_refs=unresolved_explicit_refs,
+                chunks_by_id=chunks_by_id_blocked,
+            )
+            diagnostics = RetrievalDiagnostics(
+                query=clean_query,
+                effective_filters=self._serialize_filters(effective_filters),
+                chroma_where_filter=serialized_chroma_where,
+                resolved_references=resolved_refs,
+                structural_hit_ids=tuple(structural_hit_ids),
+                lexical_hits=tuple(lexical_diagnostics),
+                vector_hits=tuple(vector_diagnostics),
+                rrf_candidates=rrf_diag_blocked,
+                evidence_decisions=tuple(blocked_decisions),
+                max_vector_distance=self._max_vector_distance,
+                version_ambiguity_detected=False,
+                reranker_enabled=self._enable_reranker,
+                adaptive_cutoff_enabled=self._enable_adaptive_cutoff,
+            )
+            return HybridRetrievalResult(
+                query=clean_query,
+                resolved_references=resolved_refs,
+                evidences=(),
+                blocked_evidences=tuple(blocked_subunit_evidences),
+                lexical_hits_count=len(lexical_pairs),
+                vector_hits_count=vector_hits_count,
+                structural_hits_count=structural_hits,
+                vector_search_available=vector_available,
+                warnings=tuple(dict.fromkeys(warnings)),
+                diagnostics=diagnostics,
+            )
+
         if structural_hits > 0:
             structural_only = [acc for acc in fused if acc.structural_rank is not None]
             if structural_only:
                 fused = structural_only
 
-        chunk_ids = [item.chunk_id for item in fused]
+        chunk_ids = list(dict.fromkeys(item.chunk_id for item in fused))
         approved_version_set = set(approved_version_ids)
         chunks_by_id = {
             c.chunk_id: c
             for c in self._repository.get_chunks_by_ids(chunk_ids)
             if c.version_id in approved_version_set
         }
+
+        # Mesmo em modos sem busca estrutural (`lexical_fts5_only` / `vector_only`), se a pergunta
+        # citou uma subunidade explícita da seção recuperada, aplica o escopo granular na hidratação
+        # para impedir expansão indevida para a seção inteira.
+        if not self._enable_structural and explicit_subunit_refs:
+            expanded_fused: list[_RrfAccumulator] = []
+            for acc in fused:
+                ch = chunks_by_id.get(acc.chunk_id)
+                if ch is None:
+                    continue
+                matching_refs = [
+                    r
+                    for r in explicit_subunit_refs
+                    if r.section_number
+                    and r.section_number.strip().lower() == ch.section_number.strip().lower()
+                    and (
+                        not r.regulation_number
+                        or r.regulation_number.strip().lower()
+                        == ch.regulation_number.strip().lower()
+                    )
+                ]
+                if matching_refs:
+                    for mref in matching_refs:
+                        expanded_fused.append(
+                            _RrfAccumulator(
+                                chunk_id=acc.chunk_id,
+                                target_ref=mref,
+                                target_key=mref.target_key,
+                                score=acc.score,
+                                sources=list(acc.sources or ()),
+                                structural_rank=acc.structural_rank,
+                                lexical_rank=acc.lexical_rank,
+                                vector_rank=acc.vector_rank,
+                                bm25_score=acc.bm25_score,
+                                vector_distance=acc.vector_distance,
+                                rerank_score=acc.rerank_score,
+                            )
+                        )
+                else:
+                    expanded_fused.append(acc)
+            fused = expanded_fused
 
         # 4.1. Reranking determinístico leve opcional (sem LLM externo; nunca sobrepõe filtros)
         if self._enable_reranker and len(fused) > 1:
@@ -562,6 +848,7 @@ class HybridNormativeRetriever:
                     -(item.rerank_score if item.rerank_score is not None else item.score),
                     -item.score,
                     item.chunk_id,
+                    item.target_key,
                 )
             )
 
@@ -574,6 +861,7 @@ class HybridNormativeRetriever:
                 vector_rank=acc.vector_rank,
                 sources=tuple(acc.sources or ()),
                 rerank_score=acc.rerank_score,
+                target_ref=acc.target_ref.canonical_label if acc.target_ref else "",
             )
             for acc in fused
         )
@@ -581,7 +869,7 @@ class HybridNormativeRetriever:
         usable_evidences: list[FusedEvidence] = []
         blocked_integrity_evidences: list[FusedEvidence] = []
         evidence_decisions: list[EvidenceDecisionDiagnostic] = []
-        seen_sections: set[tuple[str, str]] = set()
+        seen_targets: set[tuple[str, str, str]] = set()
         # Cache efêmero restrito a uma única chamada `retrieve()` (zero estado persistente).
         docs_cache: dict[str, RegulatoryDocument | None] = {}
         versions_cache: dict[str, DocumentVersion | None] = {}
@@ -591,8 +879,13 @@ class HybridNormativeRetriever:
             hydrated_chunk = chunks_by_id.get(acc.chunk_id)
             if hydrated_chunk is None:
                 continue
-            section_key = (hydrated_chunk.version_id, hydrated_chunk.section_number.lower())
-            if self._reconstruct_full_section and section_key in seen_sections:
+            target_key = acc.target_key
+            dedupe_key = (
+                hydrated_chunk.version_id,
+                hydrated_chunk.section_number.lower(),
+                target_key,
+            )
+            if (self._reconstruct_full_section or target_key) and dedupe_key in seen_targets:
                 evidence_decisions.append(
                     EvidenceDecisionDiagnostic(
                         chunk_id=hydrated_chunk.chunk_id,
@@ -604,7 +897,7 @@ class HybridNormativeRetriever:
                         pdf_pages=hydrated_chunk.pdf_pages,
                         trust_level=hydrated_chunk.validation_status,
                         included=False,
-                        reason="excluded:duplicate_section_reconstructed",
+                        reason="excluded:duplicate_target_reconstructed",
                     )
                 )
                 continue
@@ -612,13 +905,30 @@ class HybridNormativeRetriever:
             evidence = self._hydrate_evidence_from_ssot(
                 chunk=hydrated_chunk,
                 acc=acc,
+                target_ref=acc.target_ref,
                 docs_cache=docs_cache,
                 versions_cache=versions_cache,
                 all_pages_cache=all_pages_cache,
                 all_tables_cache=all_tables_cache,
+                units_cache=units_cache,
                 doc_assessments=doc_assessments,
             )
             if evidence is None:
+                if acc.target_ref is not None and acc.target_ref.has_subunit_target:
+                    evidence_decisions.append(
+                        EvidenceDecisionDiagnostic(
+                            chunk_id=hydrated_chunk.chunk_id,
+                            document_id=hydrated_chunk.document_id,
+                            version_id=hydrated_chunk.version_id,
+                            regulation_number=hydrated_chunk.regulation_number,
+                            amendment_number=hydrated_chunk.amendment_number,
+                            section_number=hydrated_chunk.section_number,
+                            pdf_pages=hydrated_chunk.pdf_pages,
+                            trust_level=EvidenceTrustLevel.BLOCKED_UNVERIFIED.value,
+                            included=False,
+                            reason=f"excluded:subunit_not_found({acc.target_ref.canonical_label})",
+                        )
+                    )
                 continue
             if not self._matches_post_hydration_filters(evidence, effective_filters):
                 evidence_decisions.append(
@@ -633,11 +943,14 @@ class HybridNormativeRetriever:
                         trust_level=evidence.trust_level.value,
                         included=False,
                         reason="excluded:post_hydration_filter",
+                        unit_id=evidence.unit_id,
+                        paragraph_number=evidence.paragraph_number,
+                        item_number=evidence.item_number,
                     )
                 )
                 continue
 
-            seen_sections.add(section_key)
+            seen_targets.add(dedupe_key)
             if (
                 evidence.trust_level == EvidenceTrustLevel.VALIDATED_LITERAL
                 and evidence.literal_transcription_allowed
@@ -655,9 +968,20 @@ class HybridNormativeRetriever:
                         trust_level=evidence.trust_level.value,
                         included=True,
                         reason="included:validated_literal",
+                        unit_id=evidence.unit_id,
+                        paragraph_number=evidence.paragraph_number,
+                        item_number=evidence.item_number,
                     )
                 )
             else:
+                is_missing_root_block = bool(
+                    evidence.warning_message
+                    and "UNIDADE-RAIZ AUSENTE NO SSOT" in evidence.warning_message
+                )
+                is_subunit_block = bool(
+                    evidence.warning_message
+                    and "GRANULARIDADE NORMATIVA BLOQUEADA" in evidence.warning_message
+                )
                 is_ownership_block = bool(
                     evidence.warning_message
                     and "PROPRIEDADE TABULAR BLOQUEADA" in evidence.warning_message
@@ -666,12 +990,21 @@ class HybridNormativeRetriever:
                     evidence.warning_message
                     and "INTEGRIDADE TABULAR BLOQUEADA" in evidence.warning_message
                 )
-                is_table_block = is_ownership_block or is_integrity_block
-                if is_table_block:
+                is_fail_closed_block = (
+                    is_missing_root_block
+                    or is_subunit_block
+                    or is_ownership_block
+                    or is_integrity_block
+                )
+                if is_fail_closed_block:
                     blocked_integrity_evidences.append(evidence)
                     if evidence.warning_message:
                         warnings.append(evidence.warning_message)
-                if is_ownership_block:
+                if is_missing_root_block:
+                    block_reason = "excluded:missing_root_unit"
+                elif is_subunit_block:
+                    block_reason = "excluded:subunit_granularity_blocked"
+                elif is_ownership_block:
                     block_reason = "excluded:table_ownership_blocked"
                 elif is_integrity_block:
                     block_reason = "excluded:table_integrity_failed"
@@ -689,6 +1022,9 @@ class HybridNormativeRetriever:
                         trust_level=evidence.trust_level.value,
                         included=False,
                         reason=block_reason,
+                        unit_id=evidence.unit_id,
+                        paragraph_number=evidence.paragraph_number,
+                        item_number=evidence.item_number,
                     )
                 )
 
@@ -1104,18 +1440,228 @@ class HybridNormativeRetriever:
                 )
         return warnings
 
+    def _get_section_units_cached(
+        self,
+        *,
+        version_id: str,
+        section_number: str,
+        units_cache: dict[tuple[str, str], list[ParsedUnitRecord]] | None,
+    ) -> list[ParsedUnitRecord]:
+        cache_key = (version_id, section_number.strip().lower())
+        if units_cache is not None and cache_key in units_cache:
+            return units_cache[cache_key]
+        units = self._repository.get_units_by_section(
+            version_id=version_id,
+            section_number=section_number,
+        )
+        if units_cache is not None:
+            units_cache[cache_key] = units
+        return units
+
+    def _map_approved_version_regulations(
+        self,
+        approved_version_ids: Sequence[str],
+    ) -> dict[str, str]:
+        """Mapeia cada `version_id` aprovado ao respectivo `regulation_number` normalizado."""
+        docs_by_id = {d.document_id: d for d in self._repository.search_documents()}
+        reg_by_ver: dict[str, str] = {}
+        for vid in approved_version_ids:
+            ver = self._repository.get_version(vid)
+            if ver is None:
+                continue
+            doc = docs_by_id.get(ver.document_id)
+            if doc is not None:
+                reg_by_ver[vid] = doc.regulation_number.strip().lower()
+        return reg_by_ver
+
+    @staticmethod
+    def _group_explicit_references(
+        resolved_refs: Sequence[ResolvedStructuralRef],
+    ) -> list[list[ResolvedStructuralRef]]:
+        """Agrupa aliases gerados da mesma menção de apêndice (`Apêndice A` + `A43.1`)."""
+        groups: list[list[ResolvedStructuralRef]] = []
+        for ref in resolved_refs:
+            if not ref.section_number:
+                continue
+            if (
+                groups
+                and not ref.has_subunit_target
+                and not groups[-1][0].has_subunit_target
+                and groups[-1][0].raw_match.strip().lower() == ref.raw_match.strip().lower()
+                and _APPENDIX_ALIAS_SEC_RE.match(groups[-1][0].section_number or "")
+                and _APPENDIX_ALIAS_SEC_RE.match(ref.section_number)
+            ):
+                groups[-1].append(ref)
+            else:
+                groups.append([ref])
+        return groups
+
+    def _evaluate_explicit_references_against_ssot(
+        self,
+        *,
+        resolved_refs: Sequence[ResolvedStructuralRef],
+        approved_version_ids: Sequence[str],
+        approved_version_regs: Mapping[str, str],
+        units_cache: dict[tuple[str, str], list[ParsedUnitRecord]],
+    ) -> tuple[int, list[tuple[ResolvedStructuralRef, SubunitSelectionStatus, str]]]:
+        """Audita todas as referências estruturais explícitas da consulta diretamente no SSOT.
+
+        Retorna `(quantidade_resolvidas, lista_de_referencias_nao_resolvidas)` sem depender do
+        modo de busca (estrutural, híbrido, lexical-only ou vetorial-only).
+        """
+        if not resolved_refs:
+            return 0, []
+
+        approved_reg_set = set(approved_version_regs.values())
+        groups = self._group_explicit_references(resolved_refs)
+        resolved_count = 0
+        unresolved: list[tuple[ResolvedStructuralRef, SubunitSelectionStatus, str]] = []
+
+        for group in groups:
+            is_mandatory = any(
+                r.has_subunit_target
+                or bool(_EXPLICIT_REF_PREFIX_RE.search(r.raw_match))
+                or bool(
+                    r.regulation_number
+                    and r.regulation_number.strip().lower() in approved_reg_set
+                )
+                for r in group
+            )
+            if not is_mandatory:
+                continue
+
+            group_resolved = False
+            best_ref = group[0]
+            best_status = SubunitSelectionStatus.NOT_FOUND
+            best_reason = (
+                f"Dispositivo '{best_ref.canonical_label}' não encontrado em nenhuma versão "
+                "documental aprovada no escopo da consulta."
+            )
+
+            for ref in group:
+                if not ref.section_number:
+                    continue
+                target_reg = ref.regulation_number.strip().lower() if ref.regulation_number else ""
+                candidate_vids = [
+                    vid
+                    for vid in approved_version_ids
+                    if not target_reg or approved_version_regs.get(vid, "") == target_reg
+                ]
+                for vid in candidate_vids:
+                    sec_units = self._get_section_units_cached(
+                        version_id=vid,
+                        section_number=ref.section_number,
+                        units_cache=units_cache,
+                    )
+                    if not sec_units:
+                        continue
+                    sel = select_structural_units(sec_units, ref)
+                    if sel.found:
+                        group_resolved = True
+                        break
+                    if (
+                        sel.status
+                        in (
+                            SubunitSelectionStatus.AMBIGUOUS,
+                            SubunitSelectionStatus.VERIFICATION_FAILED,
+                        )
+                        or best_status == SubunitSelectionStatus.NOT_FOUND
+                    ):
+                        best_ref = ref
+                        best_status = sel.status
+                        best_reason = sel.reason
+                if group_resolved:
+                    break
+
+            if group_resolved:
+                resolved_count += 1
+            else:
+                unresolved.append((best_ref, best_status, best_reason))
+
+        return resolved_count, unresolved
+
+    @staticmethod
+    def _build_blocked_subunit_evidences(
+        *,
+        unresolved_subunit_refs: Sequence[
+            tuple[ResolvedStructuralRef, SubunitSelectionStatus, str]
+        ],
+        chunks_by_id: Mapping[str, NormativeChunk],
+    ) -> list[FusedEvidence]:
+        """Registra evidências bloqueadas sem texto literal para TODA referência não resolvida."""
+        blocked: list[FusedEvidence] = []
+        for ref, status, reason in unresolved_subunit_refs:
+            sec_lower = (ref.section_number or "").strip().lower()
+            anchor = next(
+                (
+                    c
+                    for c in chunks_by_id.values()
+                    if c.section_number.strip().lower() == sec_lower
+                ),
+                None,
+            )
+            if status == SubunitSelectionStatus.NOT_FOUND:
+                warning_msg = (
+                    f"UNIDADE NORMATIVA NÃO ENCONTRADA ({ref.canonical_label}): {reason}"
+                )
+            elif not ref.has_subunit_target and "Unidade-raiz" in reason:
+                warning_msg = f"UNIDADE-RAIZ AUSENTE NO SSOT ({ref.canonical_label}): {reason}"
+            else:
+                warning_msg = (
+                    f"GRANULARIDADE NORMATIVA BLOQUEADA ({ref.canonical_label}): {reason}"
+                )
+            blocked.append(
+                FusedEvidence(
+                    chunk_id=anchor.chunk_id if anchor else f"blocked::{ref.canonical_label}",
+                    unit_id="",
+                    document_id=anchor.document_id if anchor else "",
+                    version_id=anchor.version_id if anchor else "",
+                    authority=anchor.authority if anchor else "ANAC",
+                    document_type=anchor.document_type if anchor else "RBAC",
+                    regulation_number=(
+                        anchor.regulation_number if anchor else (ref.regulation_number or "")
+                    ),
+                    document_title=anchor.title if anchor else "",
+                    amendment_number=(
+                        anchor.amendment_number if anchor else (ref.amendment_number or "")
+                    ),
+                    version_status=anchor.version_status if anchor else "",
+                    official_url="",
+                    section_number=ref.section_number or "",
+                    subsection_number="",
+                    paragraph_number=ref.paragraph_number or "",
+                    item_number=(
+                        f"{ref.item_number or ''}{ref.subitem_number or ''}{ref.leaf_number or ''}"
+                    ),
+                    title=anchor.title if anchor else "",
+                    original_text="",
+                    pdf_pages=(),
+                    printed_pages=(),
+                    page_statuses=(),
+                    trust_level=EvidenceTrustLevel.BLOCKED_UNVERIFIED,
+                    literal_transcription_allowed=False,
+                    rrf_score=0.0,
+                    matched_sources=(RetrievalSource.EXACT_STRUCTURAL,),
+                    warning_message=warning_msg,
+                    tables=(),
+                )
+            )
+        return blocked
+
     def _hydrate_evidence_from_ssot(
         self,
         *,
         chunk: NormativeChunk,
         acc: _RrfAccumulator,
+        target_ref: ResolvedStructuralRef | None = None,
         docs_cache: dict[str, RegulatoryDocument | None] | None = None,
         versions_cache: dict[str, DocumentVersion | None] | None = None,
         all_pages_cache: dict[str, list[RegulatoryPage]] | None = None,
         all_tables_cache: dict[str, list[NormativeTable]] | None = None,
+        units_cache: dict[tuple[str, str], list[ParsedUnitRecord]] | None = None,
         doc_assessments: dict[str, DocumentVersionValidationAssessment] | None = None,
     ) -> FusedEvidence | None:
-        """Recupera texto literal e valida aprovação global ao vivo diretamente do SQLite (SSOT)."""
+        """Recupera texto literal na granularidade exata e valida aprovação ao vivo no SQLite."""
         if docs_cache is not None and chunk.document_id in docs_cache:
             document = docs_cache[chunk.document_id]
         else:
@@ -1155,30 +1701,132 @@ class HybridNormativeRetriever:
         if not doc_assessment.literal_transcription_allowed:
             return None
 
-        units = self._repository.get_units_by_section(
+        units = self._get_section_units_cached(
             version_id=version.version_id,
             section_number=chunk.section_number,
+            units_cache=units_cache,
         )
         root_units = [u for u in units if u.parent_unit_id is None]
-        primary_unit = root_units[0] if root_units else (units[0] if units else None)
+        primary_unit = root_units[0] if root_units else None
 
-        if self._reconstruct_full_section and primary_unit is not None:
+        is_subunit_query = bool(target_ref is not None and target_ref.has_subunit_target)
+        if is_subunit_query and target_ref is not None:
+            selection = select_structural_units(units, target_ref)
+            if not selection.found:
+                if selection.status in (
+                    SubunitSelectionStatus.AMBIGUOUS,
+                    SubunitSelectionStatus.VERIFICATION_FAILED,
+                ):
+                    return FusedEvidence(
+                        chunk_id=chunk.chunk_id,
+                        unit_id="",
+                        document_id=document.document_id,
+                        version_id=version.version_id,
+                        authority=document.authority,
+                        document_type=document.document_type.value,
+                        regulation_number=document.regulation_number,
+                        document_title=document.document_title,
+                        amendment_number=version.amendment_number,
+                        version_status=version.version_status.value,
+                        official_url=version.official_url or document.official_url,
+                        section_number=chunk.section_number,
+                        subsection_number=chunk.subsection_number,
+                        paragraph_number=target_ref.paragraph_number or "",
+                        item_number=(
+                            f"{target_ref.item_number or ''}{target_ref.subitem_number or ''}"
+                        ),
+                        title=(primary_unit.title if primary_unit else chunk.title),
+                        original_text="",
+                        pdf_pages=(),
+                        printed_pages=(),
+                        page_statuses=(),
+                        trust_level=EvidenceTrustLevel.BLOCKED_UNVERIFIED,
+                        literal_transcription_allowed=False,
+                        rrf_score=acc.score,
+                        matched_sources=tuple(acc.sources or ()),
+                        lexical_rank=acc.lexical_rank,
+                        vector_rank=acc.vector_rank,
+                        structural_rank=acc.structural_rank,
+                        rerank_score=acc.rerank_score,
+                        warning_message=(
+                            f"GRANULARIDADE NORMATIVA BLOQUEADA ({target_ref.canonical_label}): "
+                            f"{selection.reason}"
+                        ),
+                        tables=(),
+                    )
+                return None
+
+            original_text = selection.original_text
+            page_numbers = list(selection.page_numbers)
+            structure_status = selection.structure_status
+            title = (
+                selection.root_unit.title
+                if selection.root_unit is not None and selection.root_unit.title
+                else chunk.title
+            )
+            effective_unit_id = selection.unit_id
+            effective_paragraph = selection.paragraph_number
+            effective_item = selection.item_number
+        elif primary_unit is None:
+            # Fail-closed: na ausência de unidade-raiz (`parent_unit_id=None`) no SSOT,
+            # jamais utilizar a primeira subunidade ou texto parcial como seção completa.
+            return FusedEvidence(
+                chunk_id=chunk.chunk_id,
+                unit_id="",
+                document_id=document.document_id,
+                version_id=version.version_id,
+                authority=document.authority,
+                document_type=document.document_type.value,
+                regulation_number=document.regulation_number,
+                document_title=document.document_title,
+                amendment_number=version.amendment_number,
+                version_status=version.version_status.value,
+                official_url=version.official_url or document.official_url,
+                section_number=chunk.section_number,
+                subsection_number=chunk.subsection_number,
+                paragraph_number="",
+                item_number="",
+                title=chunk.title,
+                original_text="",
+                pdf_pages=(),
+                printed_pages=(),
+                page_statuses=(),
+                trust_level=EvidenceTrustLevel.BLOCKED_UNVERIFIED,
+                literal_transcription_allowed=False,
+                rrf_score=acc.score,
+                matched_sources=tuple(acc.sources or ()),
+                lexical_rank=acc.lexical_rank,
+                vector_rank=acc.vector_rank,
+                structural_rank=acc.structural_rank,
+                rerank_score=acc.rerank_score,
+                warning_message=(
+                    f"UNIDADE-RAIZ AUSENTE NO SSOT ({chunk.section_number}): Não existe "
+                    "unidade-raiz (`parent_unit_id=None`) no SQLite para esta seção; por "
+                    "política fail-closed, nenhuma subunidade parcial é devolvida como "
+                    "seção completa."
+                ),
+                tables=(),
+            )
+        elif self._reconstruct_full_section:
             original_text = primary_unit.original_text
             page_numbers = sorted({p for u in units for p in u.page_numbers})
             structure_status = (
                 StructureStatus.PARSED
-                if all(
-                    u.structure_status == StructureStatus.PARSED
-                    for u in (root_units or [primary_unit])
-                )
+                if all(u.structure_status == StructureStatus.PARSED for u in root_units)
                 else StructureStatus.PENDING_VALIDATION
             )
             title = primary_unit.title or chunk.title
+            effective_unit_id = primary_unit.unit_id
+            effective_paragraph = chunk.paragraph_number
+            effective_item = chunk.item_number
         else:
             original_text = chunk.original_text
             page_numbers = list(chunk.pdf_pages)
-            structure_status = StructureStatus.PARSED
-            title = chunk.title
+            structure_status = primary_unit.structure_status
+            title = primary_unit.title or chunk.title
+            effective_unit_id = primary_unit.unit_id
+            effective_paragraph = chunk.paragraph_number
+            effective_item = chunk.item_number
 
         pages_by_num = {p.pdf_page_number: p for p in all_version_pages}
         pages = [pages_by_num[p_num] for p_num in page_numbers if p_num in pages_by_num]
@@ -1200,12 +1848,21 @@ class HybridNormativeRetriever:
         page_num_set = set(page_numbers)
         raw_page_tables = [t for t in version_tables if t.pdf_page_number in page_num_set]
 
-        target_unit_id = primary_unit.unit_id if primary_unit is not None else chunk.unit_id
+        target_section_unit_id = primary_unit.unit_id if primary_unit is not None else chunk.unit_id
         section_tables, ownership_issues, table_integrity_issues = resolve_section_tables(
             page_tables=raw_page_tables,
-            unit_id=target_unit_id,
+            unit_id=target_section_unit_id,
             section_number=chunk.section_number,
         )
+        if is_subunit_query:
+            effective_tables = tuple(
+                t
+                for t in section_tables
+                if t.unit_id == effective_unit_id
+                or t.ownership_status == TableOwnershipStatus.PAGE_GLOBAL.value
+            )
+        else:
+            effective_tables = section_tables
 
         rejected_pages = tuple(
             p.pdf_page_number
@@ -1241,7 +1898,7 @@ class HybridNormativeRetriever:
             hydrated_tables = ()
         elif assessment.literal_transcription_allowed:
             trust_level = EvidenceTrustLevel.VALIDATED_LITERAL
-            hydrated_tables = section_tables
+            hydrated_tables = effective_tables
         elif rejected_pages:
             trust_level = EvidenceTrustLevel.BLOCKED_REJECTED
             hydrated_tables = ()
@@ -1254,7 +1911,7 @@ class HybridNormativeRetriever:
 
         return FusedEvidence(
             chunk_id=chunk.chunk_id,
-            unit_id=chunk.unit_id,
+            unit_id=effective_unit_id,
             document_id=document.document_id,
             version_id=version.version_id,
             authority=document.authority,
@@ -1266,8 +1923,8 @@ class HybridNormativeRetriever:
             official_url=version.official_url or document.official_url,
             section_number=chunk.section_number,
             subsection_number=chunk.subsection_number,
-            paragraph_number=chunk.paragraph_number,
-            item_number=chunk.item_number,
+            paragraph_number=effective_paragraph,
+            item_number=effective_item,
             title=title,
             original_text=original_text,
             pdf_pages=tuple(page_numbers) or chunk.pdf_pages,

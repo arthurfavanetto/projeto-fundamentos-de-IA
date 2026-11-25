@@ -83,14 +83,27 @@ class GetNormativeSectionUseCase:
                 ),
             )
 
-        # Seleciona a unidade raiz da seção (SECTION ou APPENDIX), se presente
-        root_units = [
+        # Seleciona exclusivamente a unidade-raiz efetiva (`parent_unit_id=None`);
+        # jamais utiliza uma subunidade parcial como substituta da seção completa.
+        all_roots = [u for u in units if u.parent_unit_id is None]
+        typed_roots = [
             u
-            for u in units
-            if u.parent_unit_id is None
-            and u.unit_type in (NormativeUnitType.SECTION, NormativeUnitType.APPENDIX)
+            for u in all_roots
+            if u.unit_type in (NormativeUnitType.SECTION, NormativeUnitType.APPENDIX)
         ]
-        primary = root_units[0] if root_units else units[0]
+        root_units = typed_roots or all_roots
+        if not root_units:
+            return SectionLookupResultDTO(
+                found=False,
+                section=None,
+                auxiliary_unreviewed_available=False,
+                message=(
+                    f"Seção '{section_number}' bloqueada por política fail-closed: "
+                    "unidade-raiz (parent_unit_id=None) ausente no SQLite; não é permitido "
+                    "retornar uma subunidade parcial como se fosse a seção completa."
+                ),
+            )
+        primary = root_units[0]
 
         page_numbers = sorted({p for u in units for p in u.page_numbers})
         pages_by_num = {p.pdf_page_number: p for p in all_version_pages}

@@ -169,6 +169,7 @@ class DocumentRepositoryPort(Protocol):
         paragraph_number: str | None = None,
         item_number: str | None = None,
         subitem_number: str | None = None,
+        leaf_number: str | None = None,
         filters: SearchFilter | None = None,
         limit: int = 10,
     ) -> list[NormativeChunk]:
