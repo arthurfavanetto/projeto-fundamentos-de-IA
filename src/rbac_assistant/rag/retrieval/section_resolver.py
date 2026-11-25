@@ -13,7 +13,8 @@ _RBAC_SECTION_RE = re.compile(
     r"(?P<sec>[A-Z]?(?P=reg)\.\d+[A-Za-z0-9\-]*)\s*"
     r"(?:\((?P<par>[a-z])\))?\s*"
     r"(?:\((?P<item>\d+|[ivx]+)\))?\s*"
-    r"(?:\((?P<subitem>[ivx]+|[A-Z]|\d+)\))?",
+    r"(?:\((?P<subitem>[ivx]+|[A-Z]|\d+)\))?"
+    r"(?:\((?P<leaf>[A-Z])\))?",
     re.IGNORECASE,
 )
 
@@ -22,7 +23,33 @@ _RBAC_DOT_RE = re.compile(
     r"\bRBAC\s*(?:n[º°.]?\s*)?(?P<sec>(?:[A-Za-z](?=\d{2,3}\.))?(?P<reg>\d{1,3})\.\d+[A-Za-z0-9\-]*)"
     r"(?:\((?P<par>[a-z])\))?"
     r"(?:\((?P<item>\d+|[ivx]+)\))?"
-    r"(?:\((?P<subitem>[ivx]+|[A-Z]|\d+)\))?",
+    r"(?:\((?P<subitem>[ivx]+|[A-Z]|\d+)\))?"
+    r"(?:\((?P<leaf>[A-Z])\))?",
+    re.IGNORECASE,
+)
+
+# Ex.: "alínea (i) do inciso (5) do parágrafo (c) da seção 43.10"
+_PT_ALINEA_OF_INCISO_RE = re.compile(
+    r"\bal[íi]nea\s*\((?P<subitem>[ivx]+)\)\s+(?:do|da)\s+(?:inciso|item)\s*\((?P<item>\d+)\)\s+"
+    r"(?:do|da)\s+par[áa]grafo\s*\((?P<par>[a-z])\)\s+(?:da|do)\s+"
+    r"(?:se[çc][ãa]o\s+|RBAC\s*(?:n[º°.]?\s*)?)?"
+    r"(?P<sec>(?:[A-Za-z](?=\d{2,3}\.))?(?P<reg>\d{1,3})\.\d+[A-Za-z0-9\-]*)",
+    re.IGNORECASE,
+)
+
+# Ex.: "inciso (1) do parágrafo (a) da seção 43.10" / "item (1) do parágrafo (a) da seção 43.10"
+_PT_ITEM_OF_PAR_RE = re.compile(
+    r"\b(?:inciso|item)\s*\((?P<item>\d+)\)\s+(?:do|da)\s+par[áa]grafo\s*\((?P<par>[a-z])\)\s+"
+    r"(?:da|do)\s+(?:se[çc][ãa]o\s+|RBAC\s*(?:n[º°.]?\s*)?)?"
+    r"(?P<sec>(?:[A-Za-z](?=\d{2,3}\.))?(?P<reg>\d{1,3})\.\d+[A-Za-z0-9\-]*)",
+    re.IGNORECASE,
+)
+
+# Ex.: "parágrafo (a) da seção 43.10"
+_PT_PAR_OF_SEC_RE = re.compile(
+    r"\bpar[áa]grafo\s*\((?P<par>[a-z])\)\s+(?:da|do)\s+"
+    r"(?:se[çc][ãa]o\s+|RBAC\s*(?:n[º°.]?\s*)?)?"
+    r"(?P<sec>(?:[A-Za-z](?=\d{2,3}\.))?(?P<reg>\d{1,3})\.\d+[A-Za-z0-9\-]*)",
     re.IGNORECASE,
 )
 
@@ -32,7 +59,8 @@ _STANDALONE_SECTION_RE = re.compile(
     r"(?P<sec>(?:[A-Za-z](?=\d{2,3}\.))?(?P<reg>\d{1,3})\.\d+[A-Za-z0-9\-]*)"
     r"(?:\((?P<par>[a-z])\))?"
     r"(?:\((?P<item>\d+|[ivx]+)\))?"
-    r"(?:\((?P<subitem>[ivx]+|[A-Z]|\d+)\))?",
+    r"(?:\((?P<subitem>[ivx]+|[A-Z]|\d+)\))?"
+    r"(?:\((?P<leaf>[A-Z])\))?",
     re.IGNORECASE,
 )
 
@@ -113,7 +141,11 @@ def resolve_structural_references(query: str) -> tuple[ResolvedStructuralRef, ..
     amendment = extract_amendment_hint(query)
     _, hinted_reg = extract_regulation_hint(query)
     refs: list[ResolvedStructuralRef] = []
-    seen: set[tuple[str | None, str | None, str | None, str | None, str | None]] = set()
+    seen: set[tuple[str | None, str | None, str | None, str | None, str | None, str | None]] = set()
+    covered_spans: list[tuple[int, int]] = []
+
+    def _is_covered(span: tuple[int, int]) -> bool:
+        return any(s <= span[0] and span[1] <= e for s, e in covered_spans)
 
     def _add(
         raw: str,
@@ -122,21 +154,27 @@ def resolve_structural_references(query: str) -> tuple[ResolvedStructuralRef, ..
         par: str | None = None,
         item: str | None = None,
         subitem: str | None = None,
+        leaf: str | None = None,
+        span: tuple[int, int] | None = None,
     ) -> None:
         norm_sec = sec.strip() if sec else None
         norm_reg = reg.strip() if reg else None
         norm_par = f"({par.lower()})" if par else None
         norm_item = f"({item.lower()})" if item else None
         norm_subitem = f"({subitem})" if subitem else None
+        norm_leaf = f"({leaf.upper()})" if leaf else None
         key = (
             norm_reg,
             norm_sec.lower() if norm_sec else None,
             norm_par,
             norm_item,
             norm_subitem.lower() if norm_subitem else None,
+            norm_leaf,
         )
         if norm_sec and key not in seen:
             seen.add(key)
+            if span is not None:
+                covered_spans.append(span)
             refs.append(
                 ResolvedStructuralRef(
                     raw_match=raw.strip(),
@@ -146,18 +184,32 @@ def resolve_structural_references(query: str) -> tuple[ResolvedStructuralRef, ..
                     item_number=norm_item,
                     subitem_number=norm_subitem,
                     amendment_number=amendment,
+                    leaf_number=norm_leaf,
                 )
             )
 
-    for pattern in (_RBAC_DOT_RE, _RBAC_SECTION_RE, _STANDALONE_SECTION_RE):
+    for pattern in (
+        _PT_ALINEA_OF_INCISO_RE,
+        _PT_ITEM_OF_PAR_RE,
+        _PT_PAR_OF_SEC_RE,
+        _RBAC_DOT_RE,
+        _RBAC_SECTION_RE,
+        _STANDALONE_SECTION_RE,
+    ):
         for match in pattern.finditer(query):
+            span = match.span()
+            if _is_covered(span):
+                continue
+            groups = match.groupdict()
             _add(
                 match.group(0),
-                match.group("reg"),
-                match.group("sec"),
-                match.group("par"),
-                match.group("item"),
-                match.group("subitem"),
+                groups.get("reg"),
+                groups.get("sec"),
+                groups.get("par"),
+                groups.get("item"),
+                groups.get("subitem"),
+                groups.get("leaf"),
+                span=span,
             )
 
     for match in _APPENDIX_RE.finditer(query):

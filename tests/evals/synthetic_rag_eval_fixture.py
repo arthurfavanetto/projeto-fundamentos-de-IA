@@ -623,12 +623,27 @@ def build_synthetic_eval_environment(
             order_index=2,
             unit_id_override=u43_3_id,
         ),
-        # Unidades filhas hierárquicas (parágrafo/item/subitem) espelhando AnacRbacStructureStrategy
+        # Unidades filhas (parágrafo/inciso/alínea) espelhando AnacRbacStructureStrategy
+        _make_unit(
+            version_id=v43_05.version_id,
+            parent_unit_id=u43_3_id,
+            unit_id_override="eval_rbac_43_v05_u_2_43.3_a",
+            unit_type=NormativeUnitType.PARAGRAPH,
+            section_number="43.3",
+            paragraph_number="(a)",
+            title="Pessoas autorizadas — 43.3(a)",
+            text=(
+                "(a) Exceto como previsto nesta seção, nenhuma pessoa pode executar manutenção em "
+                "aeronave civil sem habilitação."
+            ),
+            page_numbers=(2,),
+            order_index=20,
+        ),
         _make_unit(
             version_id=v43_05.version_id,
             parent_unit_id=u43_3_id,
             unit_id_override="eval_rbac_43_v05_u_2_43.3_a_1",
-            unit_type=NormativeUnitType.ALINEA,
+            unit_type=NormativeUnitType.INCISO,
             section_number="43.3",
             paragraph_number="(a)",
             item_number="(1)",
@@ -639,6 +654,36 @@ def build_synthetic_eval_environment(
             ),
             page_numbers=(2,),
             order_index=21,
+        ),
+        _make_unit(
+            version_id=v43_05.version_id,
+            parent_unit_id=u43_3_id,
+            unit_id_override="eval_rbac_43_v05_u_2_43.3_b",
+            unit_type=NormativeUnitType.PARAGRAPH,
+            section_number="43.3",
+            paragraph_number="(b)",
+            title="Pessoas autorizadas — 43.3(b)",
+            text=(
+                "(b) Uma organização de manutenção certificada pode executar manutenção, "
+                "manutenção preventiva, reconstrução e alteração conforme suas especificações."
+            ),
+            page_numbers=(3,),
+            order_index=22,
+        ),
+        _make_unit(
+            version_id=v43_05.version_id,
+            parent_unit_id=u43_3_id,
+            unit_id_override="eval_rbac_43_v05_u_2_43.3_c",
+            unit_type=NormativeUnitType.PARAGRAPH,
+            section_number="43.3",
+            paragraph_number="(c)",
+            title="Pessoas autorizadas — 43.3(c)",
+            text=(
+                "(c) O titular de licença de piloto privado pode executar manutenção preventiva "
+                "em aeronave de sua propriedade."
+            ),
+            page_numbers=(3,),
+            order_index=23,
         ),
         _make_unit(
             version_id=v43_05.version_id,
@@ -679,18 +724,33 @@ def build_synthetic_eval_environment(
         _make_unit(
             version_id=v43_05.version_id,
             parent_unit_id=u43_9_id,
-            unit_id_override="eval_rbac_43_v05_u_4_43.9_a_1_i",
-            unit_type=NormativeUnitType.SUBITEM,
+            unit_id_override="eval_rbac_43_v05_u_4_43.9_a_1",
+            unit_type=NormativeUnitType.INCISO,
             section_number="43.9",
             paragraph_number="(a)",
             item_number="(1)",
+            title="Registros de manutenção — 43.9(a)(1)",
+            text=(
+                "(a)(1) Descrição detalhada do trabalho executado e dados técnicos aprovados;"
+            ),
+            page_numbers=(4,),
+            order_index=42,
+        ),
+        _make_unit(
+            version_id=v43_05.version_id,
+            parent_unit_id=u43_9_id,
+            unit_id_override="eval_rbac_43_v05_u_4_43.9_a_1_i",
+            unit_type=NormativeUnitType.ALINEA,
+            section_number="43.9",
+            paragraph_number="(a)",
+            item_number="(1)(i)",
             title="Registros de manutenção — 43.9(a)(1)(i)",
             text=(
                 "(a)(1)(i) Data de conclusão do serviço, nome completo, assinatura e número da "
                 "licença ANAC do responsável técnico."
             ),
             page_numbers=(4,),
-            order_index=42,
+            order_index=43,
         ),
         _make_unit(
             version_id=v43_05.version_id,

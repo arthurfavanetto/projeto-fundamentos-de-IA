@@ -162,6 +162,11 @@ class NormativeChatService:
                 has_blocked = True
                 blocked_count = max(len(retrieval.blocked_version_ids), 1)
             elif retrieval.blocked_evidences:
+                has_subunit_block = any(
+                    ev.warning_message
+                    and "GRANULARIDADE NORMATIVA BLOQUEADA" in ev.warning_message
+                    for ev in retrieval.blocked_evidences
+                )
                 has_table_ownership_block = any(
                     ev.warning_message
                     and "PROPRIEDADE TABULAR BLOQUEADA" in ev.warning_message
@@ -172,7 +177,16 @@ class NormativeChatService:
                     and "INTEGRIDADE TABULAR BLOQUEADA" in ev.warning_message
                     for ev in retrieval.blocked_evidences
                 )
-                if has_table_ownership_block:
+                if has_subunit_block:
+                    explanation = (
+                        "Não foi possível transcrever o dispositivo normativo específico "
+                        "solicitado com garantia de fidelidade literal (subunidade ausente, "
+                        "ambígua ou não verificável contra a unidade-raiz aprovada). Por "
+                        "política fail-closed, o assistente não retorna a seção inteira como "
+                        "substituto e não aciona o modelo generativo."
+                    )
+                    outcome = "refused_subunit_fidelity_blocked"
+                elif has_table_ownership_block:
                     explanation = (
                         "Não foi possível apresentar esta seção com garantia de fidelidade "
                         "literal: há tabela na página sem associação proprietária única e "
@@ -201,13 +215,27 @@ class NormativeChatService:
                 has_blocked = True
                 blocked_count = len(retrieval.blocked_evidences)
             else:
-                explanation = (
-                    "Não foram encontradas evidências normativas suficientes na base aprovada "
-                    "e indexada para responder à sua pergunta com segurança. Verifique os filtros "
-                    "aplicados ou confirme se o regulamento desejado já foi integralmente "
-                    "revisado, aprovado e indexado."
+                has_unresolved_subunit = any(
+                    "UNIDADE NORMATIVA NÃO ENCONTRADA" in w
+                    or "GRANULARIDADE NORMATIVA BLOQUEADA" in w
+                    for w in retrieval.warnings
                 )
-                outcome = "refused_no_evidence"
+                if has_unresolved_subunit:
+                    explanation = (
+                        "O dispositivo normativo específico solicitado não foi encontrado "
+                        "(ou não pôde ser verificado literalmente) na versão documental aprovada. "
+                        "Por política de fidelidade literal e abstenção segura, o assistente não "
+                        "retorna a seção inteira como substituto nem aciona o modelo generativo."
+                    )
+                    outcome = "refused_subunit_not_found"
+                else:
+                    explanation = (
+                        "Não foram encontradas evidências normativas suficientes na base aprovada "
+                        "e indexada para responder à sua pergunta com segurança. Verifique os "
+                        "filtros aplicados ou confirme se o regulamento desejado já foi "
+                        "integralmente revisado, aprovado e indexado."
+                    )
+                    outcome = "refused_no_evidence"
                 has_blocked = False
                 blocked_count = 0
 

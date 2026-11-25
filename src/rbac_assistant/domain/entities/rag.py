@@ -100,6 +100,41 @@ class ResolvedStructuralRef:
     item_number: str | None = None
     subitem_number: str | None = None
     amendment_number: str | None = None
+    leaf_number: str | None = None
+
+    @property
+    def has_subunit_target(self) -> bool:
+        """Retorna `True` quando a referência especifica parágrafo, inciso, alínea ou subitem."""
+        return bool(
+            self.paragraph_number or self.item_number or self.subitem_number or self.leaf_number
+        )
+
+    @property
+    def canonical_label(self) -> str:
+        """Formata o identificador estrutural compacto (ex.: `43.10(a)(1)` ou `43.10(c)(5)(i)`)."""
+        parts = [
+            (self.section_number or "").strip(),
+            (self.paragraph_number or "").strip(),
+            (self.item_number or "").strip(),
+            (self.subitem_number or "").strip(),
+            (self.leaf_number or "").strip(),
+        ]
+        return "".join(p for p in parts if p)
+
+    @property
+    def target_key(self) -> str:
+        """Chave determinística da granularidade alvo para fusão RRF e deduplicação."""
+        if not self.has_subunit_target:
+            return ""
+        return "|".join(
+            (
+                (self.section_number or "").strip().lower(),
+                (self.paragraph_number or "").strip().lower(),
+                (self.item_number or "").strip().lower(),
+                (self.subitem_number or "").strip().lower(),
+                (self.leaf_number or "").strip(),
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +145,7 @@ class RetrievalCandidate:
     source: RetrievalSource
     rank: int
     raw_score: float
+    target_ref: ResolvedStructuralRef | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +171,7 @@ class VectorHitDiagnostic:
 
 @dataclass(frozen=True, slots=True)
 class RrfCandidateDiagnostic:
-    """Diagnóstico de pontuação RRF consolidada por chunk."""
+    """Diagnóstico de pontuação RRF consolidada por chunk e referência estrutural alvo."""
 
     chunk_id: str
     rrf_score: float
@@ -144,6 +180,7 @@ class RrfCandidateDiagnostic:
     vector_rank: int | None
     sources: tuple[RetrievalSource, ...]
     rerank_score: float | None = None
+    target_ref: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +197,9 @@ class EvidenceDecisionDiagnostic:
     trust_level: str
     included: bool
     reason: str
+    unit_id: str = ""
+    paragraph_number: str = ""
+    item_number: str = ""
 
 
 @dataclass(frozen=True, slots=True)

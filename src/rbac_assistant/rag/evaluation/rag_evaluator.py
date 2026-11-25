@@ -281,13 +281,19 @@ def evidence_matches_target(evidence: FusedEvidence, target: ExpectedTarget) -> 
 
     norm_text = _collapse_ws(evidence.original_text)
     if target.paragraph_number or target.alinea or target.item_number or target.subitem_number:
-        par = target.paragraph_number or target.alinea
-        composite = "".join(
+        par = (target.paragraph_number or target.alinea).strip().lower()
+        item_comp = "".join(
             part.strip().lower()
-            for part in (par, target.item_number, target.subitem_number)
+            for part in (target.item_number, target.subitem_number)
             if part and part.strip()
         )
-        if composite and composite not in norm_text:
+        ev_par = evidence.paragraph_number.strip().lower()
+        ev_item = evidence.item_number.strip().lower()
+        structured_match = bool(
+            (not par or ev_par == par) and (not item_comp or ev_item == item_comp)
+        )
+        composite = f"{par}{item_comp}"
+        if not structured_match and composite and composite not in norm_text:
             return False, f"missing_subitem_marker({composite})"
 
     for snippet in target.expected_text_snippets:
